@@ -1,0 +1,15 @@
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Nothing is built or installed in Phase 1 - these are here for later phases
+node_modules/
+dist/
+.env
+.env.local

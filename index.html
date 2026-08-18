@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Employee Management &amp; Onboarding</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="container header-inner">
+      <a class="brand" href="#/employees">Breville &middot; Employee Onboarding</a>
+      <span class="env-tag">Phase 1 &mdash; mock data</span>
+    </div>
+  </header>
+
+  <main class="container" id="app"></main>
+
+  <footer class="app-footer">
+    <div class="container">Made by Abhishek</div>
+  </footer>
+
+  <!-- Classic scripts (not ES modules) so index.html works when opened directly
+       from the filesystem - browsers block module imports over file://. -->
+  <script src="js/data.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
