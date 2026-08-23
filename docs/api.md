@@ -20,8 +20,8 @@ Don't put real employee data in it.
 
 ## Employee object
 
-The wire format is deliberately identical to the frontend model in `js/data.js`, so Phase 3 only
-has to change the bodies of the functions in `js/store.js`.
+The wire format is deliberately identical to the model the frontend renders, which is why Phase 3
+only had to change the bodies of the functions in `js/store.js`.
 
 ```json
 {

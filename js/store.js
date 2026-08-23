@@ -1,40 +1,89 @@
 /**
- * Data access layer - the seam between the UI and wherever employees live.
+ * Data access layer - the seam between the UI and where employees actually live.
  *
- * Today that's an in-memory array seeded from data.js. In Phase 3 the bodies of
- * these functions become fetch() calls to API Gateway; every function is already
- * async and every caller already awaits, so nothing outside this file changes.
+ * That is now DynamoDB, reached through API Gateway. Every function here is a
+ * fetch(); there is no local copy of anything. If the API is unreachable the UI
+ * shows an error, because there is nothing else it could honestly show.
  *
- * Callers get deep copies, never live references, so the only way to change
- * stored data is through the mutator functions here - same contract a real API
- * would give us.
+ * The contract did not change when the bodies did - the callers in app.js were
+ * already awaiting promises and already got copies rather than live references.
+ * What changed is that calls are now slow and can fail, which is what the
+ * rejection handling in app.js is for.
  */
 window.App = window.App || {};
 
 (function (App) {
   'use strict';
 
-  var employees = App.seedEmployees();
-  var nextIdSeq = employees.length + 1;
+  /**
+   * The Error every rejected request carries. Callers branch on `status`, never
+   * on the message text:
+   *
+   *   message  string  safe to show a human
+   *   status   number  HTTP status, or 0 when we never reached the server
+   *   code     string  'ValidationError' | 'NotFound' | ... | null
+   *   fields   object  { email: 'Enter a valid email address.' } | null
+   *   cause    Error   the underlying TypeError, only when status is 0
+   */
+  function apiError(status, payload, cause) {
+    var detail = (payload && payload.error) || {};
+    var message = detail.message ||
+      (status === 0
+        ? 'Could not reach the server. Check your connection and try again.'
+        : 'The server returned an unexpected error (' + status + ').');
 
-  function clone(value) {
-    return JSON.parse(JSON.stringify(value));
+    var error = new Error(message);
+    error.status = status;
+    error.code = detail.code || null;
+    error.fields = detail.fields || null;
+    if (cause) error.cause = cause;
+    return error;
   }
 
-  function nextId() {
-    var id = 'emp-' + String(nextIdSeq).padStart(3, '0');
-    nextIdSeq += 1;
-    return id;
-  }
+  /**
+   * The only place in the app that touches fetch().
+   *
+   * Two things fetch gets wrong for our purposes, both handled here: it resolves
+   * happily on a 500, and response.json() rejects on an empty body - which is
+   * exactly what a 204 from DELETE is.
+   */
+  function request(method, path, body) {
+    var options = { method: method, headers: {} };
 
-  function findIndex(id) {
-    for (var i = 0; i < employees.length; i += 1) {
-      if (employees[i].id === id) return i;
+    if (body !== undefined) {
+      options.headers['Content-Type'] = 'application/json';
+      options.body = JSON.stringify(body);
     }
-    return -1;
+
+    return fetch(App.API_BASE_URL + path, options).then(function (response) {
+      if (response.status === 204) return null;
+
+      return response.text().then(function (text) {
+        var payload = null;
+
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch (parseError) {
+            payload = null; // a 502 from API Gateway is HTML; the status still tells the story
+          }
+        }
+
+        if (!response.ok) throw apiError(response.status, payload);
+        return payload;
+      });
+    }, function (networkError) {
+      // Second argument to .then, not a trailing .catch. A .catch here would also
+      // catch the apiError thrown just above and wrap it a second time.
+      throw apiError(0, null, networkError);
+    });
   }
 
-  /** Only the fields a form is allowed to set - id and checklist are ours. */
+  /**
+   * Only the fields a form is allowed to set. The API drops unknown keys anyway,
+   * but sending exactly nine makes the request body self-documenting in devtools
+   * and stops a control added to the form later from leaking into every write.
+   */
   var EDITABLE_FIELDS = [
     'firstName', 'lastName', 'email', 'phone',
     'department', 'jobTitle', 'manager', 'startDate', 'employmentType'
@@ -48,53 +97,57 @@ window.App = window.App || {};
     return out;
   }
 
+  function employeePath(id) {
+    return '/employees/' + encodeURIComponent(id);
+  }
+
   App.store = {
     listEmployees: function () {
-      return Promise.resolve(clone(employees));
+      // The { employees, count } envelope is an API detail; callers want the array.
+      return request('GET', '/employees').then(function (payload) {
+        return payload.employees;
+      });
     },
 
+    /**
+     * The one function that treats 404 as data rather than as a failure. A stale
+     * bookmark to a deleted employee is a normal thing for someone to have, and
+     * the router renders notFoundView() for it. Every other function here rejects
+     * on 404 - you can only reach those from a row we just listed, so if it is
+     * gone then something is genuinely wrong and the user should hear about it.
+     */
     getEmployee: function (id) {
-      var index = findIndex(id);
-      return Promise.resolve(index === -1 ? null : clone(employees[index]));
+      return request('GET', employeePath(id)).catch(function (error) {
+        if (error.status === 404) return null;
+        throw error;
+      });
     },
 
     createEmployee: function (input) {
-      var employee = pickEditable(input);
-      employee.id = nextId();
-      employee.checklist = App.checklistTemplate();
-      employees.push(employee);
-      return Promise.resolve(clone(employee));
+      // The API assigns the id and seeds all eight checklist items in one
+      // transaction, so the response is already complete.
+      return request('POST', '/employees', pickEditable(input));
     },
 
     updateEmployee: function (id, input) {
-      var index = findIndex(id);
-      if (index === -1) return Promise.reject(new Error('Employee not found: ' + id));
-
-      var updated = pickEditable(input);
-      updated.id = id;
-      updated.checklist = employees[index].checklist; // checklist is edited separately
-      employees[index] = updated;
-      return Promise.resolve(clone(updated));
+      // A full replace of the nine editable fields. Checklist progress lives in
+      // separate DynamoDB items and is untouched by this.
+      return request('PUT', employeePath(id), pickEditable(input));
     },
 
     deleteEmployee: function (id) {
-      var index = findIndex(id);
-      if (index === -1) return Promise.reject(new Error('Employee not found: ' + id));
-      employees.splice(index, 1);
-      return Promise.resolve();
+      // Resolves null - 204 has no body, and no caller uses the value.
+      return request('DELETE', employeePath(id));
     },
 
     setChecklistItem: function (employeeId, itemId, done) {
-      var index = findIndex(employeeId);
-      if (index === -1) return Promise.reject(new Error('Employee not found: ' + employeeId));
-
-      var item = employees[index].checklist.filter(function (entry) {
-        return entry.id === itemId;
-      })[0];
-      if (!item) return Promise.reject(new Error('Checklist item not found: ' + itemId));
-
-      item.done = !!done;
-      return Promise.resolve(clone(employees[index]));
+      // Resolves the FULL employee, with status and progress recomputed server
+      // side, so the caller can repaint without a follow-up GET.
+      return request(
+        'PATCH',
+        employeePath(employeeId) + '/checklist/' + encodeURIComponent(itemId),
+        { done: !!done }
+      );
     }
   };
 })(window.App);

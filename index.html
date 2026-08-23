@@ -10,9 +10,15 @@
   <header class="app-header">
     <div class="container header-inner">
       <a class="brand" href="#/employees">Breville &middot; Employee Onboarding</a>
-      <span class="env-tag">Phase 1 &mdash; mock data</span>
+      <span class="env-tag">Phase 3 &mdash; live API</span>
     </div>
   </header>
+
+  <!-- Outside #app on purpose. Every render replaces the whole of #app, and the
+       failure this most needs to report is the one where no view rendered at all. -->
+  <div class="container">
+    <div id="app-error" role="alert" aria-live="assertive"></div>
+  </div>
 
   <main class="container" id="app"></main>
 
@@ -20,9 +26,12 @@
     <div class="container">Made by Abhishek</div>
   </footer>
 
-  <!-- Classic scripts (not ES modules) so index.html works when opened directly
-       from the filesystem - browsers block module imports over file://. -->
-  <script src="js/data.js"></script>
+  <!-- Classic scripts sharing a window.App global. Order is load-bearing: app.js
+       captures App.store and App.ui when its IIFE runs, so it must come last.
+       Serve this over http (py -m http.server 8000) rather than opening the file
+       directly - a file:// page has an opaque origin and CORS gets unpredictable. -->
+  <script src="js/config.js"></script>
+  <script src="js/model.js"></script>
   <script src="js/store.js"></script>
   <script src="js/ui.js"></script>
   <script src="js/app.js"></script>

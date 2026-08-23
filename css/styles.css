@@ -303,3 +303,29 @@ td.actions > * + * { margin-left: 6px; }
   font-size: 14px;
   max-width: 640px;
 }
+
+/* ---- request feedback ---- */
+
+/* Page-level failures. Lives outside #app so it survives a view that never rendered. */
+.alert {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 18px 0 0;
+  padding: 12px 16px;
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  color: var(--accent-dark);
+  font-size: 14px;
+}
+
+.btn:disabled,
+.btn-link:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+input[type="checkbox"]:disabled + .item-label { opacity: 0.55; }

@@ -1,9 +1,9 @@
 """
 Employee validation and the DynamoDB-item <-> API-object translation.
 
-The API object is deliberately the exact shape `js/data.js` already uses, so the
-Phase 3 frontend swap touches only the bodies of the functions in `js/store.js`.
-Nothing in `js/ui.js` has to change.
+The API object is deliberately the exact shape the frontend renders, which is why
+the Phase 3 swap touched only the function bodies in `js/store.js` and left every
+existing view in `js/ui.js` alone.
 """
 import re
 
@@ -76,7 +76,7 @@ def validate_employee(values):
 def derive_status(checklist):
     """
     Status is computed, never stored - it cannot drift from the checklist it
-    describes. Same three rules as App.computeStatus in js/data.js.
+    describes. Same three rules as App.computeStatus in js/model.js.
     """
     total = len(checklist)
     done = sum(1 for item in checklist if item['done'])

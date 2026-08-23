@@ -222,6 +222,25 @@ window.App = window.App || {};
         '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
         '<h1>Not found</h1>' +
         '<p class="subtitle">That employee record does not exist.</p>';
+    },
+
+    /* --------------------------------------------------- request feedback */
+
+    loadingView: function () {
+      return '<p class="empty-state">Loading&hellip;</p>';
+    },
+
+    /** Replaces a view that could not be loaded, so "Loading..." is never the last word. */
+    messageView: function (text) {
+      return '<p class="empty-state">' + escapeHtml(text) + '</p>';
+    },
+
+    errorBanner: function (message) {
+      return '' +
+        '<div class="alert">' +
+          '<span>' + escapeHtml(message) + '</span>' +
+          '<button type="button" class="btn-link" data-action="dismiss-error">Dismiss</button>' +
+        '</div>';
     }
   };
 })(window.App);

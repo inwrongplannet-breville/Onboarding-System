@@ -1,9 +1,9 @@
 """
 The onboarding checklist every new hire starts with.
 
-Canonical copy. `js/data.js` holds an identical list for Phase 1 mock data; that
-copy becomes dead once the UI reads from this API in Phase 3. Keep them in sync
-until then.
+The only copy. The frontend used to carry a duplicate for its mock data; that went
+away in Phase 3 when the UI started reading employees from this API, so this list
+is now the single definition of what a new hire's checklist contains.
 """
 
 CHECKLIST_TEMPLATE = [

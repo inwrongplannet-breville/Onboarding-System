@@ -13,12 +13,52 @@ window.App = window.App || {};
   'use strict';
 
   var root = document.getElementById('app');
+  var errorSlot = document.getElementById('app-error');
   var store = App.store;
   var ui = App.ui;
 
   // List filters survive navigation, so returning from a checklist keeps the view.
   var filters = { search: '', department: '', status: '' };
   var loadedEmployees = [];
+
+  /* ---------------------------------------------------------- request errors */
+
+  /*
+   * Two handlers, and which one to use depends on who owns #app at the time.
+   *
+   *   failLoad()  for loads. The view never rendered, so as well as reporting the
+   *               error it has to replace the "Loading..." placeholder with
+   *               something final - otherwise the page sits there implying it is
+   *               still trying.
+   *   showError() for actions: save, delete, ticking a checkbox. The view is
+   *               already on screen and stays usable; only the banner changes.
+   */
+
+  function showError(error) {
+    errorSlot.innerHTML = ui.errorBanner(error.message);
+    // The stack, the status and error.cause are worth having, but in devtools -
+    // not in a banner aimed at an HR user.
+    if (window.console) console.error(error);
+  }
+
+  function clearError() {
+    errorSlot.innerHTML = '';
+  }
+
+  function failLoad(context) {
+    return function (error) {
+      showError(error);
+      root.innerHTML = ui.messageView(context);
+    };
+  }
+
+  function showLoading() {
+    root.innerHTML = ui.loadingView();
+  }
+
+  errorSlot.addEventListener('click', function (event) {
+    if (event.target.closest('[data-action="dismiss-error"]')) clearError();
+  });
 
   /* ---------------------------------------------------------------- routing */
 
@@ -40,6 +80,9 @@ window.App = window.App || {};
 
   function render() {
     var route = parseHash();
+
+    // A banner belongs to the request that raised it, not to the next screen.
+    clearError();
 
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
@@ -73,6 +116,8 @@ window.App = window.App || {};
   }
 
   function renderList() {
+    showLoading();
+
     store.listEmployees().then(function (employees) {
       loadedEmployees = employees;
       root.innerHTML = ui.listView(employees, filters);
@@ -104,11 +149,19 @@ window.App = window.App || {};
 
         if (!window.confirm('Remove ' + App.fullName(employee) + ' from the system?')) return;
 
+        clearError();
+        button.disabled = true;
+
         store.deleteEmployee(id).then(function () {
           renderList();
+        }, function (error) {
+          // The list is still on screen and still correct apart from this row,
+          // so leave it be and just say what happened.
+          button.disabled = false;
+          showError(error);
         });
       });
-    });
+    }, failLoad('Could not load employees.'));
   }
 
   /* ------------------------------------------------------------- form view */
@@ -162,7 +215,24 @@ window.App = window.App || {};
     return errors;
   }
 
+  /**
+   * The API's 400 body carries a `fields` map keyed by the same names as
+   * validate() returns, phrased the same way - common/models.py was written to
+   * mirror this file. So server-side validation reuses the painter we already
+   * have, and a field problem lands under its input rather than in the banner.
+   */
+  function showSaveError(form, error) {
+    if (error.status === 400 && error.fields) {
+      showErrors(form, error.fields);
+      return;
+    }
+    showError(error);
+  }
+
   function renderForm(id) {
+    // The "new employee" form has nothing to fetch, so it must not flash a
+    // placeholder on its way to rendering instantly.
+    if (id) showLoading();
     var load = id ? store.getEmployee(id) : Promise.resolve(null);
 
     load.then(function (employee) {
@@ -173,21 +243,39 @@ window.App = window.App || {};
 
       root.innerHTML = ui.formView(employee);
       var form = document.getElementById('employee-form');
+      var submitting = false;
 
       form.addEventListener('submit', function (event) {
         event.preventDefault();
+
+        // Enter inside a text field can fire submit before the button repaints
+        // as disabled, so the flag - not the attribute - is what stops a double POST.
+        if (submitting) return;
 
         var values = readForm(form);
         var errors = validate(values);
         showErrors(form, errors);
         if (Object.keys(errors).length) return;
 
+        var submitButton = form.querySelector('[type="submit"]');
+        var submitLabel = submitButton.textContent;
+
+        submitting = true;
+        submitButton.disabled = true;
+        submitButton.textContent = 'Saving…';
+        clearError();
+
         var save = employee
           ? store.updateEmployee(employee.id, values)
           : store.createEmployee(values);
 
         save.then(function () {
-          navigate('#/employees');
+          navigate('#/employees');   // nothing to restore; navigating discards this DOM
+        }, function (error) {
+          submitting = false;
+          submitButton.disabled = false;
+          submitButton.textContent = submitLabel;
+          showSaveError(form, error);
         });
       });
 
@@ -195,36 +283,65 @@ window.App = window.App || {};
       if (deleteButton) {
         deleteButton.addEventListener('click', function () {
           if (!window.confirm('Remove ' + App.fullName(employee) + ' from the system?')) return;
+
+          clearError();
+          deleteButton.disabled = true;
+
           store.deleteEmployee(employee.id).then(function () {
             navigate('#/employees');
+          }, function (error) {
+            // The form is still filled in and still valid; keep it usable.
+            deleteButton.disabled = false;
+            showError(error);
           });
         });
       }
-    });
+    }, failLoad('Could not load this employee.'));
   }
 
   /* -------------------------------------------------------- checklist view */
 
   function renderChecklist(id) {
+    showLoading();
+
     store.getEmployee(id).then(function (employee) {
       if (!employee) {
         root.innerHTML = ui.notFoundView();
         return;
       }
+      paintChecklist(employee);
+    }, failLoad('Could not load this checklist.'));
+  }
 
-      root.innerHTML = ui.checklistView(employee);
+  /*
+   * Split out from renderChecklist so a tick can repaint from the PATCH response
+   * instead of triggering a second GET - and so the repaint costs no placeholder
+   * flash on every click.
+   */
+  function paintChecklist(employee) {
+    root.innerHTML = ui.checklistView(employee);
 
-      document.getElementById('checklist').addEventListener('change', function (event) {
-        var checkbox = event.target;
-        if (!checkbox.matches('input[type="checkbox"]')) return;
+    document.getElementById('checklist').addEventListener('change', function (event) {
+      var checkbox = event.target;
+      if (!checkbox.matches('input[type="checkbox"]')) return;
 
-        // Write through the store, then re-render from what the store returns -
-        // the checkbox itself is never the source of truth.
-        store
-          .setChecklistItem(employee.id, checkbox.getAttribute('data-item-id'), checkbox.checked)
-          .then(function () {
-            renderChecklist(employee.id);
-          });
+      var itemId = checkbox.getAttribute('data-item-id');
+      var intended = checkbox.checked;
+
+      clearError();
+      checkbox.disabled = true;   // one control, not the whole page - it is a short round trip
+
+      store.setChecklistItem(employee.id, itemId, intended).then(function (updated) {
+        // The checkbox is never the source of truth: repaint from the employee the
+        // server just returned, progress bar and status badge included.
+        paintChecklist(updated);
+      }, function (error) {
+        // The write did not land, so put the box back to what the server still
+        // believes. We deliberately don't re-fetch to confirm that - the request
+        // that would tell us is the one that just failed.
+        checkbox.checked = !intended;
+        checkbox.disabled = false;
+        showError(error);
       });
     });
   }
