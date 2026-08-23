@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Employee Management & Onboarding System - Phase 2.
+  DynamoDB single table + six Lambdas behind API Gateway. No UI integration yet.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Deployment stage. Also used to namespace the table name.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    Timeout: 10
+    MemorySize: 256
+    CodeUri: src/
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref OnboardingTable
+
+Resources:
+
+  # ---------------------------------------------------------------- data store
+  #
+  # AWS::DynamoDB::Table, not AWS::Serverless::SimpleTable - SimpleTable only
+  # gives you a partition key, and this design needs PK + SK so an employee's
+  # profile and their 8 checklist rows can share one partition.
+  OnboardingTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub 'onboarding-${Stage}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      Tags:
+        - Key: Project
+          Value: onboarding-system
+        - Key: Phase
+          Value: '2'
+
+  # ------------------------------------------------------------------- the API
+  OnboardingApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      # Phase 2 is curl-only, but the browser needs these the moment Phase 3
+      # points the UI here. Cheaper to set now than to debug later.
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type'"
+        AllowMethods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
+
+  # ----------------------------------------------------------------- functions
+  #
+  # Six separate functions sharing one CodeUri. Separate so each gets its own
+  # IAM role and its own CloudWatch log group; shared CodeUri so `common/` is
+  # packaged into each one without a Lambda layer. Each zip is a few KB.
+  #
+  # IAM is written out inline rather than using SAM policy templates. The
+  # templates are coarser than they look: DynamoDBReadPolicy grants
+  # GetItem+Query+Scan+BatchGet, and DynamoDBWritePolicy grants no read actions
+  # at all - so DeleteEmployeeFunction, which must Query before it deletes,
+  # would be pushed all the way up to full-CRUD.
+
+  ListEmployeesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.list_employees.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees
+            Method: GET
+
+  CreateEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.create_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Transactions authorise against the underlying op, so PutItem is
+            # what TransactWriteItems needs here.
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees
+            Method: POST
+
+  GetEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.get_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}
+            Method: GET
+
+  UpdateEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.update_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Query as well as UpdateItem: the handler re-reads the partition so
+            # its response carries the checklist, matching GET exactly.
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}
+            Method: PUT
+
+  DeleteEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.delete_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:DeleteItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}
+            Method: DELETE
+
+  SetChecklistItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.set_checklist_item.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}/checklist/{itemId}
+            Method: PATCH
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the API. This is the value Phase 3 drops into js/store.js.
+    Value: !Sub 'https://${OnboardingApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
+  TableName:
+    Description: DynamoDB table name.
+    Value: !Ref OnboardingTable

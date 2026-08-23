@@ -1,0 +1,10 @@
+{
+  "resource": "/employees/{id}/checklist/{itemId}",
+  "path": "/employees/REPLACE-WITH-A-REAL-ID/checklist/offer-letter",
+  "httpMethod": "PATCH",
+  "pathParameters": { "id": "REPLACE-WITH-A-REAL-ID", "itemId": "offer-letter" },
+  "queryStringParameters": null,
+  "headers": { "Content-Type": "application/json" },
+  "body": "{\"done\": true}",
+  "isBase64Encoded": false
+}

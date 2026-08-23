@@ -1,0 +1,27 @@
+# Deploy settings, committed so the next `sam deploy` targets the same stack
+# rather than making someone re-answer --guided from memory.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "onboarding-system-dev"
+
+[default.build.parameters]
+# No --use-container: src/requirements.txt is empty (boto3 ships in the Lambda
+# runtime) and there is nothing with C extensions to compile, so SAM builds
+# natively against a local Python 3.13. Docker is not needed for this project.
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+region = "eu-north-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = true
+fail_on_empty_changeset = false
+tags = "Project=\"onboarding-system\" Phase=\"2\""
+
+[default.sync.parameters]
+region = "eu-north-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+watch = true

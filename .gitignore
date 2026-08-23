@@ -13,3 +13,9 @@ node_modules/
 dist/
 .env
 .env.local
+
+# Phase 2 - SAM build output and Python artefacts
+.aws-sam/
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -1,0 +1,10 @@
+{
+  "resource": "/employees/{id}",
+  "path": "/employees/REPLACE-WITH-A-REAL-ID",
+  "httpMethod": "GET",
+  "pathParameters": { "id": "REPLACE-WITH-A-REAL-ID" },
+  "queryStringParameters": null,
+  "headers": { "Content-Type": "application/json" },
+  "body": null,
+  "isBase64Encoded": false
+}

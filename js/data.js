@@ -15,6 +15,10 @@ window.App = window.App || {};
 
   // The onboarding checklist every new hire starts with. Owner is displayed
   // only - Phase 1 has no per-role permissions.
+  //
+  // Phase 2 note: src/common/checklist_template.py is now the canonical copy.
+  // This one is only still here because the UI has not been pointed at the API
+  // yet; it goes away in Phase 3. Keep the two in sync until then.
   var CHECKLIST_TEMPLATE = [
     { id: 'offer-letter',  label: 'Offer letter signed',           owner: 'HR' },
     { id: 'id-proof',      label: 'ID proof submitted',            owner: 'Employee' },

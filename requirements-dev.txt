@@ -1,0 +1,5 @@
+# Local test tooling only. Nothing here is deployed - src/requirements.txt is
+# empty because boto3 ships in the Lambda Python runtime.
+pytest>=8.0
+moto[dynamodb]>=5.0
+boto3>=1.34

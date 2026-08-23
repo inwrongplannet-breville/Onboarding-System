@@ -1,0 +1,1 @@
+# boto3 and botocore ship in the Lambda Python runtime - nothing to install.

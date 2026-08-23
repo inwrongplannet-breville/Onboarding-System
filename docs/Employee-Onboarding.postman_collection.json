@@ -1,0 +1,430 @@
+{
+  "info": {
+    "name": "Employee Onboarding - Phase 2",
+    "description": "CRUD backend on AWS. Set the collection variable `baseUrl` to the ApiBaseUrl stack output. Run the folder top to bottom: Create captures `employeeId` into a collection variable, and every later request reuses it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev"
+    },
+    {
+      "key": "employeeId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Create employee",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "const body = pm.response.json();",
+              "pm.test('has a server-generated id', () => pm.expect(body.id).to.be.a('string').and.not.empty);",
+              "pm.test('starts with 8 unticked checklist items', () => {",
+              "  pm.expect(body.checklist).to.have.lengthOf(8);",
+              "  pm.expect(body.checklist.every(i => i.done === false)).to.be.true;",
+              "});",
+              "pm.test('starts Pending', () => pm.expect(body.status).to.eql('Pending'));",
+              "pm.collectionVariables.set('employeeId', body.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 412 883 016\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+        }
+      }
+    },
+    {
+      "name": "List employees",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "const found = body.employees.find(e => e.id === pm.collectionVariables.get('employeeId'));",
+              "pm.test('the new employee is in the list', () => pm.expect(found).to.exist);",
+              "pm.test('list items carry their checklist', () => pm.expect(found.checklist).to.have.lengthOf(8));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get employee by id",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('matches the Phase 1 frontend model', () => {",
+              "  ['id','firstName','lastName','email','phone','department','jobTitle','manager','startDate','employmentType','checklist']",
+              "    .forEach(k => pm.expect(body).to.have.property(k));",
+              "});",
+              "pm.test('leaks no internal attributes', () => {",
+              "  ['PK','SK','employeeId','entityType'].forEach(k => pm.expect(body).to.not.have.property(k));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Tick a checklist item",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "const offer = body.checklist.find(i => i.id === 'offer-letter');",
+              "pm.test('the ticked item is done', () => pm.expect(offer.done).to.be.true);",
+              "pm.test('the other seven are untouched', () => {",
+              "  pm.expect(body.checklist.filter(i => i.done)).to.have.lengthOf(1);",
+              "});",
+              "pm.test('status is now derived as In Progress', () => pm.expect(body.status).to.eql('In Progress'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/offer-letter",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "offer-letter"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{ \"done\": true }"
+        }
+      }
+    },
+    {
+      "name": "Update employee (checklist must survive)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('the edit landed', () => pm.expect(body.jobTitle).to.eql('Senior Software Engineer'));",
+              "pm.test('editing did NOT reset onboarding progress', () => {",
+              "  pm.expect(body.checklist.find(i => i.id === 'offer-letter').done).to.be.true;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Reject a body that tries to set id and checklist",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('id was not overwritten', () => pm.expect(body.id).to.eql(pm.collectionVariables.get('employeeId')));",
+              "pm.test('checklist in the body was ignored', () => pm.expect(body.checklist).to.have.lengthOf(8));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"hacked\",\n  \"checklist\": [],\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Validation error - 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+              "const body = pm.response.json();",
+              "pm.test('names the offending fields', () => {",
+              "  pm.expect(body.error.fields).to.have.property('email');",
+              "  pm.expect(body.error.fields).to.have.property('firstName');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{ \"email\": \"nope\" }"
+        }
+      }
+    },
+    {
+      "name": "Unknown checklist item - 404",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/not-a-thing",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "not-a-thing"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{ \"done\": true }"
+        }
+      }
+    },
+    {
+      "name": "Delete employee",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+              "pm.test('empty body', () => pm.expect(pm.response.text()).to.be.empty);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get after delete - 404",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Update after delete - 404 (proves the condition expression)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404, not a resurrected ghost record', () => pm.response.to.have.status(404));",
+              "// Without ConditionExpression: attribute_exists(PK), UpdateItem would upsert",
+              "// here and create a profile with no checklist rows behind it."
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Ghost\",\n  \"lastName\": \"Record\",\n  \"email\": \"ghost@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Should not exist\",\n  \"startDate\": \"2026-09-01\",\n  \"employmentType\": \"Intern\"\n}"
+        }
+      }
+    }
+  ]
+}
