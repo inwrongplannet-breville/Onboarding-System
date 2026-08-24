@@ -18,6 +18,12 @@
        failure this most needs to report is the one where no view rendered at all. -->
   <div class="container">
     <div id="app-error" role="alert" aria-live="assertive"></div>
+
+    <!-- Confirmations, not failures: "Changes saved", "3 of 8 complete". Outside
+         #app for the same reason as the banner, and for one more - a live region
+         has to already be in the document when its text arrives, or the
+         announcement is simply dropped. Visually hidden, never empty for long. -->
+    <div id="app-status" class="sr-only" role="status" aria-live="polite"></div>
   </div>
 
   <main class="container" id="app"></main>
@@ -31,7 +37,6 @@
        Serve this over http (py -m http.server 8000) rather than opening the file
        directly - a file:// page has an opaque origin and CORS gets unpredictable. -->
   <script src="js/config.js"></script>
-  <script src="js/model.js"></script>
   <script src="js/store.js"></script>
   <script src="js/ui.js"></script>
   <script src="js/app.js"></script>

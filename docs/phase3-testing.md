@@ -19,9 +19,13 @@ This is the point of the phase, so check it first.
 
 ```bash
 grep -rn "Priya\|SEED_\|seedEmployees\|checklistTemplate\|emp-00" js/
+grep -rn "Engineering\|Full-time\|In Progress" js/
 ```
 
-No matches. Then in the browser console: `App.seedEmployees` → `undefined`.
+No matches for either. The second is the newer rule: no employee *schema* in `js/` and not just no
+employee *records*. The enums, the status names and the progress arithmetic all live in
+`common/models.py` now. In the browser console: `App.seedEmployees` and `App.DEPARTMENTS` → both
+`undefined`.
 
 Now set Network to **Offline** and reload. The list must be **empty with an error banner**. If six
 people appear, something is still reading from local state and the phase isn't done.
@@ -34,11 +38,19 @@ Each step feeds the next, so run them in order.
 |---|---|---|
 | 1 | Load `#/employees` | one `GET /employees` → 200, six rows. No `OPTIONS` preflight — a plain GET with no custom headers shouldn't trigger one |
 | 2 | Type in search, change both filters | **zero** new requests. Filtering is client-side |
-| 3 | Add Employee → submit blank | **zero** requests; client validation short-circuits |
+| 3 | Add Employee → submit blank | one `GET /employees` on open (the dropdowns are built from it), then **zero** requests on submit; client validation short-circuits |
+| 3b | Check both dropdowns on that form | Departments and employment types are the ones the six seeded employees carry, alphabetical. Nothing hardcoded produced them |
 | 4 | Fill it in properly → submit | `POST` 201 with a `Location` header, then back to the list with the new row |
 | 5 | Edit that row, change the department, save | `PUT` 200. Check the request payload has exactly nine fields |
+| 5b | Edit it again, set the email to another employee's, save | `409`. The message lands **under the email input**, not in the banner, and the record is unchanged |
 | 6 | Open its checklist, tick three boxes | three `PATCH`es, 200 each. **One request per tick, not two** — the response is reused |
-| 7 | Hard-refresh (Ctrl+Shift+R) on the checklist URL | state persisted. This is the proof the writes reached DynamoDB |
+| 6b | Click the comment icon on an item, type a note, Save | one `PATCH` with a body of `{"comment": …}` and no `done` key. The note appears under the item and the icon fills in |
+| 6c | Tick that same item | one `PATCH` with `{"done": true}`. **The note is still there** — the two never overwrite each other |
+| 6d | Open a comment box, type, then tick a *different* item without saving | the view repaints and **your half-typed text is still in the box** |
+| 6e | Reopen the note and press Remove | the note and the icon fill both go |
+| 6f | Click the icon, then click the same icon again | the box closes. The tooltip reads "Close the comment box on …" while it is open, and focus lands back on the icon |
+| 6g | Open a box, type something, then click that icon again | it asks before discarding. Cancel and Esc don't ask — they say "discard" in as many words; the icon doesn't |
+| 7 | Hard-refresh (Ctrl+Shift+R) on the checklist URL | state persisted, comments included. This is the proof the writes reached DynamoDB |
 | 8 | Delete it, from the row button and from the form button | `DELETE` 204, empty response body |
 | 9 | Hand-type `#/employees/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
 | 10 | Deep-link `#/employees/<uuid>/checklist` in a fresh tab | loads directly; proves the router handles UUIDs |
@@ -55,8 +67,31 @@ The part Phase 1 had no answer for. Each one is forceable in seconds.
 | Slow save | throttle to **Slow 3G**, submit the form | button reads "Saving…" and is disabled; mashing Enter fires **one** POST, not several |
 | Failed save | Offline, then submit | button restored to its label and re-enabled, banner shown, **form values not lost** |
 | Failed checklist tick | Offline, tick a box | the box **snaps back** unticked and re-enables; banner shown |
+| Failed comment save | Offline, save a comment | the editor **stays open with your text in it**; banner shown |
+| Over-long comment | console: `App.store.setChecklistComment(id, 'laptop', 'x'.repeat(600))` | `400` with `fields.comment`. In the UI the message lands **under the box**, not in the banner, and the draft is kept |
 | Failed delete | Offline, delete a row | banner; the row is still there and the page still works |
 | Stale delete | delete a row in one tab, then delete the same row in a second tab | 404 → banner |
+| Duplicate email | add a new employee using a seeded person's address | `409` under the email input; nothing is created — the list count is unchanged |
+| Impossible date | console: `App.store.createEmployee({...VALID, startDate:'2026-02-30'})` | rejects with `status: 400` and `fields.startDate` |
+| Empty table | `py scripts/seed_employees.py --wipe`, then open Add Employee | department and employment type render as **text inputs**, not empty dropdowns. Typing `Engineering` / `Full-time` creates the first hire; typing `Marketing` comes back as a `400` under the input |
+
+## Keyboard and screen reader
+
+Tab only — no mouse — from a fresh load of `#/employees`.
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Load any view | Focus is on the view's `<h1>`, and the tab title names the route. The first Tab lands inside the new content, not back at the browser chrome |
+| 2 | Tab through the list | Every row action announces the person: "Edit Priya Sharma", not "Edit". The actions column has a name |
+| 3 | Type in search | The record count is announced as it changes, without cutting off what is being read |
+| 4 | Open a checklist, tick a box with Space | Focus stays **on that checkbox** after the repaint, so the next Space ticks the next item. The live region reads "Laptop issued ticked. 6 of 8 complete. In Progress." |
+| 5 | Go offline, tick a box | The box snaps back, focus is **still on it** (disabling a focused element normally dumps you on `<body>`), and the live region says it was left as it was |
+| 6 | Submit the form blank | Focus moves to the first bad field, which reads its own error via `aria-describedby` and reports itself as invalid |
+| 7 | Press Escape with a banner showing | The banner is dismissed |
+| 8 | Click anything with the mouse | **No focus ring.** It is `:focus-visible`, so rings are for keyboard users only |
+
+Automated equivalents don't exist here — there's no JS test runner — but headless Chrome will report
+`document.activeElement` after a click if you need to re-check step 4 or 5 without a screen reader.
 
 ## The one signal that matters most
 

@@ -41,7 +41,6 @@ index.html          page shell, #app mount point, #app-error banner slot
 css/styles.css      structure only, no visual polish
 js/
   config.js         API_BASE_URL - the one value that changes per environment
-  model.js          department/employment enums + pure display helpers. NO records.
   store.js          six fetch() calls to API Gateway  <-- the only data source
   ui.js             pure render functions (state in, HTML string out)
   app.js            hash router, event wiring, validation, error handling
@@ -49,7 +48,7 @@ js/
 template.yaml       SAM: DynamoDB table, six Lambdas, API Gateway
 samconfig.toml       committed, so `sam deploy` needs no arguments
 src/
-  common/           keys, db clients, validation, response helpers, checklist template
+  common/           keys, db clients, validation, reads, response helpers, checklist template
   handlers/         one file per route
 tests/              pytest - pure logic plus the handlers against in-memory DynamoDB
 scripts/
@@ -92,7 +91,7 @@ What the API returns and the UI renders:
   manager,
   startDate,         // "2026-09-01"
   employmentType,    // Full-time | Contract | Intern
-  checklist: [ { id, label, owner, done }, ... ],  // 8 items
+  checklist: [ { id, label, owner, done, comment }, ... ],  // 8 items
 
   status,            // derived server-side, additive
   progress           // { done, total, percent } - also derived, also additive
@@ -103,9 +102,9 @@ The default checklist: offer letter signed, ID proof submitted, bank details col
 issued, email/AD account created, building access card issued, induction session attended, policy
 acknowledgement signed.
 
-`status` and `progress` are computed on every read and never stored. The UI computes its own copies
-too (`js/model.js`), because the list filter runs over records already in memory — the two agree
-exactly.
+`status` and `progress` are computed on every read and never stored — and computed in exactly one
+place, `common/models.py`. The frontend renders what the API sends and no longer derives its own;
+the two copies drifted once already (the rounding defect below), which is the whole argument.
 
 ---
 
@@ -147,9 +146,25 @@ One DynamoDB table, `PK` + `SK`, nine items per employee:
 ```
 PK = EMP#<uuid>   SK = PROFILE        the employee record
 PK = EMP#<uuid>   SK = CHK#<itemId>   one row per checklist item, 8 of them
+
+PK = EMAIL#<lowercased address>   SK = EMAIL    uniqueness guard, one per employee
 ```
 
-**Why the checklist is separate rows rather than a nested list.** Ticking a box becomes an
+**Why the email guard is an item and not a check.** DynamoDB can only enforce uniqueness on the
+partition key, and the partition key here is a UUID. So "one employee per work email" is enforced
+by a second item, keyed on the address, written in the *same transaction* as the profile with
+`attribute_not_exists(PK)`. Reading first and then writing is a race that two simultaneous POSTs
+will win. The guard travels with its employee: created with them, moved when the address is edited,
+deleted when they are — miss any of those and an address is either duplicated or locked forever.
+It lives outside the employee's partition, so `list_employees` filters it out by prefix.
+
+One caveat for the records already in the dev table: they predate the guard and have none, so their
+addresses are not reserved until each is edited or recreated. `py scripts/seed_employees.py --wipe
+--seed` regenerates the six through the API and gives them guards.
+
+**Why the checklist is separate rows rather than a nested list.** This is also what made HR
+comments a one-attribute change rather than a feature: the note belongs to one step, so it lives on
+that step's row and is written by the same `UpdateItem` as the tick. Ticking a box becomes an
 `UpdateItem` against one small item — no read-modify-write of a list, so two people ticking
 different boxes at the same time can't clobber each other. Reading is still one round trip: a
 single `Query` on the partition key returns the profile and all eight rows together.
@@ -180,7 +195,14 @@ you know the partition key, `Scan` only when you genuinely need every item.**
   `attribute_exists(PK)` a `PUT` to a deleted id would silently resurrect a profile with no
   checklist behind it. Update, patch and delete all guard against it and return `404` instead.
 - **`status` is derived, never stored** — enforced in `common/models.py:derive_status`, and
-  mirrored in `js/model.js` for the list filter.
+  computed nowhere else. The list filter runs over the `status` the API returned.
+- **Read-after-write is consistent, read-only isn't.** `PUT` and `PATCH` re-read the partition to
+  build their response, and a Query is eventually consistent by default — so both pass
+  `ConsistentRead=True` via `common/repository.py`. `GET` doesn't: nothing it returns was written a
+  millisecond earlier by the same caller, and a strong read costs twice as much.
+- **Cancelled transactions are read, not guessed.** `CancellationReasons` says which condition
+  failed, so a duplicate email returns `409` on the email and a UUID collision returns `409` on the
+  id — and a throttle, which arrives the same way, is not reported as either.
 - **Six functions, one shared `CodeUri`.** Separate functions give per-route IAM and per-route log
   groups; the shared `CodeUri` means `common/` is packaged into each one without a Lambda layer.
 - **IAM written out inline, not via SAM policy templates.** The templates are coarser than they
@@ -206,16 +228,77 @@ you know the partition key, `Scan` only when you genuinely need every item.**
 
 ### No mock data in the frontend
 
-The rule this phase enforces: **there is no employee array anywhere in `js/`.** `data.js` became
-`model.js`, holding only the two dropdown enums and four pure display helpers. It was renamed rather
-than trimmed, because a file called `data.js` that holds no data is an invitation to put data back
-into it.
+The rule this phase enforces: **there is no employee array anywhere in `js/`.** `data.js` first
+became `model.js` — two dropdown enums and four pure display helpers, no records — and has since
+gone entirely. What was left in it was a second implementation of things `common/models.py` already
+owns, and the two had drifted once. The enums and the status/progress rules now exist only on the
+server; `js/ui.js` keeps the presentation helpers that have no server-side counterpart to disagree
+with.
+
+The dropdowns are built from the values the loaded employees actually carry (`setEmployees` in
+`app.js`). The trade is deliberate and visible: a department nobody is in yet is not offered, and on
+an empty table the form falls back to text inputs so the first hire is still creatable. The server
+validates against the real enum in every case and names the bad field in its `400`.
 
 The Phase 1 fixtures still exist — as `scripts/seed_employees.py`, which POSTs the same six people
 *into DynamoDB* over the real API. Same test data, other side of the wire.
 
 The check that this actually holds: turn the network off and reload. The list must be empty with an
 error on it. If six people appear, something is still reading from local state.
+
+### Checklist comments
+
+HR needs somewhere to put "chased payroll twice, still no bank details". One note per checklist
+item, editable and clearable, capped at 500 characters.
+
+- **No new endpoint.** `PATCH /employees/{id}/checklist/{itemId}` already existed for the tick, and
+  PATCH means *change the keys I sent*. `{"done": true}` leaves the comment alone, `{"comment": "…"}`
+  leaves the tick alone, both together work, and `{}` is a `400` rather than a silent no-op.
+- **One note, not a thread.** A thread needs an author, and there is no authentication in this stack
+  to supply one. A list of anonymous comments is worse than a single note that whoever is looking
+  after this hire keeps current.
+- **Cleared means removed.** An empty comment `REMOVE`s the attribute rather than storing `""`, so
+  the two states in the table are "has a note" and "has no attribute" rather than three.
+- **The draft survives a repaint.** Every tick re-renders the whole checklist from the server's
+  response, which would throw away a half-typed comment. The open editor is state in `app.js`
+  (`commentEditor = { itemId, draft }`), not in the DOM, so it is re-rendered rather than lost —
+  including its text and the cursor position at the end of it.
+- **A failed save keeps the text.** No repaint on failure, and an over-long comment paints its
+  message under the box rather than in the page banner, because it is a problem with that one field.
+- **The icon is a toggle.** One control, so a second press closes what the first press opened, and
+  its tooltip and `aria-label` change to say so. Discarding unsaved text is confirmed first here and
+  when switching to another item's box — but not for Cancel or Esc, which already say "discard" in
+  as many words.
+
+### Accessibility
+
+Every view is built by replacing the `innerHTML` of `#app`. No page load happens, which means a
+screen reader is told nothing and focus stays on a control that no longer exists — the standard
+single-page failure. Four things fix it, all in `app.js`:
+
+- **`paint()`** swaps the view and clears `aria-busy`; `showLoading()` sets it, so "Loading…" is
+  announced as a wait rather than as the answer.
+- **`focusHeading()`** moves focus to the new view's `<h1>` (which carries `tabindex="-1"`), so the
+  next Tab starts inside the content that just arrived.
+- **`announce()`** writes to `#app-status`, a polite live region that lives *outside* `#app`. That
+  placement is the whole trick: a live region inserted at the same moment as its text is usually
+  not announced at all.
+- **`setTitle()`** names each route, which is what a tab, a history entry and a screen reader all
+  read.
+
+The checklist needed one more. A tick repaints the entire view, throwing away the checkbox the user
+is standing on, so `paintChecklist(employee, keepFocusOn)` puts focus back on the box that changed —
+a keyboard user can now work down the list instead of being dumped at the top on every tick. The
+failure path had the same bug from a different direction: disabling a focused element hands focus to
+`<body>`, so a failed tick silently ejected you. It now takes focus back, but only if it is still on
+`<body>` — if you have clicked elsewhere in the meantime, you stay there.
+
+The rest is unglamorous and cheap: `role="progressbar"` with real `aria-valuenow` (a div's width is
+invisible), `aria-label` on each row action so "Edit" six times over says *who* it edits,
+`scope="col"` on the headers and a `sr-only` name on the actions column, `aria-describedby` +
+`aria-invalid` wiring every input to its own error text, `aria-live="polite"` on the record count so
+filtering announces the new total, `:focus-visible` rings that keyboard users get and mouse users
+don't, and Escape to dismiss the error banner.
 
 ### Errors are the actual work
 
@@ -278,7 +361,7 @@ forms drift apart; one form can't.
 
 ## Status of testing
 
-**Backend, offline:** `py -m pytest` — 78 tests, green. Validation and derived status as pure
+**Backend, offline:** `py -m pytest` — 125 tests, green. Validation and derived status as pure
 functions, plus all six handlers driven end to end against an in-memory DynamoDB (moto).
 
 `tests/test_models.py` covers the pure logic — validation, derived status, the write whitelist, the
@@ -313,10 +396,24 @@ separate process minutes later; and every response carries the CORS headers.
 One defect was found and fixed: `progress.percent` used Python's `round()`, which is banker's
 rounding, so a 1-of-8 checklist reported 12% while the UI's `Math.round` said 13%.
 `common/models.py` now uses `int(x + 0.5)` to match JavaScript, with a regression test covering all
-nine steps from 0/8 to 8/8.
+nine steps from 0/8 to 8/8. That defect is also the reason the frontend no longer computes a
+percentage at all — two implementations of one rule is the bug, and the fix above only patched this
+instance of it.
+
+**Four correctness fixes after the Phase 3 review**, each with tests:
+
+| | |
+|---|---|
+| Stale read-after-write | `PUT` and `PATCH` re-read with `ConsistentRead=True`. An eventually consistent Query could return the pre-write profile, and the checklist view repaints straight from that response |
+| Dates that aren't dates | `2026-13-45` and `2026-02-30` matched the `YYYY-MM-DD` regex and were stored. Now parsed as well as matched |
+| Duplicate work emails | Nothing stopped two employees sharing one. Now a uniqueness guard item written in the same transaction |
+| Misreported `409` | Every cancelled transaction claimed "that employee id already exists". Now read from `CancellationReasons` |
 
 **Frontend:** run in a real browser (headless Chrome against `py -m http.server 8000`) and verified
-against the live API.
+against the live API. Re-run after the enums were removed: all six rows render, the department and
+employment-type dropdowns build themselves from the loaded records, and the status filter orders
+itself Pending → In Progress → Onboarded. Against a stub API returning zero employees, the form
+degrades to text inputs rather than to empty dropdowns nobody can submit.
 
 The store was exercised end to end through the real `App.store` — 23 assertions, all passing,
 including the ones easy to get wrong:
@@ -346,6 +443,8 @@ version.
 
 - **Document upload** (offer letter, ID proof) — a visible stub sits on the checklist page marking
   where it goes; the storage itself is S3 in a later phase.
+- **Who wrote a comment, and when** — the item stores `updatedAt`, but with no authentication there
+  is no author to record and the API does not return either. Revisit alongside auth.
 - **Auth** — no login, no roles, and the API is public. The `owner` field on checklist items is
   display-only. Don't put real employee data in the dev stack.
 - **Automated onboarding triggers** — notifications, IT setup request, HR alert. SNS/SQS, Phase 4.

@@ -3,22 +3,19 @@ GET /employees/{id} - brief task 3.
 
 One Query on the partition key returns the profile and all 8 checklist rows in a
 single round trip. That is the whole point of keeping them under one PK.
-"""
-from boto3.dynamodb.conditions import Key
 
+Eventually consistent, deliberately - see common/repository.py. PUT and PATCH are
+the calls that need the strong read, because they wrote a moment earlier.
+"""
 from common import responses
-from common.db import table
 from common.handler import api_handler, path_param
-from common.keys import pk
-from common.models import to_api_employee
+from common.repository import load_employee
 
 
 @api_handler
 def lambda_handler(event, context):
     employee_id = path_param(event, 'id')
-
-    result = table.query(KeyConditionExpression=Key('PK').eq(pk(employee_id)))
-    employee = to_api_employee(result.get('Items', []))
+    employee = load_employee(employee_id)
 
     if employee is None:
         return responses.not_found('No employee with id ' + employee_id + '.')

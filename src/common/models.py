@@ -6,9 +6,10 @@ the Phase 3 swap touched only the function bodies in `js/store.js` and left ever
 existing view in `js/ui.js` alone.
 """
 import re
+from datetime import date
 
 from common.checklist_template import CHECKLIST_TEMPLATE
-from common.keys import employee_id_from_pk, is_profile
+from common.keys import employee_id_from_pk, is_employee_pk, is_profile
 
 DEPARTMENTS = ('Engineering', 'HR', 'Finance', 'Operations')
 EMPLOYMENT_TYPES = ('Full-time', 'Contract', 'Intern')
@@ -36,6 +37,11 @@ REQUIRED_FIELDS = (
 EMAIL_PATTERN = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
+# A checklist comment is a note, not an essay - "chased payroll twice, still no
+# bank details". The cap is here to keep one item well under the 400 KB DynamoDB
+# limit and to stop a paste of an entire email thread from becoming the record.
+COMMENT_MAX_LENGTH = 500
+
 
 def pick_editable(body):
     """Whitelist and trim. Anything not on the list is dropped, not rejected."""
@@ -44,6 +50,19 @@ def pick_editable(body):
         value = body.get(field, '')
         picked[field] = value.strip() if isinstance(value, str) else ''
     return picked
+
+
+def clean_comment(value):
+    """
+    Trim, and treat None as cleared.
+
+    Trailing whitespace is invisible in the UI and would otherwise be the
+    difference between "has a comment" and "does not" - so it is stripped before
+    anything decides which of those this is.
+    """
+    if value is None:
+        return ''
+    return value.strip()
 
 
 def validate_employee(values):
@@ -67,8 +86,19 @@ def validate_employee(values):
         errors['employmentType'] = 'Employment type must be one of: ' + ', '.join(EMPLOYMENT_TYPES) + '.'
 
     start_date = values.get('startDate')
-    if start_date and not DATE_PATTERN.match(start_date):
-        errors['startDate'] = 'Start date must be in YYYY-MM-DD format.'
+    if start_date:
+        # Two checks, not one. The regex fixes the shape - date.fromisoformat on
+        # its own also accepts '20260706' and would let a typo through in a
+        # format no other part of the system reads. The parse then rejects the
+        # dates that are the right shape and still not real: 2026-13-45,
+        # 2026-02-30, and 29 February in a year that hasn't got one.
+        if not DATE_PATTERN.match(start_date):
+            errors['startDate'] = 'Start date must be in YYYY-MM-DD format.'
+        else:
+            try:
+                date.fromisoformat(start_date)
+            except ValueError:
+                errors['startDate'] = 'Start date is not a real calendar date.'
 
     return errors
 
@@ -76,7 +106,8 @@ def validate_employee(values):
 def derive_status(checklist):
     """
     Status is computed, never stored - it cannot drift from the checklist it
-    describes. Same three rules as App.computeStatus in js/model.js.
+    describes. The only implementation of these three rules; the frontend renders
+    what this returns.
     """
     total = len(checklist)
     done = sum(1 for item in checklist if item['done'])
@@ -94,9 +125,10 @@ def progress(checklist):
         'done': done,
         'total': total,
         # int(x + 0.5), not round(x). Python's round() is banker's rounding
-        # (round-half-to-even), so round(12.5) is 12 - while the JS Math.round
-        # in App.progress gives 13. At 1/8 and 5/8 complete the two disagree by
-        # a point. Match the frontend rather than the language default.
+        # (round-half-to-even), so round(12.5) is 12 where JS Math.round gives
+        # 13 - a point of disagreement at 1/8 and 5/8 complete. It cost a real
+        # defect back when the frontend computed its own percentage; it no
+        # longer does, but half-up is still the arithmetic a person expects.
         'percent': int(done / total * 100 + 0.5) if total else 0,
     }
 
@@ -116,12 +148,16 @@ def new_checklist_items():
 
 
 def to_api_checklist_item(item):
-    """DynamoDB item -> the {id, label, owner, done} shape js/ui.js renders."""
+    """DynamoDB item -> the {id, label, owner, done, comment} shape js/ui.js renders."""
     return {
         'id': item['itemId'],
         'label': item['label'],
         'owner': item['owner'],
         'done': bool(item['done']),
+        # Always present, always a string. An item with no comment has no such
+        # attribute at all, and making the client distinguish absent from empty
+        # buys nothing - both mean "nobody has written anything here".
+        'comment': item.get('comment') or '',
     }
 
 
@@ -151,16 +187,24 @@ def to_api_employee(items):
         employee[field] = profile.get(field, '')
 
     employee['checklist'] = checklist
-    # Additive conveniences. The Phase 1 UI computes these itself and ignores
-    # them; a future client can just read them.
+    # Not conveniences any more - these are the only copy. The UI renders the
+    # badge and the progress bar straight from them.
     employee['status'] = derive_status(checklist)
     employee['progress'] = progress(checklist)
     return employee
 
 
 def group_by_partition(items):
-    """Scan returns every item flat. Bucket them back into employees."""
+    """
+    Scan returns every item flat. Bucket them back into employees.
+
+    Anything that is not in an EMP# partition is dropped here - which today means
+    the email uniqueness guards, whose whole job is to sit in a partition of
+    their own and never be read.
+    """
     partitions = {}
     for item in items:
+        if not is_employee_pk(item['PK']):
+            continue
         partitions.setdefault(item['PK'], []).append(item)
     return partitions

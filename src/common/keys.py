@@ -7,6 +7,9 @@ Layout, all under one partition per employee:
     PK = "EMP#<uuid>"   SK = "CHK#<itemId>"     one row per checklist item
 
 Nine items per employee, so a single Query on the PK returns the whole thing.
+
+Plus one item per employee outside that partition, the email uniqueness guard
+described at the bottom of this file.
 """
 
 EMP_PREFIX = 'EMP#'
@@ -32,3 +35,26 @@ def item_id_from_sk(value):
 
 def is_profile(item):
     return item.get('SK') == PROFILE_SK
+
+
+# ------------------------------------------------------------- email guards
+#
+# A uniqueness guard is a second item in its own partition, written inside the
+# same transaction as the profile it belongs to:
+#
+#     PK = "EMAIL#<lowercased email>"   SK = "EMAIL"
+#
+# `attribute_not_exists(PK)` on that Put is what makes "one employee per work
+# email" a property of the table rather than a hope. Lowercased because
+# Priya@ and priya@ are the same mailbox to every mail server that matters.
+
+EMAIL_PREFIX = 'EMAIL#'
+EMAIL_SK = 'EMAIL'
+
+
+def email_pk(email):
+    return EMAIL_PREFIX + (email or '').strip().lower()
+
+
+def is_employee_pk(value):
+    return str(value).startswith(EMP_PREFIX)

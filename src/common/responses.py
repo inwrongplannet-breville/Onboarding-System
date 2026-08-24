@@ -66,8 +66,10 @@ def not_found(message):
     return _error(404, 'NotFound', message)
 
 
-def conflict(message):
-    return _error(409, 'Conflict', message)
+def conflict(message, fields=None):
+    # `fields` for the same reason bad_request has it: a duplicate work email is
+    # a problem with one input, and the form paints it under that input.
+    return _error(409, 'Conflict', message, fields)
 
 
 def server_error():

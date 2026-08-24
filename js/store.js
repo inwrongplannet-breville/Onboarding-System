@@ -101,6 +101,14 @@ window.App = window.App || {};
     return '/employees/' + encodeURIComponent(id);
   }
 
+  function checklistPatch(employeeId, itemId, body) {
+    return request(
+      'PATCH',
+      employeePath(employeeId) + '/checklist/' + encodeURIComponent(itemId),
+      body
+    );
+  }
+
   App.store = {
     listEmployees: function () {
       // The { employees, count } envelope is an API detail; callers want the array.
@@ -143,11 +151,19 @@ window.App = window.App || {};
     setChecklistItem: function (employeeId, itemId, done) {
       // Resolves the FULL employee, with status and progress recomputed server
       // side, so the caller can repaint without a follow-up GET.
-      return request(
-        'PATCH',
-        employeePath(employeeId) + '/checklist/' + encodeURIComponent(itemId),
-        { done: !!done }
-      );
+      return checklistPatch(employeeId, itemId, { done: !!done });
+    },
+
+    /**
+     * The HR note on one checklist item. Same endpoint as the tick, because the
+     * comment is a property of the same item - PATCH changes whichever keys the
+     * body carries, so sending only `comment` leaves `done` alone and vice
+     * versa. An empty string clears the note.
+     */
+    setChecklistComment: function (employeeId, itemId, comment) {
+      return checklistPatch(employeeId, itemId, {
+        comment: comment == null ? '' : String(comment)
+      });
     }
   };
 })(window.App);

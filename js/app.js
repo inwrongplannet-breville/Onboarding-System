@@ -14,12 +14,138 @@ window.App = window.App || {};
 
   var root = document.getElementById('app');
   var errorSlot = document.getElementById('app-error');
+  var statusSlot = document.getElementById('app-status');
   var store = App.store;
   var ui = App.ui;
+
+  var BASE_TITLE = 'Employee Management & Onboarding';
+
+  /* --------------------------------------------------------- announcements */
+
+  /*
+   * Every view here is built by replacing the innerHTML of #app, which is
+   * invisible to assistive tech: no page load happens, so nothing is announced
+   * and focus stays on whatever the user just activated - a link that no longer
+   * exists. Three things fix that, and all three are cheap:
+   *
+   *   paint()         swaps the view and clears aria-busy
+   *   focusHeading()  moves focus to the new view's <h1>, so the next Tab starts
+   *                   inside the content that just arrived
+   *   announce()      writes to a live region that lives OUTSIDE #app, because a
+   *                   live region inserted at the same moment as its text is
+   *                   usually not announced at all
+   */
+
+  function paint(html) {
+    root.innerHTML = html;
+    root.removeAttribute('aria-busy');
+  }
+
+  function focusHeading() {
+    var heading = root.querySelector('h1');
+    if (heading) heading.focus();
+  }
+
+  function announce(text) {
+    statusSlot.textContent = text;
+  }
+
+  /** The title is how a tab, a history entry and a screen reader all name the view. */
+  function setTitle(text) {
+    document.title = text ? text + ' \u00b7 ' + BASE_TITLE : BASE_TITLE;
+  }
 
   // List filters survive navigation, so returning from a checklist keeps the view.
   var filters = { search: '', department: '', status: '' };
   var loadedEmployees = [];
+
+  /*
+   * The values the dropdowns offer, collected from the employees the API
+   * returned rather than from a list held here. There is no enum in js/ any
+   * more: the departments and employment types this app accepts are defined
+   * once, in common/models.py, and duplicating them client-side is what
+   * produced the last mismatch between the two.
+   *
+   * The trade is visible and worth stating: a department nobody is in yet is not
+   * offered, and on an empty table the form falls back to plain text inputs
+   * (see field() in ui.js). Either way the server has the real list and rejects
+   * anything that is not on it, with the message landing under the input.
+   */
+  var facets = { departments: [], employmentTypes: [], statuses: [] };
+
+  function unique(values) {
+    var seen = {};
+    return values.filter(function (value) {
+      if (!value || seen[value]) return false;
+      seen[value] = true;
+      return true;
+    });
+  }
+
+  function pluck(field) {
+    return function (employee) { return employee[field]; };
+  }
+
+  /*
+   * Statuses sorted by the lowest progress percentage seen carrying them, which
+   * puts Pending before In Progress before Onboarded without this file knowing
+   * that those are the three or what they mean. Alphabetical would read as
+   * "In Progress, Onboarded, Pending".
+   */
+  function orderedStatuses(employees) {
+    var lowest = {};
+
+    employees.forEach(function (employee) {
+      if (!employee.status) return;
+      var percent = (employee.progress || {}).percent || 0;
+      if (!(employee.status in lowest) || percent < lowest[employee.status]) {
+        lowest[employee.status] = percent;
+      }
+    });
+
+    return Object.keys(lowest).sort(function (a, b) { return lowest[a] - lowest[b]; });
+  }
+
+  function setEmployees(employees) {
+    loadedEmployees = employees;
+    facets = {
+      departments: unique(employees.map(pluck('department'))).sort(),
+      employmentTypes: unique(employees.map(pluck('employmentType'))).sort(),
+      statuses: orderedStatuses(employees)
+    };
+
+    // A filter pinned to a value that no longer exists - the last person in
+    // Finance was deleted - would show an empty table with a blank dropdown and
+    // no way to tell why. Drop it instead.
+    if (facets.departments.indexOf(filters.department) === -1) filters.department = '';
+    if (facets.statuses.indexOf(filters.status) === -1) filters.status = '';
+  }
+
+  /**
+   * The form routes need the facets, and a deep link to #/employees/new lands
+   * without the list ever having been fetched. Cached, because these are only
+   * the dropdown values - the list view itself always refetches.
+   */
+  function ensureEmployees() {
+    if (loadedEmployees.length) return Promise.resolve(loadedEmployees);
+    return store.listEmployees().then(function (employees) {
+      setEmployees(employees);
+      return employees;
+    });
+  }
+
+  /**
+   * An employee's own department must stay selectable while editing them, even
+   * if they are the only one in it and the list has not been loaded since.
+   */
+  function formFacets(employee) {
+    if (!employee) return facets;
+    return {
+      departments: unique(facets.departments.concat(employee.department)).sort(),
+      employmentTypes: unique(facets.employmentTypes.concat(employee.employmentType)).sort(),
+      statuses: facets.statuses
+    };
+  }
 
   /* ---------------------------------------------------------- request errors */
 
@@ -48,16 +174,26 @@ window.App = window.App || {};
   function failLoad(context) {
     return function (error) {
       showError(error);
-      root.innerHTML = ui.messageView(context);
+      paint(ui.messageView(context));
+      focusHeading();
     };
   }
 
   function showLoading() {
+    // aria-busy tells a screen reader the region is mid-update, so it waits for
+    // the real view instead of reading the placeholder as the answer.
+    root.setAttribute('aria-busy', 'true');
     root.innerHTML = ui.loadingView();
   }
 
   errorSlot.addEventListener('click', function (event) {
     if (event.target.closest('[data-action="dismiss-error"]')) clearError();
+  });
+
+  // Escape dismisses the banner, which until now was reachable only by finding
+  // and clicking its button.
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && errorSlot.firstChild) clearError();
   });
 
   /* ---------------------------------------------------------------- routing */
@@ -84,6 +220,11 @@ window.App = window.App || {};
     // A banner belongs to the request that raised it, not to the next screen.
     clearError();
 
+    // The live region is deliberately NOT cleared here. "Employee added." is
+    // announced by the save, which then navigates - and clearing on arrival wiped
+    // the message before a screen reader ever reached it. Stale text is harmless:
+    // a live region speaks when its contents change, not because they are there.
+
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
     if (route.name === 'edit') return renderForm(route.id);
@@ -97,10 +238,10 @@ window.App = window.App || {};
 
     return employees.filter(function (employee) {
       if (filters.department && employee.department !== filters.department) return false;
-      if (filters.status && App.computeStatus(employee) !== filters.status) return false;
+      if (filters.status && employee.status !== filters.status) return false;
       if (!term) return true;
 
-      var haystack = (App.fullName(employee) + ' ' + employee.email).toLowerCase();
+      var haystack = (ui.fullName(employee) + ' ' + employee.email).toLowerCase();
       return haystack.indexOf(term) !== -1;
     });
   }
@@ -119,9 +260,11 @@ window.App = window.App || {};
     showLoading();
 
     store.listEmployees().then(function (employees) {
-      loadedEmployees = employees;
-      root.innerHTML = ui.listView(employees, filters);
+      setEmployees(employees);
+      setTitle('Employees');
+      paint(ui.listView(employees, filters, facets));
       refreshRows();
+      focusHeading();
 
       document.getElementById('search').addEventListener('input', function (event) {
         filters.search = event.target.value;
@@ -147,12 +290,15 @@ window.App = window.App || {};
         var employee = loadedEmployees.filter(function (item) { return item.id === id; })[0];
         if (!employee) return;
 
-        if (!window.confirm('Remove ' + App.fullName(employee) + ' from the system?')) return;
+        if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the system?')) return;
 
         clearError();
         button.disabled = true;
 
         store.deleteEmployee(id).then(function () {
+          // Said out loud, because the row simply vanishing is not an event a
+          // screen reader reports.
+          announce(ui.fullName(employee) + ' was removed.');
           renderList();
         }, function (error) {
           // The list is still on screen and still correct apart from this row,
@@ -192,6 +338,12 @@ window.App = window.App || {};
       var message = errors[name] || '';
       wrapper.classList.toggle('has-error', !!message);
       wrapper.querySelector('[data-error-for="' + name + '"]').textContent = message;
+
+      // The red border is the only signal a sighted user needs and the only one
+      // nobody else gets. aria-invalid is the same fact, said in a way a screen
+      // reader repeats when the field is focused.
+      var control = form.elements[name];
+      if (control) control.setAttribute('aria-invalid', message ? 'true' : 'false');
     });
 
     var firstInvalid = Object.keys(errors)[0];
@@ -222,7 +374,9 @@ window.App = window.App || {};
    * have, and a field problem lands under its input rather than in the banner.
    */
   function showSaveError(form, error) {
-    if (error.status === 400 && error.fields) {
+    // Any status, not just 400: a duplicate work email comes back as a 409 and
+    // is still a problem with one input, so it belongs under that input.
+    if (error.fields) {
       showErrors(form, error.fields);
       return;
     }
@@ -230,18 +384,27 @@ window.App = window.App || {};
   }
 
   function renderForm(id) {
-    // The "new employee" form has nothing to fetch, so it must not flash a
-    // placeholder on its way to rendering instantly.
-    if (id) showLoading();
-    var load = id ? store.getEmployee(id) : Promise.resolve(null);
+    // Both forms wait now, the add form included: its dropdowns are built from
+    // the employees the API returns, so there is nothing to render until that
+    // list is in.
+    showLoading();
+
+    var load = Promise.all([
+      id ? store.getEmployee(id) : null,
+      ensureEmployees()
+    ]).then(function (results) { return results[0]; });
 
     load.then(function (employee) {
       if (id && !employee) {
-        root.innerHTML = ui.notFoundView();
+        setTitle('Not found');
+        paint(ui.notFoundView());
+        focusHeading();
         return;
       }
 
-      root.innerHTML = ui.formView(employee);
+      setTitle(employee ? 'Edit ' + ui.fullName(employee) : 'Add Employee');
+      paint(ui.formView(employee, formFacets(employee)));
+      focusHeading();
       var form = document.getElementById('employee-form');
       var submitting = false;
 
@@ -270,6 +433,7 @@ window.App = window.App || {};
           : store.createEmployee(values);
 
         save.then(function () {
+          announce(employee ? 'Changes saved.' : 'Employee added.');
           navigate('#/employees');   // nothing to restore; navigating discards this DOM
         }, function (error) {
           submitting = false;
@@ -282,12 +446,13 @@ window.App = window.App || {};
       var deleteButton = form.querySelector('[data-action="delete"]');
       if (deleteButton) {
         deleteButton.addEventListener('click', function () {
-          if (!window.confirm('Remove ' + App.fullName(employee) + ' from the system?')) return;
+          if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the system?')) return;
 
           clearError();
           deleteButton.disabled = true;
 
           store.deleteEmployee(employee.id).then(function () {
+            announce(ui.fullName(employee) + ' was removed.');
             navigate('#/employees');
           }, function (error) {
             // The form is still filled in and still valid; keep it usable.
@@ -296,19 +461,38 @@ window.App = window.App || {};
           });
         });
       }
-    }, failLoad('Could not load this employee.'));
+    }, failLoad(id ? 'Could not load this employee.' : 'Could not load the form.'));
   }
 
   /* -------------------------------------------------------- checklist view */
 
+  /*
+   * The one comment box that is open, as { itemId, draft }, or null.
+   *
+   * Kept here rather than read out of the DOM because every tick repaints the
+   * whole view from the server's response - so a comment being typed has to be
+   * re-rendered into the new DOM, not left behind in the old one.
+   */
+  var commentEditor = null;
+
+  function checklistItem(employee, itemId) {
+    return employee.checklist.filter(function (item) {
+      return item.id === itemId;
+    })[0];
+  }
+
   function renderChecklist(id) {
     showLoading();
+    commentEditor = null;
 
     store.getEmployee(id).then(function (employee) {
       if (!employee) {
-        root.innerHTML = ui.notFoundView();
+        setTitle('Not found');
+        paint(ui.notFoundView());
+        focusHeading();
         return;
       }
+      setTitle(ui.fullName(employee) + ' \u2014 checklist');
       paintChecklist(employee);
     }, failLoad('Could not load this checklist.'));
   }
@@ -318,8 +502,21 @@ window.App = window.App || {};
    * instead of triggering a second GET - and so the repaint costs no placeholder
    * flash on every click.
    */
-  function paintChecklist(employee) {
-    root.innerHTML = ui.checklistView(employee);
+  /**
+   * `focus` says what to put the cursor back on after the repaint:
+   * { kind: 'checkbox' | 'button' | 'editor', itemId }, or null for the heading.
+   */
+  function paintChecklist(employee, focus) {
+    paint(ui.checklistView(employee, commentEditor));
+
+    /*
+     * A tick replaces the whole view, which throws away the control the user is
+     * standing on - so a keyboard user is dumped back to the top of the document
+     * on every single tick, and there is no way to work down the list. Put focus
+     * back where it was; only a fresh arrival gets the heading.
+     */
+    restoreFocus(focus);
+    wireComments(employee);
 
     document.getElementById('checklist').addEventListener('change', function (event) {
       var checkbox = event.target;
@@ -334,16 +531,200 @@ window.App = window.App || {};
       store.setChecklistItem(employee.id, itemId, intended).then(function (updated) {
         // The checkbox is never the source of truth: repaint from the employee the
         // server just returned, progress bar and status badge included.
-        paintChecklist(updated);
+        paintChecklist(updated, { kind: 'checkbox', itemId: itemId });
+        announceTick(updated, itemId);
       }, function (error) {
         // The write did not land, so put the box back to what the server still
         // believes. We deliberately don't re-fetch to confirm that - the request
         // that would tell us is the one that just failed.
         checkbox.checked = !intended;
         checkbox.disabled = false;
+
+        // Disabling an element that has focus hands focus to <body>, so the
+        // round trip above quietly dropped a keyboard user out of the list.
+        // Only take it back if that is what happened - if they have since
+        // clicked or tabbed somewhere else, leave them there.
+        if (document.activeElement === document.body) checkbox.focus();
+
+        var label = checkbox.closest('label').querySelector('.item-label');
+        announce('Could not save that change. ' +
+          (label ? label.textContent : 'That item') + ' was left as it was.');
         showError(error);
       });
     });
+  }
+
+  function restoreFocus(focus) {
+    if (!focus) return focusHeading();
+
+    var selectors = {
+      checkbox: 'input[data-item-id="' + focus.itemId + '"]',
+      button: '[data-action="comment"][data-item-id="' + focus.itemId + '"]',
+      editor: '.comment-editor textarea'
+    };
+
+    var target = root.querySelector(selectors[focus.kind]);
+    if (!target) return focusHeading();
+
+    target.focus();
+    // Land at the end of what is already written rather than in front of it -
+    // an editor opens to add to a note, not to overwrite it.
+    if (focus.kind === 'editor' && target.setSelectionRange) {
+      target.setSelectionRange(target.value.length, target.value.length);
+    }
+  }
+
+  /* -------------------------------------------------- checklist comments */
+
+  function wireComments(employee) {
+    var list = document.getElementById('checklist');
+
+    list.addEventListener('click', function (event) {
+      var button = event.target.closest('button[data-action]');
+      if (!button) return;
+
+      var action = button.getAttribute('data-action');
+      var itemId = button.getAttribute('data-item-id') ||
+        (commentEditor && commentEditor.itemId);
+      if (!itemId) return;
+
+      if (action === 'comment') toggleEditor(employee, itemId);
+      if (action === 'cancel-comment') closeEditor(employee);
+      if (action === 'save-comment') saveComment(employee, itemId, currentDraft());
+      if (action === 'delete-comment') saveComment(employee, itemId, '');
+    });
+
+    // Every keystroke goes into the state object, so the next repaint - which a
+    // tick on any other item will cause - re-renders the text rather than
+    // silently discarding it.
+    list.addEventListener('input', function (event) {
+      if (commentEditor && event.target.matches('.comment-editor textarea')) {
+        commentEditor.draft = event.target.value;
+      }
+    });
+
+    list.addEventListener('keydown', function (event) {
+      if (!event.target.matches('.comment-editor textarea')) return;
+
+      if (event.key === 'Escape') {
+        // Stop it reaching the document handler, which would dismiss the error
+        // banner instead - two meanings for one key, and this is the nearer one.
+        event.stopPropagation();
+        closeEditor(employee);
+      } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        saveComment(employee, commentEditor.itemId, currentDraft());
+      }
+    });
+  }
+
+  function currentDraft() {
+    var textarea = root.querySelector('.comment-editor textarea');
+    return textarea ? textarea.value : (commentEditor ? commentEditor.draft : '');
+  }
+
+  /**
+   * The icon opens the box and closes it again - it is the same control, so a
+   * second press has to mean "put this away" rather than "reopen and reset",
+   * which is what it used to do (silently replacing anything typed with the
+   * saved text).
+   */
+  function toggleEditor(employee, itemId) {
+    if (commentEditor && commentEditor.itemId === itemId) {
+      if (!mayDiscardDraft(employee)) return;
+      closeEditor(employee, 'Comment box closed.');
+      return;
+    }
+    openEditor(employee, itemId);
+  }
+
+  /*
+   * Cancel and Esc say "discard" in as many words, so they just do it. The icon
+   * does not, and neither does clicking the icon on a different item - so those
+   * two ask, and only when there is actually something to lose.
+   */
+  function mayDiscardDraft(employee) {
+    if (!commentEditor) return true;
+
+    var item = checklistItem(employee, commentEditor.itemId);
+    var unsaved = currentDraft() !== ((item && item.comment) || '');
+    return !unsaved || window.confirm('Discard the comment you were writing?');
+  }
+
+  function openEditor(employee, itemId) {
+    var item = checklistItem(employee, itemId);
+    if (!item) return;
+
+    // Only one box is open at a time, so opening this one closes that one.
+    if (!mayDiscardDraft(employee)) return;
+
+    clearError();
+    commentEditor = { itemId: itemId, draft: item.comment || '' };
+    paintChecklist(employee, { kind: 'editor', itemId: itemId });
+    announce('Editing the comment on ' + item.label + '.');
+  }
+
+  function closeEditor(employee, message) {
+    if (!commentEditor) return;
+
+    var itemId = commentEditor.itemId;
+    commentEditor = null;
+    // Repaint from the employee we already have: nothing was written, so there
+    // is nothing to re-read.
+    paintChecklist(employee, { kind: 'button', itemId: itemId });
+
+    // The box collapsing is visible on screen and silent everywhere else.
+    if (message) announce(message);
+  }
+
+  function saveComment(employee, itemId, text) {
+    var item = checklistItem(employee, itemId);
+    var editor = root.querySelector('.comment-editor');
+    var saveButton = editor && editor.querySelector('[data-action="save-comment"]');
+
+    clearError();
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving\u2026';
+    }
+
+    store.setChecklistComment(employee.id, itemId, text).then(function (updated) {
+      commentEditor = null;
+      paintChecklist(updated, { kind: 'button', itemId: itemId });
+      announce(text
+        ? 'Comment saved on ' + item.label + '.'
+        : 'Comment removed from ' + item.label + '.');
+    }, function (error) {
+      // Deliberately no repaint: the draft is still in the textarea and the
+      // whole point of failing is not to lose it.
+      if (saveButton) {
+        saveButton.disabled = false;
+        saveButton.textContent = 'Save comment';
+      }
+
+      var inline = editor && editor.querySelector('[data-error-for="comment"]');
+      if (error.fields && error.fields.comment && inline) {
+        inline.textContent = error.fields.comment;
+        return;   // a problem with this one field belongs under this one field
+      }
+      showError(error);
+    });
+  }
+
+  /*
+   * The progress bar and the status badge both change on a tick, and neither is
+   * near the checkbox. Say what happened instead: what was ticked, and where
+   * that leaves the checklist.
+   */
+  function announceTick(employee, itemId) {
+    var item = employee.checklist.filter(function (entry) {
+      return entry.id === itemId;
+    })[0];
+    if (!item) return;
+
+    announce(item.label + (item.done ? ' ticked. ' : ' unticked. ') +
+      employee.progress.done + ' of ' + employee.progress.total + ' complete. ' +
+      employee.status + '.');
   }
 
   /* ------------------------------------------------------------- bootstrap */

@@ -36,8 +36,10 @@ only had to change the bodies of the functions in `js/store.js`.
   "startDate": "2026-07-06",
   "employmentType": "Full-time",
   "checklist": [
-    { "id": "offer-letter", "label": "Offer letter signed", "owner": "HR", "done": true },
-    { "id": "id-proof", "label": "ID proof submitted", "owner": "Employee", "done": false }
+    { "id": "offer-letter", "label": "Offer letter signed", "owner": "HR", "done": true,
+      "comment": "" },
+    { "id": "id-proof", "label": "ID proof submitted", "owner": "Employee", "done": false,
+      "comment": "Passport, not licence." }
   ],
   "status": "In Progress",
   "progress": { "done": 1, "total": 8, "percent": 13 }
@@ -45,8 +47,8 @@ only had to change the bodies of the functions in `js/store.js`.
 ```
 
 `status` and `progress` are **derived on every read, never stored** — they cannot drift out of
-sync with the checklist. They're additive conveniences; the Phase 1 UI computes its own and
-ignores them.
+sync with the checklist. They are also the only copy: the UI renders the badge and the progress bar
+from these fields rather than computing its own.
 
 `id` and `checklist` are **never settable from a request body**. Send them and they're silently
 dropped, matching `pickEditable` in `js/store.js`.
@@ -56,11 +58,16 @@ dropped, matching `pickEditable` in `js/store.js`.
 | Field | Required | Rule |
 |---|---|---|
 | `firstName`, `lastName`, `jobTitle` | yes | non-empty |
-| `email` | yes | `^[^\s@]+@[^\s@]+\.[^\s@]+$` |
+| `email` | yes | `^[^\s@]+@[^\s@]+\.[^\s@]+$`, and unique across employees (case-insensitive) |
 | `department` | yes | `Engineering` \| `HR` \| `Finance` \| `Operations` |
 | `employmentType` | yes | `Full-time` \| `Contract` \| `Intern` |
-| `startDate` | yes | `YYYY-MM-DD` |
+| `startDate` | yes | `YYYY-MM-DD`, and a real calendar date — `2026-02-30` is a `400` |
 | `phone`, `manager` | no | free text |
+
+`comment` on a checklist item is HR's free-text note about that one step — "chased payroll twice,
+still no bank details". Always a string, `""` when nobody has written anything, capped at **500
+characters**. There is one note per item, not a thread: the API has no authentication, so there is
+no author to attribute a thread to.
 
 ## Errors
 
@@ -72,9 +79,9 @@ dropped, matching `pickEditable` in `js/store.js`.
 
 | Code | When |
 |---|---|
-| `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done` |
+| `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done`, non-text or over-long `comment`, or a PATCH body asking for nothing |
 | `404` `NotFound` | unknown employee id or checklist item id |
-| `409` `Conflict` | id collision on create |
+| `409` `Conflict` | work email already on another employee (carries `fields.email`); UUID collision on create |
 | `500` `InternalError` | anything unhandled — details are in CloudWatch, never in the response |
 
 ---
@@ -120,6 +127,18 @@ curl -s -X POST "$BASE_URL/employees" \
   }'
 ```
 
+A `409` names the field, the same way a `400` does, so a form can paint it under the input:
+
+```json
+{ "error": { "code": "Conflict",
+             "message": "That work email is already on another employee.",
+             "fields": { "email": "Already in use by another employee." } } }
+```
+
+The uniqueness guard is written inside the create transaction, so two simultaneous POSTs of the
+same address cannot both win. Deleting an employee frees their address; so does editing them onto
+a different one.
+
 ### `GET /employees/{id}`
 
 ```bash
@@ -145,12 +164,16 @@ curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
 ```
 
 `404` if the id is unknown — enforced by a condition expression, because `UpdateItem` would
-otherwise upsert a profile with no checklist behind it.
+otherwise upsert a profile with no checklist behind it. `409` if the new email belongs to someone
+else. Changing the address moves the uniqueness guard in the same transaction as the profile.
+
+The response is read back with a **consistent** read, so it always shows the values just written.
 
 ### `DELETE /employees/{id}`
 
-Deletes the whole partition — profile and all 8 checklist rows — in one transaction. `204` with
-no body, `404` if unknown.
+Deletes the whole partition — profile and all 8 checklist rows — plus the employee's email
+uniqueness guard, in one transaction. `204` with no body, `404` if unknown. The work email is
+immediately reusable.
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
@@ -158,14 +181,40 @@ curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYE
 
 ### `PATCH /employees/{id}/checklist/{itemId}`
 
-Ticks or unticks one checklist item. Returns the full updated employee so the caller can re-render
-from the response rather than trusting its own checkbox.
+Ticks or unticks one checklist item **and/or** sets its comment. Returns the full updated employee —
+read consistently, so the recomputed status reflects this tick — so the caller can re-render from the
+response rather than trusting its own checkbox.
+
+Whichever keys the body carries are the ones that change. That is what makes this one endpoint
+enough for both: a comment does not disturb the tick, and a tick does not disturb the comment.
 
 ```bash
+# tick it
 curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" \
-  -H 'Content-Type: application/json' \
-  -d '{"done": true}'
+  -H 'Content-Type: application/json' -d '{"done": true}'
+
+# leave the tick alone, add a note
+curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/bank-details" \
+  -H 'Content-Type: application/json' -d '{"comment": "Chased payroll twice."}'
+
+# both at once
+curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/laptop" \
+  -H 'Content-Type: application/json' -d '{"done": true, "comment": "Dell XPS, collected Friday."}'
+
+# clear the note
+curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/laptop" \
+  -H 'Content-Type: application/json' -d '{"comment": ""}'
 ```
+
+| Body | Result |
+|---|---|
+| `{"done": true}` | ticks it, comment untouched |
+| `{"comment": "..."}` | sets the note, tick untouched |
+| `{"done": …, "comment": …}` | both |
+| `{"comment": ""}` or `{"comment": null}` | clears the note (the attribute is removed, not stored empty) |
+| `{}` | `400` — a request that asks for nothing is a bug at the caller, not a no-op |
+
+`comment` must be a string and is trimmed. Over 500 characters is a `400` naming the field.
 
 Valid `itemId` values: `offer-letter`, `id-proof`, `bank-details`, `laptop`, `email-account`,
 `access-card`, `induction`, `policy-ack`.
@@ -201,6 +250,8 @@ get                   200
 tick offer-letter     200
 tick unknown item     404
 bad email             400
+impossible date       400
+duplicate email       409
 delete                204
 get after delete      404
 update after delete   404
@@ -211,4 +262,5 @@ Two more checks that curl can't make for you:
 1. **Persistence** — run `GET /employees` from a fresh terminal minutes later. The employee is
    still there. This is the thing Phase 1 could not do.
 2. **No orphans** — after the DELETE, scan the table in the DynamoDB console and confirm zero
-   remaining `CHK#` items under that `PK`.
+   remaining `CHK#` items under that `PK`, and no `EMAIL#` item for that address. A stranded guard
+   would lock the address out for good.

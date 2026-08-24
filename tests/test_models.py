@@ -7,13 +7,15 @@ which no emulator reproduces.
 import pytest
 
 from common.checklist_template import CHECKLIST_TEMPLATE, VALID_ITEM_IDS
-from common.keys import chk_sk, employee_id_from_pk, is_profile, pk
+from common.keys import chk_sk, email_pk, employee_id_from_pk, is_profile, pk
 from common.models import (
+    clean_comment,
     derive_status,
     group_by_partition,
     new_checklist_items,
     pick_editable,
     progress,
+    to_api_checklist_item,
     to_api_employee,
     validate_employee,
 )
@@ -83,9 +85,20 @@ def test_rejects_an_employment_type_outside_the_enum():
     assert 'employmentType' in validate_employee(dict(VALID, employmentType='Casual'))
 
 
-@pytest.mark.parametrize('date', ['06/07/2026', '2026-7-6', 'soon'])
+@pytest.mark.parametrize('date', ['06/07/2026', '2026-7-6', 'soon', '20260706'])
 def test_rejects_start_dates_that_are_not_iso(date):
     assert 'startDate' in validate_employee(dict(VALID, startDate=date))
+
+
+@pytest.mark.parametrize('date', ['2026-13-01', '2026-02-30', '2026-00-10', '2027-02-29'])
+def test_rejects_dates_that_are_the_right_shape_and_still_not_real(date):
+    # The regex alone accepted every one of these. 2027 is not a leap year.
+    assert 'startDate' in validate_employee(dict(VALID, startDate=date))
+
+
+@pytest.mark.parametrize('date', ['2026-07-06', '2024-02-29', '2026-12-31'])
+def test_accepts_real_dates_including_a_leap_day(date):
+    assert validate_employee(dict(VALID, startDate=date)) == {}
 
 
 # ------------------------------------------------------------ derived status
@@ -145,6 +158,29 @@ def test_a_new_hire_starts_with_every_item_unticked():
     assert all(item['done'] is False for item in items)
 
 
+# -------------------------------------------------------------- comments
+
+@pytest.mark.parametrize('raw,expected', [
+    ('  Chased payroll.  ', 'Chased payroll.'),
+    (None, ''),
+    ('', ''),
+    ('   ', ''),
+])
+def test_comments_are_trimmed_and_none_means_cleared(raw, expected):
+    assert clean_comment(raw) == expected
+
+
+def test_an_item_with_no_comment_attribute_reports_an_empty_one():
+    item = {'itemId': 'laptop', 'label': 'Laptop issued', 'owner': 'IT', 'done': False}
+    assert to_api_checklist_item(item)['comment'] == ''
+
+
+def test_a_stored_comment_is_passed_through():
+    item = {'itemId': 'laptop', 'label': 'Laptop issued', 'owner': 'IT', 'done': True,
+            'comment': 'Dell, collected Friday.'}
+    assert to_api_checklist_item(item)['comment'] == 'Dell, collected Friday.'
+
+
 # ------------------------------------------------------------ item -> API shape
 
 def _items(done_ids=(), employee_id='abc-123'):
@@ -164,7 +200,7 @@ def test_rebuilds_exactly_the_shape_the_phase_1_frontend_expects():
 
     assert employee['id'] == 'abc-123'
     assert employee['firstName'] == 'Priya'
-    assert set(employee['checklist'][0]) == {'id', 'label', 'owner', 'done'}
+    assert set(employee['checklist'][0]) == {'id', 'label', 'owner', 'done', 'comment'}
     assert employee['checklist'][0]['id'] == 'offer-letter'
     assert employee['status'] == 'In Progress'
     assert employee['progress']['done'] == 2
@@ -198,3 +234,15 @@ def test_groups_a_flat_scan_result_back_into_employees():
     partitions = group_by_partition(_items(employee_id='a') + _items(employee_id='b'))
     assert set(partitions) == {pk('a'), pk('b')}
     assert all(len(rows) == 9 for rows in partitions.values())
+
+
+def test_email_guards_in_a_scan_are_not_employees():
+    guard = {'PK': email_pk('priya.sharma@breville.com'), 'SK': 'EMAIL',
+             'entityType': 'EmailGuard'}
+    partitions = group_by_partition(_items(employee_id='a') + [guard])
+    assert set(partitions) == {pk('a')}
+
+
+@pytest.mark.parametrize('email', ['Priya@Breville.com', ' priya@breville.com ', 'priya@breville.com'])
+def test_the_guard_key_is_the_same_whatever_the_casing_or_padding(email):
+    assert email_pk(email) == 'EMAIL#priya@breville.com'

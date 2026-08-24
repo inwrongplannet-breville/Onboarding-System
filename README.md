@@ -37,7 +37,7 @@ Add `--yes` to skip the confirmation prompt. It drives the public API, not the t
 
 ```bash
 py -m pip install -r requirements-dev.txt
-py -m pytest                    # 78 tests, ~15 seconds
+py -m pytest                    # 125 tests, ~10 seconds
 ```
 
 No AWS account or credentials needed — the handler tests run against an in-memory DynamoDB.

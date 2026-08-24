@@ -12,12 +12,26 @@
     {
       "key": "employeeId",
       "value": ""
+    },
+    {
+      "key": "runEmail",
+      "value": ""
     }
   ],
   "item": [
     {
       "name": "Create employee",
       "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Work emails are unique now, so the run needs an address nobody holds.",
+              "pm.collectionVariables.set('runEmail', 'postman.run+' + Date.now() + '@breville.com');"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
@@ -55,7 +69,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 412 883 016\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 412 883 016\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
         }
       }
     },
@@ -171,6 +185,129 @@
       }
     },
     {
+      "name": "Comment on a checklist item (tick untouched)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const item = pm.response.json().checklist.find(i => i.id === 'bank-details');",
+              "pm.test('the comment is stored', () => pm.expect(item.comment).to.eql('Chased payroll twice, still no bank details.'));",
+              "pm.test('done was not touched', () => pm.expect(item.done).to.be.false);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/bank-details",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "bank-details"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"comment\": \"Chased payroll twice, still no bank details.\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Clear that comment",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const item = pm.response.json().checklist.find(i => i.id === 'bank-details');",
+              "pm.test('reads back as an empty string, never missing', () => pm.expect(item.comment).to.eql(''));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/bank-details",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "bank-details"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"comment\": \"\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Over-long comment - 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+              "pm.test('names the comment field', () => pm.expect(pm.response.json().error.fields).to.have.property('comment'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/bank-details",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "bank-details"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"comment\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n}"
+        }
+      }
+    },
+    {
       "name": "Update employee (checklist must survive)",
       "event": [
         {
@@ -208,7 +345,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
         }
       }
     },
@@ -248,7 +385,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"id\": \"hacked\",\n  \"checklist\": [],\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"priya.sharma@breville.com\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"id\": \"hacked\",\n  \"checklist\": [],\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
         }
       }
     },
@@ -290,6 +427,85 @@
         "body": {
           "mode": "raw",
           "raw": "{ \"email\": \"nope\" }"
+        }
+      }
+    },
+    {
+      "name": "Duplicate work email - 409",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "const body = pm.response.json();",
+              "pm.test('blames the email, not the id', () => {",
+              "  pm.expect(body.error.code).to.eql('Conflict');",
+              "  pm.expect(body.error.fields).to.have.property('email');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Twin\",\n  \"email\": \"{{runEmail}}\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Impossible calendar date - 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+              "// The right shape and still not a day that exists - the regex alone let this through.",
+              "pm.test('names startDate', () => pm.expect(pm.response.json().error.fields).to.have.property('startDate'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Never\",\n  \"lastName\": \"Started\",\n  \"email\": \"never.started@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Coordinator\",\n  \"startDate\": \"2026-02-30\",\n  \"employmentType\": \"Intern\"\n}"
         }
       }
     },

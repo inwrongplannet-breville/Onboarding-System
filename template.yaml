@@ -141,11 +141,17 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # Query as well as UpdateItem: the handler re-reads the partition so
-            # its response carries the checklist, matching GET exactly.
+            # Query and GetItem as well as UpdateItem: the handler reads the
+            # current email before writing, and re-reads the partition afterwards
+            # so its response carries the checklist, matching GET exactly.
+            # PutItem and DeleteItem are for the email uniqueness guard, which
+            # moves in the same transaction whenever the address changes.
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
+                - dynamodb:PutItem
+                - dynamodb:DeleteItem
+                - dynamodb:GetItem
                 - dynamodb:Query
               Resource: !GetAtt OnboardingTable.Arn
       Events:
