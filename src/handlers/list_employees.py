@@ -13,9 +13,9 @@ list view filters by derived status and draws a progress bar, both of which need
 the checklist. A profile-only index gives you N profiles and then N follow-up
 Queries. One Scan already returns everything.
 
-Scale: ~9 items x ~300 bytes = ~2.7 KB per employee, so a 1 MB Scan page holds
-roughly 370 of them. Fine for hundreds. Wrong for a million - at which point you
-denormalise doneCount onto the profile and add that GSI.
+Scale: one item x ~1.1 KB per employee, so a 1 MB Scan page holds roughly 900 of
+them. Fine for hundreds. Wrong for a million - at which point you denormalise
+doneCount onto the item and add that GSI.
 
 The rule: Query when you know the partition key, Scan only when you genuinely
 need every item.
@@ -25,16 +25,26 @@ here, because there is no index that would let it skip them. That is the price o
 soft deletion on a Scan-based list. At the scale above it is noise; the sparse-GSI
 rewrite is where you would stop paying it.
 """
+from boto3.dynamodb.conditions import Attr
+
 from common import responses
 from common.db import table
 from common.handler import api_handler
-from common.models import group_by_partition, to_api_employee
+from common.models import to_api_employee
 
 
 def _scan_all():
     """Scan is paginated at 1 MB. Follow LastEvaluatedKey or silently lose rows."""
     items = []
-    kwargs = {}
+    kwargs = {
+        # Employees are the only kind of item in the table today, so this filters
+        # nothing out. It is here so that stays true by construction rather than
+        # by luck: anything else that ever lands in this table - an audit row, a
+        # reintroduced email guard - is excluded from the list without another
+        # visit to this file. Filtering happens after the read, so it costs the
+        # same either way.
+        'FilterExpression': Attr('entityType').eq('Employee'),
+    }
 
     while True:
         result = table.scan(**kwargs)
@@ -48,16 +58,9 @@ def _scan_all():
 
 @api_handler
 def lambda_handler(event, context):
-    partitions = group_by_partition(_scan_all())
-
     employees = []
-    for items in partitions.values():
-        employee = to_api_employee(items)
-        # Skip orphan checklist rows with no profile. Archiving never strands any
-        # - it deletes nothing - but historical partitions from before the switch
-        # might, and a list endpoint shouldn't crash on one.
-        if employee is None:
-            continue
+    for item in _scan_all():
+        employee = to_api_employee(item)
         # Archived employees are still in the table and still readable by id.
         # This is the endpoint that decides they are off the list, which is what
         # "removed" means to everyone using the UI. See handlers/delete_employee.

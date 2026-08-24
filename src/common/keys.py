@@ -1,60 +1,29 @@
 """
-Key construction for the single-table design - the one place PK/SK strings are built.
+Key construction - the one place PK strings are built.
 
-Layout, all under one partition per employee:
+One item per employee, and that item is the whole employee:
 
-    PK = "EMP#<uuid>"   SK = "PROFILE"          the employee record
-    PK = "EMP#<uuid>"   SK = "CHK#<itemId>"     one row per checklist item
+    PK = "EMP#<uuid>"    the profile fields, plus the checklist as an embedded list
 
-Nine items per employee, so a single Query on the PK returns the whole thing.
+There is no sort key and no second kind of item. A GetItem on the PK returns
+everything about an employee; a Scan returns one row per employee.
 
-Plus one item per employee outside that partition, the email uniqueness guard
-described at the bottom of this file.
+The checklist used to be eight sibling rows under a shared partition, addressed
+by SK. It is now a list attribute on this item, addressed by index - see
+CHECKLIST_INDEX in common/checklist_template.py for what that costs.
+
+Work-email uniqueness used to be enforced by a second item in its own partition,
+written in the same transaction as the profile. That item is gone, and with it
+the guarantee: DynamoDB can only enforce uniqueness on a partition key, and the
+partition key here is a UUID. Two employees can now hold the same work email.
 """
 
 EMP_PREFIX = 'EMP#'
-CHK_PREFIX = 'CHK#'
-PROFILE_SK = 'PROFILE'
 
 
 def pk(employee_id):
     return EMP_PREFIX + employee_id
 
 
-def chk_sk(item_id):
-    return CHK_PREFIX + item_id
-
-
 def employee_id_from_pk(value):
     return value[len(EMP_PREFIX):]
-
-
-def item_id_from_sk(value):
-    return value[len(CHK_PREFIX):]
-
-
-def is_profile(item):
-    return item.get('SK') == PROFILE_SK
-
-
-# ------------------------------------------------------------- email guards
-#
-# A uniqueness guard is a second item in its own partition, written inside the
-# same transaction as the profile it belongs to:
-#
-#     PK = "EMAIL#<lowercased email>"   SK = "EMAIL"
-#
-# `attribute_not_exists(PK)` on that Put is what makes "one employee per work
-# email" a property of the table rather than a hope. Lowercased because
-# Priya@ and priya@ are the same mailbox to every mail server that matters.
-
-EMAIL_PREFIX = 'EMAIL#'
-EMAIL_SK = 'EMAIL'
-
-
-def email_pk(email):
-    return EMAIL_PREFIX + (email or '').strip().lower()
-
-
-def is_employee_pk(value):
-    return str(value).startswith(EMP_PREFIX)

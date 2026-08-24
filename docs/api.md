@@ -90,7 +90,7 @@ no author to attribute a thread to.
 |---|---|
 | `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done`, non-text or over-long `comment`, or a PATCH body asking for nothing |
 | `404` `NotFound` | unknown employee id or checklist item id |
-| `409` `Conflict` | work email already on another employee (carries `fields.email`); a `PUT` or `PATCH` against an **archived** employee; UUID collision on create |
+| `409` `Conflict` | a `PUT` or `PATCH` against an **archived** employee; UUID collision on create |
 | `500` `InternalError` | anything unhandled — details are in CloudWatch, never in the response |
 
 ---
@@ -118,8 +118,8 @@ Sorted by `startDate`, then `lastName`.
 
 ### `POST /employees`
 
-Creates the employee **and** their 8 checklist rows in one atomic transaction. Returns `201` with
-the created employee and a `Location` header.
+Creates the employee as a single item, with the 8 checklist entries embedded on it. Returns `201`
+with the created employee and a `Location` header.
 
 ```bash
 curl -s -X POST "$BASE_URL/employees" \
@@ -137,17 +137,10 @@ curl -s -X POST "$BASE_URL/employees" \
   }'
 ```
 
-A `409` names the field, the same way a `400` does, so a form can paint it under the input:
-
-```json
-{ "error": { "code": "Conflict",
-             "message": "That work email is already on another employee.",
-             "fields": { "email": "Already in use by another employee." } } }
-```
-
-The uniqueness guard is written inside the create transaction, so two simultaneous POSTs of the
-same address cannot both win. Deleting an employee frees their address; so does editing them onto
-a different one.
+**Work emails are not unique.** Posting an address another employee already holds succeeds. There
+is nothing to reject it: DynamoDB can only enforce uniqueness on a partition key, the partition key
+here is a UUID, and the guard item that used to carry the constraint went when the table collapsed
+to one item per employee. Callers that care have to check for themselves.
 
 ### `GET /employees/{id}`
 
@@ -155,13 +148,14 @@ a different one.
 curl -s "$BASE_URL/employees/$EMPLOYEE_ID"
 ```
 
-One Query on the partition key returns the profile and all 8 checklist rows together. `404` if
-the id is unknown.
+One GetItem on the partition key returns the whole employee, checklist included — see
+[database-design.md](database-design.md). `404` if the id is unknown.
 
 ### `PUT /employees/{id}`
 
-Full replace of the editable fields. **Checklist progress is preserved** — the checklist lives in
-separate items that this endpoint never touches. `409` if the employee is archived.
+Full replace of the editable fields. **Checklist progress is preserved** — the checklist is an
+attribute of the same item, and the `SET` clause is built from a whitelist that never names it.
+`409` if the employee is archived.
 
 ```bash
 curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
@@ -174,8 +168,8 @@ curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
 ```
 
 `404` if the id is unknown — enforced by a condition expression, because `UpdateItem` would
-otherwise upsert a profile with no checklist behind it. `409` if the new email belongs to someone
-else. Changing the address moves the uniqueness guard in the same transaction as the profile.
+otherwise upsert a half-employee with no checklist behind it. Changing the email is an ordinary
+field edit; it is not checked against anyone else's.
 
 The response is read back with a **consistent** read, so it always shows the values just written.
 
@@ -210,8 +204,8 @@ records the decision. An archived record showing 2 of 8 is correct, not a contra
 
 Three consequences, all deliberate:
 
-- **The work email stays reserved.** The uniqueness guard is not removed, so re-hiring under the
-  same address is a `409`. Nothing in the API releases it.
+- **The work email is not reserved.** The archived record still shows it, but nothing stops a new
+  hire taking the same address — re-hiring under it returns `201`, not `409`.
 - **The record freezes.** `PUT` and `PATCH` both return `409` with
   `"This employee is archived. Their record is read-only."` This is enforced by a condition on the
   write itself, not just a check before it, so a cancelled onboarding cannot be ticked to 8 of 8
@@ -220,7 +214,7 @@ Three consequences, all deliberate:
   not move `archivedAt` or recompute `archivedAs`.
 
 Archived employees remain readable at `GET /employees/{id}` and in the DynamoDB console. There is no
-un-archive endpoint; reversing one means clearing `archivedAs` on the profile row directly.
+un-archive endpoint; reversing one means clearing `archivedAs` on the item directly.
 
 ### `PATCH /employees/{id}/checklist/{itemId}`
 
@@ -296,12 +290,12 @@ tick offer-letter     200
 tick unknown item     404
 bad email             400
 impossible date       400
-duplicate email       409
+duplicate email       201   <- no longer rejected
 archive               200
 get after archive     200
 update after archive  409
 tick after archive    409
-email still reserved  409
+re-hire on same email 201   <- no longer reserved
 ```
 
 Three more checks that curl can't make for you:
@@ -309,7 +303,7 @@ Three more checks that curl can't make for you:
 1. **Persistence** — run `GET /employees` from a fresh terminal minutes later. The employee is
    still there. This is the thing Phase 1 could not do.
 2. **Off the list, not gone** — after the archive, confirm the employee is absent from
-   `GET /employees` and still present in the DynamoDB console: 1 profile row carrying `archivedAs`,
-   8 `CHK#` rows, and the `EMAIL#` guard.
+   `GET /employees` and still present in the DynamoDB console: one item carrying `archivedAs`, with
+   its 8-entry `checklist` list intact.
 3. **Comments survived** — any note written on a checklist item is still on the archived record.
-   That history is the reason the row is still there.
+   That history is the reason the item is still there.

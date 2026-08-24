@@ -1,8 +1,8 @@
 """
 GET /employees/{id} - brief task 3.
 
-One Query on the partition key returns the profile and all 8 checklist rows in a
-single round trip. That is the whole point of keeping them under one PK.
+One GetItem on the partition key returns the whole employee, checklist included -
+the checklist is a list attribute on that item, not eight rows beside it.
 
 Eventually consistent, deliberately - see common/repository.py. PUT and PATCH are
 the calls that need the strong read, because they wrote a moment earlier.

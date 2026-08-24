@@ -379,8 +379,8 @@ window.App = window.App || {};
    * have, and a field problem lands under its input rather than in the banner.
    */
   function showSaveError(form, error) {
-    // Any status, not just 400: a duplicate work email comes back as a 409 and
-    // is still a problem with one input, so it belongs under that input.
+    // Any status, not just 400: a field-specific problem can arrive with any code,
+    // and it belongs under its input rather than in the banner.
     if (error.fields) {
       showErrors(form, error.fields);
       return;

@@ -1,50 +1,43 @@
 """
 PUT /employees/{id} - brief task 5.
 
-UpdateItem on the profile row only. The checklist rows are separate items and are
-not touched, which is what preserves onboarding progress across an edit.
+One UpdateItem, one write path, whatever the body says.
 
-The condition expression is load-bearing: UpdateItem *upserts* by default, so a
-PUT to a deleted id would happily create a profile with no checklist behind it.
+The checklist now lives on the same item this writes, so "an edit preserves
+onboarding progress" is no longer a property of touching a different row - it is a
+property of touching different *attributes*. The SET clause is built from
+EDITABLE_FIELDS and never names `checklist`, which is the only reason a PUT does
+not flatten eight ticks and their comments. That whitelist is load-bearing; see
+_profile_update.
 
-An archived employee is refused outright with a 409 - see handlers/delete_employee
-for why the record freezes. The check is made twice on purpose: once up front so
-the caller gets a message that names the actual problem, and once as a condition
-on the write itself, so an archive landing in between cannot be overwritten.
+The condition expression is load-bearing too: UpdateItem *upserts* by default, so
+a PUT to an unknown id would happily create a half-employee with no checklist
+behind it.
 
-Two shapes of write, decided by whether the email changed:
+An archived employee is refused with a 409 - see handlers/delete_employee for why
+the record freezes. The check happens once, as a condition on the write itself, so
+an archive landing mid-request cannot be overwritten; _guard_failure then reads
+back to say which half of the condition fired.
 
-  unchanged  a plain UpdateItem, exactly as before.
-  changed    a transaction - put the new email guard, delete the old one, update
-             the profile - so the guard can never disagree with the profile it
-             describes. Doing it in three separate calls leaves a window where a
-             crash strands a guard on an address nobody holds, and that address
-             is then unusable forever with nothing in the table to explain why.
+This used to have a second, transactional write path for when the email changed,
+moving a uniqueness guard item in step with the profile. Both are gone: there is
+no guard any more, so a work email is just another editable field and two
+employees may hold the same one.
 """
 from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import TABLE_NAME, client, serialize, table
-from common.handler import (
-    api_handler,
-    failed_at,
-    is_condition_failure,
-    is_transaction_cancelled,
-    parse_body,
-    path_param,
-)
-from common.keys import EMAIL_SK, PROFILE_SK, email_pk, pk
+from common.db import table
+from common.handler import api_handler, is_condition_failure, parse_body, path_param
+from common.keys import pk
 from common.models import ARCHIVED_MESSAGE, EDITABLE_FIELDS, pick_editable, validate_employee
-from common.repository import load_employee, load_profile
+from common.repository import load_archive_state, load_employee
 
 
-# The profile row has to exist and must not be archived. Shared by both write
-# paths so the two cannot drift, which matters here: a condition that is right on
-# one path and stale on the other is a hole you only find in production.
-PROFILE_GUARD = ('attribute_exists(PK) AND attribute_exists(SK) '
-                 'AND attribute_not_exists(#archivedAs)')
+# The employee has to exist and must not be archived.
+PROFILE_GUARD = 'attribute_exists(PK) AND attribute_not_exists(#archivedAs)'
 
 
 def _guard_failure(employee_id):
@@ -55,20 +48,22 @@ def _guard_failure(employee_id):
     'archived' and 'never existed' are a 409 and a 404 and telling a caller the
     wrong one sends them looking in the wrong place.
     """
-    profile = load_profile(employee_id)
-    if profile is not None and profile['archivedAs']:
+    state = load_archive_state(employee_id)
+    if state is not None and state['archivedAs']:
         return responses.conflict(ARCHIVED_MESSAGE)
     return responses.not_found('No employee with id ' + employee_id + '.')
 
 
 def _profile_update(values, now):
-    """The SET clause shared by both write paths."""
+    """The SET clause. Whitelisted, and that is what protects the checklist."""
     assignments = []
     names = {}
     values_map = {}
 
     # Built from the whitelist, so `id`, `checklist` or anything else a caller
-    # invents in the body simply never reaches the SET clause.
+    # invents in the body simply never reaches the SET clause. Since the checklist
+    # is an attribute of the very item being updated, this is now the only thing
+    # standing between a profile edit and an erased checklist.
     for field in EDITABLE_FIELDS:
         assignments.append('#' + field + ' = :' + field)
         names['#' + field] = field
@@ -78,9 +73,10 @@ def _profile_update(values, now):
     names['#updatedAt'] = 'updatedAt'
     values_map[':updatedAt'] = now
 
-    # Not in the SET clause - it is here for PROFILE_GUARD below, which shares
-    # this names map. DynamoDB rejects an ExpressionAttributeNames entry that no
-    # expression uses, so this is only legal because every caller pairs the two.
+    # Not in the SET clause - it is here for PROFILE_GUARD, which shares this
+    # names map. DynamoDB rejects an ExpressionAttributeNames entry that no
+    # expression uses, so this is only legal because the two always travel
+    # together.
     names['#archivedAs'] = 'archivedAs'
 
     return 'SET ' + ', '.join(assignments), names, values_map
@@ -99,98 +95,23 @@ def lambda_handler(event, context):
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
     expression, names, values_map = _profile_update(values, now)
 
-    profile = load_profile(employee_id)
-    if profile is None:
-        return responses.not_found('No employee with id ' + employee_id + '.')
-    if profile['archivedAs']:
-        return responses.conflict(ARCHIVED_MESSAGE)
-    existing_email = profile['email']
-
-    moving_email = email_pk(existing_email) != email_pk(values['email'])
-
-    if moving_email:
-        conflict = _swap_email_and_update(
-            employee_id, existing_email, values, now, expression, names, values_map)
-        if conflict is not None:
-            return conflict
-    else:
-        try:
-            table.update_item(
-                Key={'PK': pk(employee_id), 'SK': PROFILE_SK},
-                UpdateExpression=expression,
-                ExpressionAttributeNames=names,
-                ExpressionAttributeValues=values_map,
-                ConditionExpression=PROFILE_GUARD,
-            )
-        except ClientError as error:
-            if is_condition_failure(error):
-                return _guard_failure(employee_id)
-            raise
+    try:
+        table.update_item(
+            Key={'PK': pk(employee_id)},
+            UpdateExpression=expression,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values_map,
+            ConditionExpression=PROFILE_GUARD,
+        )
+    except ClientError as error:
+        if is_condition_failure(error):
+            return _guard_failure(employee_id)
+        raise
 
     # Re-read so the response carries the checklist too, matching GET exactly.
-    # Consistently, because an eventually consistent Query here can hand back the
-    # profile as it was before the UpdateItem a moment ago.
+    # Consistently, because an eventually consistent read here can hand back the
+    # item as it was before the UpdateItem a moment ago.
     employee = load_employee(employee_id, consistent=True)
     if employee is None:
         return responses.not_found('No employee with id ' + employee_id + '.')
     return responses.ok(employee)
-
-
-def _swap_email_and_update(employee_id, existing_email, values, now,
-                           expression, names, values_map):
-    """Returns an error response, or None when the write went through."""
-    guard = {
-        'PK': email_pk(values['email']),
-        'SK': EMAIL_SK,
-        'entityType': 'EmailGuard',
-        'employeeId': employee_id,
-        'email': values['email'],
-        'createdAt': now,
-    }
-
-    transact_items = [
-        {
-            'Put': {
-                'TableName': TABLE_NAME,
-                'Item': serialize(guard),
-                'ConditionExpression': 'attribute_not_exists(PK)',
-            }
-        },
-        {
-            # No condition. An employee created before guards existed has none to
-            # delete, and a delete of an absent item is a no-op - which is the
-            # behaviour we want rather than a failed edit.
-            'Delete': {
-                'TableName': TABLE_NAME,
-                'Key': serialize({'PK': email_pk(existing_email), 'SK': EMAIL_SK}),
-            }
-        },
-        {
-            'Update': {
-                'TableName': TABLE_NAME,
-                'Key': serialize({'PK': pk(employee_id), 'SK': PROFILE_SK}),
-                'UpdateExpression': expression,
-                'ExpressionAttributeNames': names,
-                'ExpressionAttributeValues': serialize(values_map),
-                'ConditionExpression': PROFILE_GUARD,
-            }
-        },
-    ]
-
-    try:
-        client.transact_write_items(TransactItems=transact_items)
-    except ClientError as error:
-        if not is_transaction_cancelled(error):
-            raise
-        if failed_at(error, 0):
-            return responses.conflict(
-                'That work email is already on another employee.',
-                {'email': 'Already in use by another employee.'},
-            )
-        if failed_at(error, 2):
-            # Archived between the read above and this write. (Deleted is no
-            # longer reachable through the API, but the guard still covers it.)
-            return _guard_failure(employee_id)
-        raise
-
-    return None

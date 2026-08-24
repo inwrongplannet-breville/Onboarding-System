@@ -5,6 +5,7 @@ Everything about how this thing is built and why. For getting it running, see th
 
 - [Architecture](#architecture)
 - [Data model](#data-model)
+- [Database design](database-design.md) — separate file: the storage layout in full
 - [Phase 1 — UI shell](#phase-1--ui-shell)
 - [Phase 2 — the backend](#phase-2--the-backend)
 - [Phase 3 — integration](#phase-3--integration)
@@ -31,7 +32,7 @@ API Gateway  /dev
     +-- PATCH  /employees/{id}/checklist/{itemId}        SetChecklistItemFunction
                                 |
                                 v
-                    DynamoDB  onboarding-dev  (single table, PK + SK)
+                    DynamoDB   one item per employee, keyed by PK
 ```
 
 ### Files
@@ -57,6 +58,7 @@ events/             sample API Gateway payloads for `sam local invoke`
 docs/
   api.md            endpoint reference + the acceptance run
   design.md         this file
+  database-design.md  the DynamoDB layout, access patterns and invariants
   phase3-testing.md the manual click-through
   Employee-Onboarding.postman_collection.json
 ```
@@ -127,7 +129,7 @@ found here is a backend bug, with no frontend to blame.
 
 | Brief task | Status |
 |---|---|
-| 1. Design the employee record structure | Done — single-table DynamoDB, see below |
+| 1. Design the employee record structure | Done — one DynamoDB item per employee, see below |
 | 2. Lambda: create employee | Done — `src/handlers/create_employee.py` |
 | 3. Lambda: get employee by ID | Done — `src/handlers/get_employee.py` |
 | 4. Lambda: list all employees | Done — `src/handlers/list_employees.py` (Scan; reasoning below) |
@@ -141,78 +143,75 @@ Plus `PATCH /employees/{id}/checklist/{itemId}`, which isn't in the brief's tabl
 
 ### The table
 
-One DynamoDB table, `PK` + `SK`, nine items per employee:
+One DynamoDB table, `PK` only, **one item per employee** — and employees are the only kind of item
+in it:
 
 ```
-PK = EMP#<uuid>   SK = PROFILE        the employee record
-PK = EMP#<uuid>   SK = CHK#<itemId>   one row per checklist item, 8 of them
+PK = EMP#<uuid>
+{
+  ...the nine editable profile fields, plus createdAt / updatedAt,
+  plus archivedAs / archivedAt once archived,
 
-PK = EMAIL#<lowercased address>   SK = EMAIL    uniqueness guard, one per employee
+  checklist: [                              <- 8 entries, in template order
+    {itemId, label, owner, order, done, comment?, updatedAt},
+    ...
+  ]
+}
 ```
 
-**Why the email guard is an item and not a check.** DynamoDB can only enforce uniqueness on the
-partition key, and the partition key here is a UUID. So "one employee per work email" is enforced
-by a second item, keyed on the address, written in the *same transaction* as the profile with
-`attribute_not_exists(PK)`. Reading first and then writing is a race that two simultaneous POSTs
-will win. The guard travels with its employee: created with them, moved when the address is edited, and — since
-DELETE became an archive — **kept** when they are archived, so the address stays reserved rather than
-falling to the next hire. Miss any of those and an address is either duplicated or locked forever.
-It lives outside the employee's partition, so `list_employees` filters it out by prefix.
+~1.2 KB per employee, ~0.3% of the 400 KB item limit. No sort key, no secondary indexes.
 
-One caveat for the records already in the dev table: they predate the guard and have none, so their
-addresses are not reserved until each is edited or recreated. `py scripts/seed_employees.py --wipe
---seed` regenerates the six through the API and gives them guards.
+Three things a reviewer will want to know straight away:
 
-**Why the checklist is separate rows rather than a nested list.** This is also what made HR
-comments a one-attribute change rather than a feature: the note belongs to one step, so it lives on
-that step's row and is written by the same `UpdateItem` as the tick. Ticking a box becomes an
-`UpdateItem` against one small item — no read-modify-write of a list, so two people ticking
-different boxes at the same time can't clobber each other. Reading is still one round trip: a
-single `Query` on the partition key returns the profile and all eight rows together.
+- **Ticking a box is still a single server-side `UpdateItem`, not a read-modify-write.** An entry is
+  addressed by a nested document path, `checklist[i].done`, so two simultaneous PATCHes cannot lose
+  each other's change — even on the same entry.
+- **Work email uniqueness is no longer enforced.** The guard item that held it needed a second item
+  in the table, and there isn't one. Two employees may share an address, and `POST`/`PUT` no longer
+  return `409` for a duplicate.
+- **The partition key is a UUID**, because email is editable and partition keys are immutable, and a
+  sequential counter is a serialised hot key bought purely for cosmetics.
 
-**Why the partition key is a UUID and not `emp-001` or the email address.** Email is editable and
-partition keys are immutable. A sequential counter needs a counter item updated on every create — a
-serialised hot key bought purely for cosmetics. Nothing in the frontend parses the id, so the
-`emp-001` format was simply dropped.
-
-**Scan vs Query for `GET /employees`, since the brief asks.** `Query` needs a partition key, and
-employees are spread across every partition by design — so `Scan` is the correct operation, not a
-workaround. The usual counter-suggestion is a sparse GSI with a constant partition key so it becomes
-a `Query`; here that's strictly worse, because the list view filters by derived status and draws a
-progress bar, both of which need the checklist. A profile-only index would give you N profiles and
-then N follow-up queries. One `Scan` already returns everything.
-
-Scale, so it's an argument and not a vibe: ~9 items × ~300 bytes ≈ 2.7 KB per employee, so a 1 MB
-`Scan` page holds ~370 of them. Fine for hundreds, wrong for a million — at which point you
-denormalise a `doneCount` onto the profile and add that index. The rule underneath: **`Query` when
-you know the partition key, `Scan` only when you genuinely need every item.**
+**Full detail — item shape, access patterns per route, the index invariants that must not be broken,
+cost measurements, and the deployment constraint on key-schema changes — is in
+[database-design.md](database-design.md).** That file is the authoritative description; this section
+is a summary.
 
 ### Choices worth defending in review
 
-- **Atomic writes.** Create writes all 9 items with `TransactWriteItems`. `BatchWriteItem` would be
-  cheaper and wrong: it isn't atomic, so a partial failure leaves an employee holding 5 of 8
-  checklist rows. Archiving needs none of this — it is one attribute on one row.
-- **Archiving is enforced, not requested.** `PATCH` on a checklist item runs a `ConditionCheck`
-  against the profile in the same transaction as the tick, so "an archived record is frozen" is a
-  property of the table rather than a check someone remembered to write. See below.
+- **No transactions anywhere.** An employee is one item, so create is a single conditional
+  `PutItem` and every other write is a single `UpdateItem`. There is nothing left to keep atomic
+  across items — which retired `TransactWriteItems`, the low-level boto3 client, and the
+  `CancellationReasons` demux along with it.
+- **Archiving is enforced, not requested.** The archive stamp and the checklist live on the same
+  item, so `PATCH` carries `attribute_not_exists(archivedAs)` in its own `ConditionExpression`
+  rather than as a `ConditionCheck` on a sibling row. "An archived record is frozen" is still a
+  property of the table rather than a check someone remembered to write.
 - **Condition expressions everywhere.** `UpdateItem` upserts by default, so without
-  `attribute_exists(PK)` a `PUT` to a deleted id would silently resurrect a profile with no
-  checklist behind it. Update, patch and delete all guard against it and return `404` instead.
+  `attribute_exists(PK)` a `PUT` to an unknown id would conjure a half-employee with no checklist
+  behind it. Update, patch and delete all guard against it and return `404` instead.
 - **`status` is derived, never stored** — enforced in `common/models.py:derive_status`, and
   computed nowhere else. The list filter runs over the `status` the API returned.
-- **Read-after-write is consistent, read-only isn't.** `PUT` and `PATCH` re-read the partition to
-  build their response, and a Query is eventually consistent by default — so both pass
-  `ConsistentRead=True` via `common/repository.py`. `GET` doesn't: nothing it returns was written a
-  millisecond earlier by the same caller, and a strong read costs twice as much.
-- **Cancelled transactions are read, not guessed.** `CancellationReasons` says which condition
-  failed, so a duplicate email returns `409` on the email and a UUID collision returns `409` on the
-  id — and a throttle, which arrives the same way, is not reported as either.
+- **Read-after-write is consistent, read-only isn't.** `PUT` and `PATCH` re-read to build their
+  response, and reads are eventually consistent by default — so both pass `ConsistentRead=True` via
+  `common/repository.py`. `GET` doesn't: nothing it returns was written a millisecond earlier by the
+  same caller, and a strong read costs twice as much.
+- **A failed condition is read back, not guessed.** `PUT` and `PATCH` re-read on
+  `ConditionalCheckFailed` to say whether it was `404` or `409`, because telling a caller the wrong
+  one sends them looking in the wrong place. In `PATCH` there is a third outcome: an employee who
+  exists and is active means the stored list has drifted from the template, which is a corrupted
+  record rather than a bad request — so it raises and becomes a `500` with a trace, instead of
+  hiding behind a `404` forever.
+- **`PUT` is protected by a whitelist, not by a separate row.** The `SET` clause is built from
+  `EDITABLE_FIELDS` and never names `checklist`. That used to be belt-and-braces on top of "the
+  checklist is a different item"; it is now the only thing standing between a profile edit and eight
+  erased ticks. `test_update_preserves_checklist_progress` is the regression net.
 - **Six functions, one shared `CodeUri`.** Separate functions give per-route IAM and per-route log
   groups; the shared `CodeUri` means `common/` is packaged into each one without a Lambda layer.
 - **IAM written out inline, not via SAM policy templates.** The templates are coarser than they
-  look — `DynamoDBReadPolicy` grants Scan to a handler that only needs Query, and
+  look — `DynamoDBReadPolicy` grants Scan to a handler that only needs `GetItem`, and
   `DynamoDBWritePolicy` grants no read actions at all, which would push the delete handler up to
-  full CRUD.
+  full CRUD. `Query` appears in no role now; reading an employee is a `GetItem`.
 - **No DynamoDB Local.** It would add an `endpoint_url` branch that exists only for the emulator,
   and it never exercises the thing most likely to break here, which is IAM. Offline testing is
   `pytest` over the pure logic; everything else runs against a real dev stack.
@@ -411,8 +410,8 @@ instance of it.
 |---|---|
 | Stale read-after-write | `PUT` and `PATCH` re-read with `ConsistentRead=True`. An eventually consistent Query could return the pre-write profile, and the checklist view repaints straight from that response |
 | Dates that aren't dates | `2026-13-45` and `2026-02-30` matched the `YYYY-MM-DD` regex and were stored. Now parsed as well as matched |
-| Duplicate work emails | Nothing stopped two employees sharing one. Now a uniqueness guard item written in the same transaction |
-| Misreported `409` | Every cancelled transaction claimed "that employee id already exists". Now read from `CancellationReasons` |
+| Duplicate work emails | Nothing stopped two employees sharing one. Fixed then with a uniqueness guard item — and **reverted** when the table collapsed to one item per employee, since a guard needs a second item. Duplicates are possible again, deliberately |
+| Misreported `409` | Every cancelled transaction claimed "that employee id already exists". Fixed by reading `CancellationReasons`; moot now that nothing transacts |
 
 **Frontend:** run in a real browser (headless Chrome against `py -m http.server 8000`) and verified
 against the live API. Re-run after the enums were removed: all six rows render, the department and
@@ -494,16 +493,18 @@ record silently promotes itself to a completed one the moment someone ticks a le
 coexist on the wire: an archived employee can read `"status": "In Progress"` and
 `"archivedAs": "Onboarding Cancelled"` at once, and both are true.
 
-**The email stays reserved.** Releasing it would let a new hire take an address that an existing
-record still shows as theirs. The cost is that freeing an address is now a deliberate act against
-the table, which is the right way round for something irreversible.
+**The email is not reserved.** The archived record still shows that address as theirs, but nothing
+stops a new hire taking it — the guard item that used to reserve it went when the table collapsed to
+one item per employee. Re-hiring under the same work email now produces a second record sharing one
+mailbox, silently.
 
 **The record freezes.** `PUT` and `PATCH` return `409`. Without this, a cancelled record could be
 ticked to 8 of 8 and left sitting there stamped `Onboarding Cancelled` — two claims in one record
-with nothing to say which is the lie. The tick path enforces it with a `ConditionCheck` on the
-profile inside the same transaction as the update, so the window between checking and writing does
-not exist.
+with nothing to say which is the lie. The tick path enforces it with
+`attribute_not_exists(archivedAs)` in the same `ConditionExpression` as the update — the stamp and
+the checklist are attributes of one item now — so the window between checking and writing does not
+exist.
 
 **What is deliberately missing.** There is no un-archive endpoint and no archived view in the UI.
-Reversing an archive means clearing `archivedAs` on the profile row directly. That is a decision to
+Reversing an archive means clearing `archivedAs` on the item directly. That is a decision to
 revisit the first time someone actually needs it, rather than three endpoints built on a guess.

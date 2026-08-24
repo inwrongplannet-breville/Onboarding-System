@@ -42,19 +42,19 @@ Each step feeds the next, so run them in order.
 | 3b | Check both dropdowns on that form | Departments and employment types are the ones the six seeded employees carry, alphabetical. Nothing hardcoded produced them |
 | 4 | Fill it in properly → submit | `POST` 201 with a `Location` header, then back to the list with the new row |
 | 5 | Edit that row, change the department, save | `PUT` 200. Check the request payload has exactly nine fields |
-| 5b | Edit it again, set the email to another employee's, save | `409`. The message lands **under the email input**, not in the banner, and the record is unchanged |
+| 5b | Edit it again, set the email to another employee's, save | `200`. Work emails are no longer unique, so this is accepted — two records now share the address |
 | 6 | Open its checklist, tick three boxes | three `PATCH`es, 200 each. **One request per tick, not two** — the response is reused |
 | 6b | Click the comment icon on an item, type a note, Save | one `PATCH` with a body of `{"comment": …}` and no `done` key. The note appears under the item and the icon fills in |
-| 6c | Tick that same item | one `PATCH` with `{"done": true}`. **The note is still there** — the two never overwrite each other |
+| 6c | Tick that same item | one `PATCH` with `{"done": true}`. **The note is still there** — the two never overwrite each other, even though both now write into one item's `checklist` list |
 | 6d | Open a comment box, type, then tick a *different* item without saving | the view repaints and **your half-typed text is still in the box** |
 | 6e | Reopen the note and press Remove | the note and the icon fill both go |
 | 6f | Click the icon, then click the same icon again | the box closes. The tooltip reads "Close the comment box on …" while it is open, and focus lands back on the icon |
 | 6g | Open a box, type something, then click that icon again | it asks before discarding. Cancel and Esc don't ask — they say "discard" in as many words; the icon doesn't |
 | 7 | Hard-refresh (Ctrl+Shift+R) on the checklist URL | state persisted, comments included. This is the proof the writes reached DynamoDB |
-| 8 | Delete it, from the row button and from the form button | `DELETE` 200; the row leaves the list, and the record is still in the table stamped `archivedAs` |
+| 8 | Delete it, from the row button and from the form button | `DELETE` 200; the row leaves the list, and the item is still in the table stamped `archivedAs` |
 | 8a | Open the archived employee's URL directly (`#/employees/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
 | 8b | Open the archived employee's edit URL (`#/employees/<id>/edit`) | the read-only archived page, not the form |
-| 8c | Re-add someone on the archived employee's work email | `409` — the address is still reserved |
+| 8c | Re-add someone on the archived employee's work email | `201` — nothing reserves the address any more. You now have two records on one mailbox, which is the accepted cost of dropping the guard item |
 | 9 | Hand-type `#/employees/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
 | 10 | Deep-link `#/employees/<uuid>/checklist` in a fresh tab | loads directly; proves the router handles UUIDs |
 
