@@ -6,8 +6,8 @@ which no emulator reproduces.
 """
 import pytest
 
-from common.checklist_template import CHECKLIST_TEMPLATE, VALID_ITEM_IDS
-from common.keys import chk_sk, email_pk, employee_id_from_pk, is_profile, pk
+from common.checklist_template import CHECKLIST_INDEX, CHECKLIST_TEMPLATE, VALID_ITEM_IDS
+from common.keys import employee_id_from_pk, pk
 from common.models import (
     ARCHIVED_CANCELLED,
     ARCHIVED_ONBOARDED,
@@ -15,7 +15,6 @@ from common.models import (
     clean_comment,
     derive_status,
     is_archived,
-    group_by_partition,
     new_checklist_items,
     pick_editable,
     progress,
@@ -37,11 +36,6 @@ VALID = {
 
 def test_round_trips_the_employee_id_through_the_partition_key():
     assert employee_id_from_pk(pk('abc-123')) == 'abc-123'
-
-
-def test_distinguishes_profile_rows_from_checklist_rows():
-    assert is_profile({'SK': 'PROFILE'})
-    assert not is_profile({'SK': chk_sk('laptop')})
 
 
 # --------------------------------------------------------------- whitelisting
@@ -229,20 +223,22 @@ def test_a_stamped_profile_is_archived():
 
 # ------------------------------------------------------------ item -> API shape
 
-def _items(done_ids=(), employee_id='abc-123'):
-    partition = pk(employee_id)
-    profile = dict(VALID, PK=partition, SK='PROFILE', employeeId=employee_id,
-                   entityType='Employee')
-    rows = [
-        dict(item, PK=partition, SK=chk_sk(item['itemId']),
-             done=item['itemId'] in done_ids)
-        for item in new_checklist_items()
-    ]
-    return [profile] + rows
+def _item(done_ids=(), employee_id='abc-123'):
+    """One stored employee item, which is now the whole employee."""
+    return dict(
+        VALID,
+        PK=pk(employee_id),
+        employeeId=employee_id,
+        entityType='Employee',
+        checklist=[
+            dict(entry, done=entry['itemId'] in done_ids)
+            for entry in new_checklist_items()
+        ],
+    )
 
 
 def test_rebuilds_exactly_the_shape_the_phase_1_frontend_expects():
-    employee = to_api_employee(_items(done_ids={'offer-letter', 'id-proof'}))
+    employee = to_api_employee(_item(done_ids={'offer-letter', 'id-proof'}))
 
     assert employee['id'] == 'abc-123'
     assert employee['firstName'] == 'Priya'
@@ -252,19 +248,19 @@ def test_rebuilds_exactly_the_shape_the_phase_1_frontend_expects():
     assert employee['progress']['done'] == 2
 
 
-def test_an_unstamped_profile_reports_itself_active_on_the_wire():
-    employee = to_api_employee(_items())
+def test_an_unstamped_employee_reports_itself_active_on_the_wire():
+    employee = to_api_employee(_item())
     assert employee['archived'] is False
     assert employee['archivedAs'] == ''
     assert employee['archivedAt'] == ''
 
 
-def test_a_stamped_profile_carries_its_archive_state_onto_the_wire():
-    items = _items(done_ids={'offer-letter'})
-    items[0]['archivedAs'] = ARCHIVED_CANCELLED
-    items[0]['archivedAt'] = '2026-08-24T02:15:00Z'
+def test_a_stamped_employee_carries_its_archive_state_onto_the_wire():
+    item = _item(done_ids={'offer-letter'})
+    item['archivedAs'] = ARCHIVED_CANCELLED
+    item['archivedAt'] = '2026-08-24T02:15:00Z'
 
-    employee = to_api_employee(items)
+    employee = to_api_employee(item)
     assert employee['archived'] is True
     assert employee['archivedAs'] == ARCHIVED_CANCELLED
     assert employee['archivedAt'] == '2026-08-24T02:15:00Z'
@@ -273,51 +269,63 @@ def test_a_stamped_profile_carries_its_archive_state_onto_the_wire():
 def test_archiving_does_not_disturb_the_derived_status():
     # `status` keeps describing the checklist; `archivedAs` describes the
     # decision. An archived record showing "In Progress" is correct, not a bug.
-    items = _items(done_ids={'offer-letter', 'id-proof'})
-    items[0]['archivedAs'] = ARCHIVED_CANCELLED
+    item = _item(done_ids={'offer-letter', 'id-proof'})
+    item['archivedAs'] = ARCHIVED_CANCELLED
 
-    employee = to_api_employee(items)
+    employee = to_api_employee(item)
     assert employee['status'] == 'In Progress'
     assert employee['progress']['done'] == 2
 
 
 def test_never_leaks_internal_attributes_onto_the_wire():
-    employee = to_api_employee(_items())
+    employee = to_api_employee(_item())
     for internal in ('PK', 'SK', 'employeeId', 'entityType', 'order'):
         assert internal not in employee
 
 
-def test_orders_checklist_items_by_order_not_by_scan_order():
-    items = _items()
-    shuffled = [items[0]] + list(reversed(items[1:]))
-    employee = to_api_employee(shuffled)
+def test_the_embedded_list_is_read_in_stored_order():
+    # Position is the order now - there is no sort step to get this right, so the
+    # only thing keeping the UI's checklist in the agreed sequence is that the
+    # list was written in template order and DynamoDB preserves list order.
+    employee = to_api_employee(_item())
     assert [entry['id'] for entry in employee['checklist']] == [
         item['id'] for item in CHECKLIST_TEMPLATE
     ]
 
 
-def test_a_partition_with_no_profile_is_not_an_employee():
-    orphans = [row for row in _items() if row['SK'] != 'PROFILE']
-    assert to_api_employee(orphans) is None
+def test_an_employee_with_no_checklist_attribute_is_still_an_employee():
+    # Not reachable through the API, but a hand-edited item should degrade to an
+    # empty checklist rather than raising - to_api_employee is on the read path
+    # of every endpoint.
+    item = _item()
+    del item['checklist']
+    employee = to_api_employee(item)
+    assert employee['checklist'] == []
+    assert employee['status'] == 'Pending'
 
 
-def test_an_unknown_id_yields_no_items_and_therefore_no_employee():
-    assert to_api_employee([]) is None
+def test_an_unknown_id_yields_no_item_and_therefore_no_employee():
+    # GetItem omits `Item` entirely for a miss. Five callers turn this None into
+    # a 404, so it is a contract rather than a convenience.
+    assert to_api_employee(None) is None
+    assert to_api_employee({}) is None
 
 
-def test_groups_a_flat_scan_result_back_into_employees():
-    partitions = group_by_partition(_items(employee_id='a') + _items(employee_id='b'))
-    assert set(partitions) == {pk('a'), pk('b')}
-    assert all(len(rows) == 9 for rows in partitions.values())
+# --------------------------------------------------------- positional invariant
+
+def test_the_index_map_matches_the_template_order():
+    # CHECKLIST_INDEX is what lets a PATCH write checklist[i] without reading the
+    # list first. If it ever disagreed with the order new_checklist_items() writes,
+    # every tick would land on the wrong box - so pin them to each other.
+    assert CHECKLIST_INDEX == {
+        item['id']: index for index, item in enumerate(CHECKLIST_TEMPLATE)
+    }
+    for index, entry in enumerate(new_checklist_items()):
+        assert CHECKLIST_INDEX[entry['itemId']] == index
 
 
-def test_email_guards_in_a_scan_are_not_employees():
-    guard = {'PK': email_pk('priya.sharma@breville.com'), 'SK': 'EMAIL',
-             'entityType': 'EmailGuard'}
-    partitions = group_by_partition(_items(employee_id='a') + [guard])
-    assert set(partitions) == {pk('a')}
-
-
-@pytest.mark.parametrize('email', ['Priya@Breville.com', ' priya@breville.com ', 'priya@breville.com'])
-def test_the_guard_key_is_the_same_whatever_the_casing_or_padding(email):
-    assert email_pk(email) == 'EMAIL#priya@breville.com'
+def test_the_stored_order_field_agrees_with_the_list_position():
+    # `order` is dead weight that nothing reads, kept only so a raw item is
+    # legible in the console. This stops it drifting into a lie.
+    for index, entry in enumerate(new_checklist_items()):
+        assert entry['order'] == index + 1

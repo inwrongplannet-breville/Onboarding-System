@@ -6,19 +6,23 @@ UI was wired to the backend: the frontend now has no employee records in it at a
 so the fixtures live on the side of the wire that actually stores them.
 
 Seeding deliberately drives the REST API rather than boto3 against DynamoDB, so it
-exercises the same validation, the same transactional create and the same checklist
-handling the browser will - a broken seed is then a broken API rather than a mystery.
+exercises the same validation, the same create and the same checklist handling the
+browser will - a broken seed is then a broken API rather than a mystery.
 
-Wiping cannot, and the reason is worth knowing. DELETE /employees/{id} archives: it
-stamps the profile and leaves every row in place, including the email uniqueness
-guard. Wiping through the API would therefore appear to work - the employees do
-leave GET /employees - and then every POST in the seed that followed would fail with
-a 409, because all six addresses are still reserved by records the API can no longer
-show you. So --wipe goes straight at the table and really does delete.
+Wiping cannot. DELETE /employees/{id} archives: it stamps the record and leaves it
+in the table. Wiping through the API would appear to work - the employees do leave
+GET /employees - and then every reseed would pile a fresh set of records on top of
+the archived ones, growing the table on every cycle with no way to ever clear it.
+So --wipe goes straight at the table and really does delete.
 
 That asymmetry is the design working as intended, not a hole in it: the API has no
 hard delete because employee history should not be destroyable over HTTP. Resetting
 a dev table is a deliberate act against the table, and this is it.
+
+(Reseeding used to also 409 on every address, because an archived record kept its
+email uniqueness guard and the guard kept the address reserved. That guard is gone,
+so duplicates are now accepted rather than rejected - which is quieter and worse:
+without a wipe you would get two of everyone instead of an error.)
 
 The table calls go through the AWS CLI rather than boto3, which is not the obvious
 choice and is deliberate. `aws login` - the browser-based console login this project
@@ -216,20 +220,25 @@ def aws_json(args, payloads=None):
 
 
 def scan_keys(table_name):
-    """Every PK/SK in the table, following pagination."""
+    """
+    Every key in the table, following pagination.
+
+    PK only - the table has no sort key, and a DeleteRequest carrying an SK the
+    table does not have would fail the whole batch.
+    """
     keys = []
     start_key = None
 
     while True:
         args = ['dynamodb', 'scan', '--table-name', table_name,
-                '--region', REGION, '--projection-expression', 'PK,SK',
+                '--region', REGION, '--projection-expression', 'PK',
                 '--output', 'json']
         payloads = {}
         if start_key:
             payloads['--exclusive-start-key'] = start_key
 
         result = aws_json(args, payloads)
-        keys.extend({'PK': i['PK'], 'SK': i['SK']} for i in result.get('Items', []))
+        keys.extend({'PK': i['PK']} for i in result.get('Items', []))
 
         start_key = result.get('LastEvaluatedKey')
         if not start_key:
@@ -238,11 +247,11 @@ def scan_keys(table_name):
 
 def wipe(table_name, assume_yes):
     """
-    Delete every row in the table - employees, checklist items and email guards.
+    Delete every item in the table. One item per employee, so one delete each.
 
     A Scan rather than GET /employees, because the API cannot see archived
-    employees and their guards are exactly what would break the seed that
-    follows. Scan reaches everything; the list endpoint reaches what is live.
+    employees and those are exactly the ones a reseed would silently duplicate.
+    Scan reaches everything; the list endpoint reaches what is live.
     """
     keys = scan_keys(table_name)
 
@@ -250,13 +259,15 @@ def wipe(table_name, assume_yes):
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    partitions = {k['PK']['S'] for k in keys}
-    employees = {p for p in partitions if p.startswith('EMP#')}
-    guards = {p for p in partitions if p.startswith('EMAIL#')}
+    employees = {k['PK']['S'] for k in keys if k['PK']['S'].startswith('EMP#')}
+    others = len(keys) - len(employees)
 
-    print('\nAbout to hard-delete {} row(s) from {}:'.format(len(keys), table_name))
-    print('  {} employee partition(s), archived ones included'.format(len(employees)))
-    print('  {} email uniqueness guard(s)'.format(len(guards)))
+    print('\nAbout to hard-delete {} item(s) from {}:'.format(len(keys), table_name))
+    print('  {} employee(s), archived ones included'.format(len(employees)))
+    if others:
+        # Nothing should ever land here - employees are the only kind of item the
+        # handlers write. Worth saying out loud rather than deleting in silence.
+        print('  {} item(s) that are not employees'.format(others))
 
     if not assume_yes:
         # Irreversible, and unlike the API it really does destroy the history -
@@ -266,7 +277,7 @@ def wipe(table_name, assume_yes):
 
     # 25 is the BatchWriteItem ceiling. Unprocessed items are retried rather than
     # ignored - DynamoDB returns them on throttling, and a wipe that quietly left
-    # rows behind would strand exactly the guards that break the next seed.
+    # records behind is a reseed that quietly duplicates them.
     deleted = 0
     for start in range(0, len(keys), 25):
         pending = [{'DeleteRequest': {'Key': key}} for key in keys[start:start + 25]]
@@ -283,9 +294,9 @@ def wipe(table_name, assume_yes):
             pending = unprocessed
             time.sleep(2 ** attempt)
         else:
-            raise SystemExit('Gave up with {} row(s) still undeleted.'.format(len(pending)))
+            raise SystemExit('Gave up with {} item(s) still undeleted.'.format(len(pending)))
 
-    print('Wiped {} row(s).'.format(deleted))
+    print('Wiped {} item(s).'.format(deleted))
 
 
 def seed(base_url):

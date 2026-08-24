@@ -6,22 +6,19 @@ anything. HR needs the history: who was hired, how far their onboarding got, and
 what the notes on it said. A row that is gone answers none of those, and "we
 deleted it" is the wrong answer to an audit.
 
-So the profile is stamped with a terminal state and the employee drops out of
+So the item is stamped with a terminal state and the employee drops out of
 GET /employees. Which state depends on where the checklist had got to:
 
     checklist complete     ->  Onboarded
     checklist incomplete   ->  Onboarding Cancelled
 
-Two consequences, both deliberate:
+The record freezes: PUT and PATCH both refuse an archived employee, which is what
+keeps the stamp honest - a cancelled onboarding cannot be ticked up to 100%
+afterwards and left sitting there still claiming it was cancelled.
 
-  The email guard stays put. The address remains reserved to the archived
-  employee, so re-hiring under the same work email is a 409 rather than a second
-  record quietly sharing one mailbox. Nothing in the UI releases it - freeing an
-  address is now a deliberate act against the table.
-
-  The record freezes. PUT and PATCH both refuse an archived employee, which is
-  what keeps the stamp honest: a cancelled onboarding cannot be ticked up to 100%
-  afterwards and left sitting there still claiming it was cancelled.
+Note the archived record still holds that work email, and nothing reserves it any
+more. Re-hiring under the same address now succeeds and produces a second record
+sharing one mailbox; the uniqueness guard that used to make it a 409 is gone.
 
 Still a DELETE and still the same route. From the caller's side "take this person
 off the list" is exactly what happens; what changed is that it is now reversible
@@ -34,7 +31,7 @@ from botocore.exceptions import ClientError
 from common import responses
 from common.db import table
 from common.handler import api_handler, is_condition_failure, path_param
-from common.keys import PROFILE_SK, pk
+from common.keys import pk
 from common.models import archive_state
 from common.repository import load_employee
 
@@ -69,7 +66,7 @@ def _stamp(employee_id, state):
 
     try:
         table.update_item(
-            Key={'PK': pk(employee_id), 'SK': PROFILE_SK},
+            Key={'PK': pk(employee_id)},
             UpdateExpression=('SET #archivedAs = :archivedAs, #archivedAt = :archivedAt, '
                               '#updatedAt = :updatedAt'),
             ExpressionAttributeNames={
@@ -82,16 +79,16 @@ def _stamp(employee_id, state):
                 ':archivedAt': now,
                 ':updatedAt': now,
             },
-            # attribute_exists(SK) for the same reason PUT carries it - UpdateItem
-            # upserts, and an archive of a missing id would otherwise conjure a
-            # profile with no checklist behind it.
+            # attribute_exists(PK) for the same reason PUT carries it - UpdateItem
+            # upserts, and an archive of a missing id would otherwise conjure an
+            # employee out of nothing but a stamp.
             #
             # attribute_not_exists(archivedAs) makes a second stamp impossible, so
             # two DELETEs racing cannot produce a record whose archivedAt says one
             # thing and whose history says another. The loser fails here and the
             # caller still gets a 200, because from its side the employee is
             # archived either way.
-            ConditionExpression='attribute_exists(SK) AND attribute_not_exists(#archivedAs)',
+            ConditionExpression='attribute_exists(PK) AND attribute_not_exists(#archivedAs)',
         )
     except ClientError as error:
         if not is_condition_failure(error):

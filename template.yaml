@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Employee Management & Onboarding System.
-  DynamoDB single table + six Lambdas behind API Gateway, wired to the UI.
+  One DynamoDB item per employee + six Lambdas behind API Gateway, wired to the UI.
   DELETE archives rather than erases - see src/handlers/delete_employee.py.
 
 Parameters:
@@ -10,7 +10,7 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, prod]
-    Description: Deployment stage. Also used to namespace the table name.
+    Description: Deployment stage. Names the API Gateway stage.
 
 Globals:
   Function:
@@ -27,26 +27,35 @@ Resources:
 
   # ---------------------------------------------------------------- data store
   #
-  # AWS::DynamoDB::Table, not AWS::Serverless::SimpleTable - SimpleTable only
-  # gives you a partition key, and this design needs PK + SK so an employee's
-  # profile and their 8 checklist rows can share one partition.
+  # One item per employee, keyed by PK alone. The checklist is a list attribute on
+  # that item, so there is nothing to sort within a partition and no second kind of
+  # item to tell apart - the sort key this table used to carry is gone.
+  #
+  # Still AWS::DynamoDB::Table rather than AWS::Serverless::SimpleTable, which
+  # would now fit the key schema. SimpleTable exposes only PrimaryKey,
+  # ProvisionedThroughput, SSESpecification, TableName and Tags: it cannot declare
+  # PointInTimeRecovery or BillingMode, and it hides KeySchema, which in this repo
+  # is documentation.
+  #
+  # No TableName. It used to be 'onboarding-${Stage}', and an explicit name is
+  # exactly what makes a key-schema change undeployable: CloudFormation replaces a
+  # resource by creating the new one before deleting the old, which cannot work
+  # when the name is taken. Letting CloudFormation generate the name means the next
+  # schema change is an ordinary deploy. Nothing reads the name as a literal -
+  # Lambdas get it through TABLE_NAME and scripts/seed_employees.py resolves it
+  # from the TableName output below.
   OnboardingTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      TableName: !Sub 'onboarding-${Stage}'
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: PK
           AttributeType: S
-        - AttributeName: SK
-          AttributeType: S
       KeySchema:
         - AttributeName: PK
           KeyType: HASH
-        - AttributeName: SK
-          KeyType: RANGE
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false
       Tags:
@@ -74,8 +83,11 @@ Resources:
   # IAM is written out inline rather than using SAM policy templates. The
   # templates are coarser than they look: DynamoDBReadPolicy grants
   # GetItem+Query+Scan+BatchGet, and DynamoDBWritePolicy grants no read actions
-  # at all - so DeleteEmployeeFunction, which must Query before it deletes,
-  # would be pushed all the way up to full-CRUD.
+  # at all - so DeleteEmployeeFunction, which must read the checklist before it
+  # stamps, would be pushed all the way up to full-CRUD.
+  #
+  # Query appears nowhere below any more. Reading an employee used to mean
+  # querying a partition of nine rows; it is now a GetItem on one item.
 
   ListEmployeesFunction:
     Type: AWS::Serverless::Function
@@ -102,8 +114,7 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # Transactions authorise against the underlying op, so PutItem is
-            # what TransactWriteItems needs here.
+            # One item, so one PutItem - no transaction to authorise against.
             - Effect: Allow
               Action: dynamodb:PutItem
               Resource: !GetAtt OnboardingTable.Arn
@@ -123,7 +134,7 @@ Resources:
         - Version: '2012-10-17'
           Statement:
             - Effect: Allow
-              Action: dynamodb:Query
+              Action: dynamodb:GetItem
               Resource: !GetAtt OnboardingTable.Arn
       Events:
         Api:
@@ -140,18 +151,15 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # Query and GetItem as well as UpdateItem: the handler reads the
-            # current email before writing, and re-reads the partition afterwards
-            # so its response carries the checklist, matching GET exactly.
-            # PutItem and DeleteItem are for the email uniqueness guard, which
-            # moves in the same transaction whenever the address changes.
+            # GetItem as well as UpdateItem: the handler re-reads afterwards so
+            # its response carries the checklist, matching GET exactly, and reads
+            # again on a failed condition to tell 404 from 409. No PutItem or
+            # DeleteItem - those were for moving the email uniqueness guard, and
+            # with the guard gone an email is just another editable field.
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
-                - dynamodb:PutItem
-                - dynamodb:DeleteItem
                 - dynamodb:GetItem
-                - dynamodb:Query
               Resource: !GetAtt OnboardingTable.Arn
       Events:
         Api:
@@ -168,14 +176,15 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # No DeleteItem. DELETE archives the profile rather than erasing the
-            # partition, so this function reads the checklist to decide which
-            # terminal state to stamp and then writes that one attribute.
-            # Removing DeleteItem is the point: with it gone, a bug in this
-            # handler cannot destroy an employee record even if it tries.
+            # No DeleteItem. DELETE archives the record rather than erasing it, so
+            # this function reads the checklist to decide which terminal state to
+            # stamp and then writes that one attribute. Removing DeleteItem is the
+            # point: with it gone, a bug in this handler cannot destroy an employee
+            # record even if it tries - and now that an employee is a single item,
+            # one stray DeleteItem would take the checklist and its notes with it.
             - Effect: Allow
               Action:
-                - dynamodb:Query
+                - dynamodb:GetItem
                 - dynamodb:UpdateItem
               Resource: !GetAtt OnboardingTable.Arn
       Events:
@@ -193,17 +202,16 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # ConditionCheckItem is what the transaction's ConditionCheck on the
-            # profile authorises against - it is its own IAM action, and leaving
-            # it out fails the tick with an AccessDenied that names the table
-            # rather than the check. GetItem is only used on the failure path,
-            # to tell an archived employee apart from a missing one.
+            # No ConditionCheckItem any more: the archive freeze used to be a
+            # ConditionCheck against a sibling row inside a transaction, and is
+            # now one more term in this write's own ConditionExpression. GetItem
+            # covers both the failure path (telling an archived employee apart
+            # from a missing one) and the consistent re-read that builds the
+            # response.
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
-                - dynamodb:ConditionCheckItem
                 - dynamodb:GetItem
-                - dynamodb:Query
               Resource: !GetAtt OnboardingTable.Arn
       Events:
         Api:

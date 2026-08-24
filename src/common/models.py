@@ -9,7 +9,7 @@ import re
 from datetime import date
 
 from common.checklist_template import CHECKLIST_TEMPLATE
-from common.keys import employee_id_from_pk, is_employee_pk, is_profile
+from common.keys import employee_id_from_pk
 
 DEPARTMENTS = ('Engineering', 'HR', 'Finance', 'Operations')
 EMPLOYMENT_TYPES = ('Full-time', 'Contract', 'Intern')
@@ -43,7 +43,7 @@ DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 COMMENT_MAX_LENGTH = 500
 
 # Archiving replaced hard deletion. DELETE /employees/{id} stamps one of these on
-# the profile row instead of removing it, and which one depends on whether
+# the employee's item instead of removing it, and which one depends on whether
 # onboarding had finished: someone who completed the checklist and then left is a
 # different piece of history from someone whose onboarding was abandoned halfway.
 #
@@ -160,13 +160,20 @@ def archive_state(checklist):
     return ARCHIVED_ONBOARDED if derive_status(checklist) == 'Onboarded' else ARCHIVED_CANCELLED
 
 
-def is_archived(profile):
-    """True for an archived profile row. The attribute is absent on active ones."""
-    return bool(profile.get('archivedAs'))
+def is_archived(item):
+    """True for an archived employee. The attribute is absent on active ones."""
+    return bool(item.get('archivedAs'))
 
 
 def new_checklist_items():
-    """A fresh, all-unchecked checklist for a new hire."""
+    """
+    A fresh, all-unchecked checklist for a new hire - the value of the embedded
+    `checklist` attribute at creation, in CHECKLIST_TEMPLATE order.
+
+    `order` duplicates the list position and nothing reads it. It stays because a
+    raw item in the console is much easier to read with it than without, and
+    test_models pins it to the position so the two cannot drift.
+    """
     return [
         {
             'itemId': item['id'],
@@ -179,71 +186,53 @@ def new_checklist_items():
     ]
 
 
-def to_api_checklist_item(item):
-    """DynamoDB item -> the {id, label, owner, done, comment} shape js/ui.js renders."""
+def to_api_checklist_item(entry):
+    """One embedded entry -> the {id, label, owner, done, comment} shape js/ui.js renders."""
     return {
-        'id': item['itemId'],
-        'label': item['label'],
-        'owner': item['owner'],
-        'done': bool(item['done']),
+        'id': entry['itemId'],
+        'label': entry['label'],
+        'owner': entry['owner'],
+        'done': bool(entry['done']),
         # Always present, always a string. An item with no comment has no such
         # attribute at all, and making the client distinguish absent from empty
         # buys nothing - both mean "nobody has written anything here".
-        'comment': item.get('comment') or '',
+        'comment': entry.get('comment') or '',
     }
 
 
-def to_api_employee(items):
+def to_api_employee(item):
     """
-    Fold one partition's items (1 profile + 8 checklist rows) into a single
-    employee object. Returns None if the partition has no profile - which is
-    what a nonexistent employee looks like.
+    One stored item -> the employee object the frontend renders.
+
+    Returns None for a missing item, which is what a nonexistent employee looks
+    like - GetItem omits `Item` entirely rather than erroring, and five callers
+    branch on this None to decide between 404 and 200. It is a contract, not a
+    convenience.
+
+    No sorting here: the embedded list is written in CHECKLIST_TEMPLATE order and
+    DynamoDB preserves list order, so position *is* the order. `order` is still
+    stored on each entry to keep the raw item legible in the console, but nothing
+    reads it - see the test pinning the two together.
     """
-    profile = None
-    checklist_items = []
-
-    for item in items:
-        if is_profile(item):
-            profile = item
-        else:
-            checklist_items.append(item)
-
-    if profile is None:
+    if not item:
         return None
 
-    checklist_items.sort(key=lambda item: item.get('order', 0))
-    checklist = [to_api_checklist_item(item) for item in checklist_items]
+    checklist = [to_api_checklist_item(entry) for entry in item.get('checklist', [])]
 
-    employee = {'id': employee_id_from_pk(profile['PK'])}
+    employee = {'id': employee_id_from_pk(item['PK'])}
     for field in EDITABLE_FIELDS:
-        employee[field] = profile.get(field, '')
+        employee[field] = item.get(field, '')
 
     employee['checklist'] = checklist
     # Not conveniences any more - these are the only copy. The UI renders the
     # badge and the progress bar straight from them.
     employee['status'] = derive_status(checklist)
     employee['progress'] = progress(checklist)
-    # Read off the profile, not derived - see the constants at the top. `archived`
+    # Read off the item, not derived - see the constants at the top. `archived`
     # is the flag callers branch on; `archivedAs` says which of the two terminal
     # states it was and is '' for an active employee, for the same reason a
     # checklist comment is: absent and empty mean the same thing to a reader.
-    employee['archived'] = is_archived(profile)
-    employee['archivedAs'] = profile.get('archivedAs') or ''
-    employee['archivedAt'] = profile.get('archivedAt') or ''
+    employee['archived'] = is_archived(item)
+    employee['archivedAs'] = item.get('archivedAs') or ''
+    employee['archivedAt'] = item.get('archivedAt') or ''
     return employee
-
-
-def group_by_partition(items):
-    """
-    Scan returns every item flat. Bucket them back into employees.
-
-    Anything that is not in an EMP# partition is dropped here - which today means
-    the email uniqueness guards, whose whole job is to sit in a partition of
-    their own and never be read.
-    """
-    partitions = {}
-    for item in items:
-        if not is_employee_pk(item['PK']):
-            continue
-        partitions.setdefault(item['PK'], []).append(item)
-    return partitions

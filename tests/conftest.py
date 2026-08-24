@@ -5,8 +5,8 @@ exercised end to end without AWS.
 This does NOT replace testing against a deployed stack. moto emulates the API,
 not IAM - and IAM is the most likely thing to be wrong on a first deploy. What it
 does catch, cheaply, is the stuff that is tedious to debug through CloudWatch:
-UpdateExpression syntax, TransactWriteItems serialisation, and whether the
-condition expressions actually fire.
+UpdateExpression syntax, nested document paths into the embedded checklist, and
+whether the condition expressions actually fire.
 """
 import importlib
 import os
@@ -52,13 +52,14 @@ def handlers():
         boto3.client('dynamodb').create_table(
             TableName=TABLE_NAME,
             BillingMode='PAY_PER_REQUEST',
+            # PK only. One item per employee, so there is nothing to sort within
+            # a partition - and an AttributeDefinition no key refers to is a
+            # validation error, so SK has to leave both lists together.
             AttributeDefinitions=[
                 {'AttributeName': 'PK', 'AttributeType': 'S'},
-                {'AttributeName': 'SK', 'AttributeType': 'S'},
             ],
             KeySchema=[
                 {'AttributeName': 'PK', 'KeyType': 'HASH'},
-                {'AttributeName': 'SK', 'KeyType': 'RANGE'},
             ],
         )
 

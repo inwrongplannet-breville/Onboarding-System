@@ -124,71 +124,27 @@ def test_create_rejects_a_start_date_that_is_not_a_real_day(handlers):
     assert 'startDate' in body(response)['error']['fields']
 
 
-# ------------------------------------------------------- email uniqueness
+# ------------------------------------------------- email is no longer unique
 
-def test_a_second_employee_cannot_take_a_used_work_email(handlers):
+def test_two_employees_may_now_share_a_work_email(handlers):
+    # Documenting a deliberate loss, not asserting a feature. Uniqueness used to
+    # be enforced by a guard item in its own partition; the table now holds one
+    # item per employee and nothing else, and DynamoDB can only enforce
+    # uniqueness on a partition key - which here is a UUID. If this test ever
+    # starts failing, someone reintroduced the guard and should say so loudly.
     create(handlers)
+    second = post(handlers, dict(VALID, firstName='Someone', lastName='Else'))
 
-    response = post(handlers, dict(VALID, firstName='Someone', lastName='Else'))
-    assert response['statusCode'] == 409
-    assert body(response)['error']['fields']['email']
-
-    # And the rejected create wrote nothing - not a stray profile, not a
-    # half-seeded checklist.
-    assert body(handlers['list_employees']({}, None))['count'] == 1
+    assert second['statusCode'] == 201
+    assert body(handlers['list_employees']({}, None))['count'] == 2
 
 
-def test_uniqueness_ignores_case(handlers):
-    create(handlers, email='priya.sharma@breville.com')
-    assert post(handlers, dict(VALID, email='Priya.Sharma@Breville.com'))['statusCode'] == 409
-
-
-def test_the_guard_is_not_mistaken_for_an_employee(handlers):
-    create(handlers)
-    result = body(handlers['list_employees']({}, None))
-    assert result['count'] == 1
-    assert result['employees'][0]['email'] == VALID['email']
-
-
-def test_update_cannot_move_an_employee_onto_a_used_email(handlers):
+def test_an_employee_can_be_edited_onto_an_email_another_one_holds(handlers):
     create(handlers, email='taken@breville.com')
     other = create(handlers, email='free@breville.com')['id']
 
-    response = put(handlers, other, dict(VALID, email='taken@breville.com'))
-    assert response['statusCode'] == 409
-    assert body(get(handlers, other))['email'] == 'free@breville.com'
-
-
-def test_update_that_leaves_the_email_alone_is_not_a_conflict_with_itself(handlers):
-    employee_id = create(handlers)['id']
-    updated = put(handlers, employee_id, dict(VALID, jobTitle='Senior Software Engineer'))
-    assert updated['statusCode'] == 200
-
-
-def test_changing_an_email_frees_the_old_one(handlers):
-    employee_id = create(handlers, email='old@breville.com')['id']
-    assert put(handlers, employee_id, dict(VALID, email='new@breville.com'))['statusCode'] == 200
-
-    assert post(handlers, dict(VALID, email='old@breville.com'))['statusCode'] == 201
-    assert post(handlers, dict(VALID, email='new@breville.com'))['statusCode'] == 409
-
-
-def test_archiving_an_employee_keeps_their_email_reserved(handlers):
-    # The deliberate opposite of the old hard delete. The archived record still
-    # holds that address, so re-hiring under it would put two records on one
-    # mailbox - which is the thing the guard exists to prevent.
-    archive(handlers, create(handlers)['id'])
-    assert post(handlers, VALID)['statusCode'] == 409
-
-
-def test_archiving_leaves_the_guard_in_place(handlers):
-    from common.db import table
-    from common.keys import email_pk
-
-    archive(handlers, create(handlers)['id'])
-
-    guards = [i for i in table.scan()['Items'] if i['PK'] == email_pk(VALID['email'])]
-    assert len(guards) == 1, 'the guard is what reserves the address after archiving'
+    assert put(handlers, other, dict(VALID, email='taken@breville.com'))['statusCode'] == 200
+    assert body(get(handlers, other))['email'] == 'taken@breville.com'
 
 
 # ------------------------------------------------------------------------- get
@@ -258,8 +214,8 @@ def test_update_ignores_id_and_checklist_in_the_body(handlers):
 
 
 def test_update_of_an_unknown_id_is_404_and_creates_no_ghost_record(handlers):
-    # Without the condition expression, UpdateItem would upsert a profile with
-    # no checklist rows behind it.
+    # Without the condition expression, UpdateItem would upsert a half-employee
+    # with no checklist attribute behind it.
     assert put(handlers, 'does-not-exist', VALID)['statusCode'] == 404
     assert body(handlers['list_employees']({}, None))['count'] == 0
 
@@ -382,15 +338,61 @@ def test_a_comment_can_be_cleared(handlers, cleared):
 
 
 def test_clearing_a_comment_removes_the_attribute_rather_than_storing_empty(handlers):
+    from common.checklist_template import CHECKLIST_INDEX
     from common.db import table
-    from common.keys import chk_sk, pk
+    from common.keys import pk
 
     employee_id = create(handlers)['id']
     patch_raw(handlers, employee_id, 'laptop', {'comment': 'Temporary note.'})
     patch_raw(handlers, employee_id, 'laptop', {'comment': ''})
 
-    stored = table.get_item(Key={'PK': pk(employee_id), 'SK': chk_sk('laptop')})['Item']
-    assert 'comment' not in stored
+    stored = table.get_item(Key={'PK': pk(employee_id)})['Item']
+    entry = stored['checklist'][CHECKLIST_INDEX['laptop']]
+    assert entry['itemId'] == 'laptop', 'the index must still point at the item it names'
+    assert 'comment' not in entry
+
+
+def test_done_and_comment_do_not_overwrite_each_other_in_either_order(handlers):
+    # The guarantee the whole indexed-document-path design exists to keep. These
+    # used to be writes to two different attributes of one small row; they are now
+    # writes to two paths inside one list element of one large item. Neither
+    # reads the list first, so neither can lose the other's change.
+    employee_id = create(handlers)['id']
+
+    patch(handlers, employee_id, 'laptop', True)
+    after_comment = body(patch_raw(handlers, employee_id, 'laptop',
+                                   {'comment': 'Dell, collected Friday.'}))
+    assert item_of(after_comment, 'laptop')['done'] is True
+    assert item_of(after_comment, 'laptop')['comment'] == 'Dell, collected Friday.'
+
+    after_untick = body(patch(handlers, employee_id, 'laptop', False))
+    assert after_untick['status'] == 'Pending'
+    assert item_of(after_untick, 'laptop')['comment'] == 'Dell, collected Friday.'
+
+
+def test_a_tick_on_a_drifted_checklist_fails_instead_of_landing_on_the_wrong_item(handlers):
+    # CHECKLIST_INDEX addresses entries positionally, and SET on an out-of-range
+    # list index APPENDS rather than failing - so without the itemId condition
+    # this would either tick the wrong box or grow a bogus ninth entry. Simulate
+    # the drift by deleting an element out from under the index.
+    from common.db import table
+    from common.keys import pk
+
+    employee_id = create(handlers)['id']
+    table.update_item(
+        Key={'PK': pk(employee_id)},
+        UpdateExpression='REMOVE #checklist[0]',
+        ExpressionAttributeNames={'#checklist': 'checklist'},
+    )
+
+    # policy-ack is index 7; after the shift, index 7 is off the end of the list.
+    assert patch(handlers, employee_id, 'policy-ack', True)['statusCode'] == 500
+    # induction is index 6; after the shift, index 6 holds policy-ack.
+    assert patch(handlers, employee_id, 'induction', True)['statusCode'] == 500
+
+    stored = table.get_item(Key={'PK': pk(employee_id)})['Item']
+    assert len(stored['checklist']) == 7, 'the failed writes must not have appended'
+    assert all(not entry['done'] for entry in stored['checklist'])
 
 
 def test_a_comment_is_trimmed(handlers):
@@ -561,17 +563,6 @@ def test_an_archived_employee_cannot_be_edited(handlers):
     assert body(get(handlers, employee_id))['jobTitle'] == VALID['jobTitle']
 
 
-def test_an_archived_employee_cannot_be_edited_onto_a_new_email(handlers):
-    # The transactional path through update_employee - a different write from
-    # the one above, so it needs its own guard and its own test.
-    employee_id = create(handlers)['id']
-    archive(handlers, employee_id)
-
-    assert put(handlers, employee_id,
-               dict(VALID, email='new@breville.com'))['statusCode'] == 409
-    assert post(handlers, dict(VALID, email='new@breville.com'))['statusCode'] == 201
-
-
 def test_an_archived_checklist_cannot_be_ticked(handlers):
     employee_id = create(handlers)['id']
     archive(handlers, employee_id)
@@ -616,17 +607,21 @@ def test_archiving_twice_is_idempotent_and_keeps_the_first_stamp(handlers):
 def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
     # Belt and braces on the above. Even with the checklist moved underneath it,
     # the stamp is a record of a decision someone made and is not recomputed.
+    from common.checklist_template import CHECKLIST_INDEX
     from common.db import table
-    from common.keys import chk_sk, pk
+    from common.keys import pk
 
     employee_id = create(handlers)['id']
     archive(handlers, employee_id)
 
+    # Reaching past the API's archive freeze on purpose, the same way the old
+    # version of this test reached past it into the separate CHK# rows.
     for item in body(get(handlers, employee_id))['checklist']:
+        index = CHECKLIST_INDEX[item['id']]
         table.update_item(
-            Key={'PK': pk(employee_id), 'SK': chk_sk(item['id'])},
-            UpdateExpression='SET #done = :done',
-            ExpressionAttributeNames={'#done': 'done'},
+            Key={'PK': pk(employee_id)},
+            UpdateExpression='SET #checklist[{}].#done = :done'.format(index),
+            ExpressionAttributeNames={'#checklist': 'checklist', '#done': 'done'},
             ExpressionAttributeValues={':done': True},
         )
 

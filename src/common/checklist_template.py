@@ -18,3 +18,19 @@ CHECKLIST_TEMPLATE = [
 ]
 
 VALID_ITEM_IDS = frozenset(item['id'] for item in CHECKLIST_TEMPLATE)
+
+# Where each item sits in the embedded `checklist` list, so a PATCH can build the
+# document path `checklist[i].done` without reading the list first. That is the
+# whole reason ticking a box is still a single server-side UpdateItem and not a
+# read-modify-write two people can lose a tick to.
+#
+# The index is POSITIONAL, which makes two things load-bearing:
+#
+#   1. No code may ever REMOVE or list_append a whole element. `REMOVE
+#      checklist[3]` deletes the element and shifts every later index down by
+#      one, and nothing here would notice - only `checklist[i].comment` is ever
+#      removed, never `checklist[i]` itself.
+#   2. Every write pairs its path with a `checklist[i].itemId = :itemId`
+#      condition, because SET on an out-of-range index silently APPENDS instead
+#      of failing. The condition turns a desynced list into a failed write.
+CHECKLIST_INDEX = {item['id']: index for index, item in enumerate(CHECKLIST_TEMPLATE)}

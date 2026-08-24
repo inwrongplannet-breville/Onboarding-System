@@ -431,18 +431,17 @@
       }
     },
     {
-      "name": "Duplicate work email - 409",
+      "name": "Duplicate work email - 201 (uniqueness is no longer enforced)",
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "pm.test('201 Created - the address is not checked', () => pm.response.to.have.status(201));",
               "const body = pm.response.json();",
-              "pm.test('blames the email, not the id', () => {",
-              "  pm.expect(body.error.code).to.eql('Conflict');",
-              "  pm.expect(body.error.fields).to.have.property('email');",
+              "pm.test('a second record now holds the same email', () => {",
+              "  pm.expect(body).to.have.property('id');",
               "});"
             ]
           }
@@ -615,7 +614,7 @@
       }
     },
     {
-      "name": "Tick after archive - 409 (the ConditionCheck in the transaction)",
+      "name": "Tick after archive - 409 (the archive condition on the write)",
       "event": [
         {
           "listen": "test",

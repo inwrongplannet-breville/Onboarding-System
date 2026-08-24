@@ -132,22 +132,23 @@ window.App = window.App || {};
     },
 
     createEmployee: function (input) {
-      // The API assigns the id and seeds all eight checklist items in one
-      // transaction, so the response is already complete.
+      // The API assigns the id and embeds all eight checklist entries on the new
+      // record, so the response is already complete.
       return request('POST', '/employees', pickEditable(input));
     },
 
     updateEmployee: function (id, input) {
-      // A full replace of the nine editable fields. Checklist progress lives in
-      // separate DynamoDB items and is untouched by this.
+      // A full replace of the nine editable fields. The checklist is an attribute
+      // of the same item, and the server's whitelist never names it - so progress
+      // survives an edit.
       return request('PUT', employeePath(id), pickEditable(input));
     },
 
     /*
      * Takes someone off the employee list. Still a DELETE, and deliberately so -
      * from here that is exactly what it is - but the server archives rather than
-     * erases: the record and its checklist stay in DynamoDB stamped with a
-     * terminal state, and stop accepting writes. src/handlers/delete_employee.py
+     * erases: the record and its embedded checklist stay in DynamoDB stamped
+     * with a terminal state, and stop accepting writes. src/handlers/delete_employee.py
      * has the reasoning.
      *
      * Resolves the archived employee. That is the whole reason it is a 200 and

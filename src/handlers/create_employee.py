@@ -1,17 +1,15 @@
 """
 POST /employees - brief task 2.
 
-Writes 9 items (1 profile + 8 checklist rows) in a single TransactWriteItems.
+Writes one item: the profile fields plus the eight checklist entries embedded as a
+list attribute. One employee is one item, so there is nothing to keep atomic
+across items and nothing to transact - a single conditional PutItem does it.
 
-Why a transaction and not BatchWriteItem: batch is not atomic. A partial success
-returns UnprocessedItems and leaves an employee holding, say, 5 of 8 checklist
-rows - a state no handler downstream knows how to reason about. Batch also can't
-carry condition expressions. 10 items is comfortably inside the 100-item limit.
-
-The tenth item is the email uniqueness guard. It rides along in the same
-transaction on purpose: check-then-write in two calls is a race two concurrent
-POSTs will win, and a duplicate work email is exactly the kind of thing nobody
-notices until payroll does.
+This used to be a ten-item TransactWriteItems: a profile row, eight CHK# rows and
+an email uniqueness guard in its own partition. The guard is gone, and with it the
+only thing enforcing one employee per work email - DynamoDB can enforce uniqueness
+on a partition key and nothing else, and the partition key here is a UUID. A
+duplicate work email is now possible and will not be rejected.
 """
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -19,9 +17,9 @@ from uuid import uuid4
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import TABLE_NAME, client, serialize
-from common.handler import api_handler, failed_at, is_transaction_cancelled, parse_body
-from common.keys import PROFILE_SK, chk_sk, email_pk, EMAIL_SK, pk
+from common.db import table
+from common.handler import api_handler, is_condition_failure, parse_body
+from common.keys import pk
 from common.models import (
     new_checklist_items,
     pick_editable,
@@ -40,81 +38,34 @@ def lambda_handler(event, context):
         return responses.bad_request('Employee details are not valid.', errors)
 
     employee_id = str(uuid4())
-    partition = pk(employee_id)
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
-    profile = dict(values)
-    profile.update({
-        'PK': partition,
-        'SK': PROFILE_SK,
+    item = dict(values)
+    item.update({
+        'PK': pk(employee_id),
         'entityType': 'Employee',
         'employeeId': employee_id,
         'createdAt': now,
         'updatedAt': now,
-    })
-
-    checklist_items = []
-    for item in new_checklist_items():
-        row = dict(item)
-        row.update({
-            'PK': partition,
-            'SK': chk_sk(item['itemId']),
-            'entityType': 'ChecklistItem',
-            'updatedAt': now,
-        })
-        checklist_items.append(row)
-
-    all_items = [profile] + checklist_items
-
-    guard = {
-        'PK': email_pk(values['email']),
-        'SK': EMAIL_SK,
-        'entityType': 'EmailGuard',
-        'employeeId': employee_id,
-        'email': values['email'],
-        'createdAt': now,
-    }
-
-    # Order matters below: the profile is item 0 and the guard is last. That
-    # position is how a UUID collision is told apart from a duplicate email when
-    # the transaction comes back cancelled.
-    transact_items = [
-        {
-            'Put': {
-                'TableName': TABLE_NAME,
-                'Item': serialize(item),
-                # Guards against a UUID collision. Astronomically unlikely,
-                # but the alternative is a silent overwrite of a real person.
-                'ConditionExpression': 'attribute_not_exists(PK)',
-            }
-        }
-        for item in all_items
-    ]
-    transact_items.append({
-        'Put': {
-            'TableName': TABLE_NAME,
-            'Item': serialize(guard),
-            'ConditionExpression': 'attribute_not_exists(PK)',
-        }
+        # In CHECKLIST_TEMPLATE order, and it has to stay that way: every PATCH
+        # addresses an entry as checklist[i] using CHECKLIST_INDEX, which is
+        # built from that same order.
+        'checklist': [dict(entry, updatedAt=now) for entry in new_checklist_items()],
     })
 
     try:
-        client.transact_write_items(TransactItems=transact_items)
+        table.put_item(
+            Item=item,
+            # Guards against a UUID collision. Astronomically unlikely, but the
+            # alternative is a silent overwrite of a real person - and PutItem
+            # overwrites by default, so leaving this off is not a smaller risk,
+            # it is a different one.
+            ConditionExpression='attribute_not_exists(PK)',
+        )
     except ClientError as error:
-        if not is_transaction_cancelled(error):
-            raise
-        # Read which condition actually fired rather than assuming. A cancelled
-        # transaction is also how throughput limits and item-size problems
-        # arrive, and reporting one of those as "that email is taken" sends the
-        # reader looking for a duplicate that does not exist.
-        if failed_at(error, len(transact_items) - 1):
-            return responses.conflict(
-                'That work email is already on another employee.',
-                {'email': 'Already in use by another employee.'},
-            )
-        if failed_at(error, 0):
+        if is_condition_failure(error):
             return responses.conflict('That employee id already exists.')
         raise
 
-    employee = to_api_employee(all_items)
+    employee = to_api_employee(item)
     return responses.created(employee, '/employees/' + employee_id)

@@ -1,7 +1,7 @@
 """
-The one way to read a whole employee back out of the table.
+The one way to read an employee back out of the table.
 
-It exists for the `consistent` flag. DynamoDB Query is *eventually consistent by
+It exists for the `consistent` flag. DynamoDB reads are *eventually consistent by
 default*, so a handler that writes and then re-reads to build its response can
 legitimately be handed the pre-write values - and PUT and PATCH both do exactly
 that. The UI then repaints from that response (paintChecklist in js/app.js), so a
@@ -11,43 +11,45 @@ GET pays no such price and stays eventually consistent: nothing it returns was
 written a millisecond earlier by the same caller, and consistent reads cost twice
 as much.
 """
-from boto3.dynamodb.conditions import Key
-
 from common.db import table
-from common.keys import PROFILE_SK, pk
+from common.keys import pk
 from common.models import to_api_employee
 
 
 def load_employee(employee_id, consistent=False):
-    """The full API employee - profile plus checklist - or None if there is none."""
-    result = table.query(
-        KeyConditionExpression=Key('PK').eq(pk(employee_id)),
+    """The full API employee, or None if there is none."""
+    result = table.get_item(
+        Key={'PK': pk(employee_id)},
         ConsistentRead=consistent,
     )
-    return to_api_employee(result.get('Items', []))
+    return to_api_employee(result.get('Item'))
 
 
-def load_profile(employee_id):
+def load_archive_state(employee_id):
     """
-    The two profile facts a write has to check first, or None if there is no
-    such employee: the email it might have to move a guard for, and whether the
-    record has been archived and is therefore frozen.
+    Whether this employee exists and whether they are frozen, or None if there is
+    no such employee. The one fact a failed conditional write needs in order to
+    say which of 404 and 409 it was.
 
-    One GetItem rather than two, and a projection rather than the whole row -
-    neither caller wants the profile itself, they want permission to proceed.
+    A projection rather than the whole item - the caller does not want the
+    employee, it wants to know why its write bounced.
 
-    Read consistently. The email decides whether the update moves the uniqueness
-    guard, and acting on a stale address there could strand a guard on an email
-    nobody holds any more. The archive flag decides whether the write happens at
-    all, and a stale read of that one lets an edit land on a frozen record.
+    `employeeId` is in the projection and is not optional. An active employee has
+    no `archivedAs` attribute at all, and a projection that names only absent
+    attributes comes back with no `Item` - which would have this function report
+    "no such employee" for someone who plainly exists. Projecting one
+    always-present attribute alongside it is what keeps the None meaningful.
+
+    Read consistently: this decides whether a write is rejected as frozen, and a
+    stale read of that lets an edit land on an archived record.
     """
     result = table.get_item(
-        Key={'PK': pk(employee_id), 'SK': PROFILE_SK},
-        ProjectionExpression='#email, #archivedAs',
-        ExpressionAttributeNames={'#email': 'email', '#archivedAs': 'archivedAs'},
+        Key={'PK': pk(employee_id)},
+        ProjectionExpression='employeeId, #archivedAs',
+        ExpressionAttributeNames={'#archivedAs': 'archivedAs'},
         ConsistentRead=True,
     )
     item = result.get('Item')
     if item is None:
         return None
-    return {'email': item.get('email', ''), 'archivedAs': item.get('archivedAs', '')}
+    return {'archivedAs': item.get('archivedAs', '')}

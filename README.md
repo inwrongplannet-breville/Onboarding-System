@@ -76,6 +76,7 @@ value in `js/config.js` — update that one line if you deploy your own.
 | | |
 |---|---|
 | [docs/design.md](docs/design.md) | Architecture, data model, and why things are built the way they are |
+| [docs/database-design.md](docs/database-design.md) | The DynamoDB layout in full — item shape, access patterns, invariants, cost |
 | [docs/api.md](docs/api.md) | Endpoint reference with curl examples |
 | [docs/phase3-testing.md](docs/phase3-testing.md) | Manual browser click-through |
 | [Postman collection](docs/Employee-Onboarding.postman_collection.json) | Import and run top to bottom |
