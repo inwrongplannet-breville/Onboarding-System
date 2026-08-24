@@ -18,7 +18,10 @@ capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
 confirm_changeset = true
 fail_on_empty_changeset = false
-tags = "Project=\"onboarding-system\" Phase=\"2\""
+# No Phase tag. A tag that has to be hand-bumped every phase is a tag that
+# is wrong most of the time - and the phase a resource happened to be
+# created in tells you nothing useful about it later.
+tags = "Project=\"onboarding-system\""
 
 [default.sync.parameters]
 region = "eu-north-1"

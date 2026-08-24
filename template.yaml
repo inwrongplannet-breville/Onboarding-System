@@ -52,8 +52,6 @@ Resources:
       Tags:
         - Key: Project
           Value: onboarding-system
-        - Key: Phase
-          Value: '2'
 
   # ------------------------------------------------------------------- the API
   OnboardingApi:
