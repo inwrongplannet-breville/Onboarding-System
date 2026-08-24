@@ -20,6 +20,14 @@ That asymmetry is the design working as intended, not a hole in it: the API has 
 hard delete because employee history should not be destroyable over HTTP. Resetting
 a dev table is a deliberate act against the table, and this is it.
 
+The table calls go through the AWS CLI rather than boto3, which is not the obvious
+choice and is deliberate. `aws login` - the browser-based console login this project
+uses - caches credentials that boto3 can only read if `botocore[crt]` is installed;
+without it every boto3 call dies on MissingDependencyException while the CLI sitting
+next to it works fine. The CLI is already a hard dependency here for reading the
+stack outputs, so leaning on it costs nothing and removes a dependency that is easy
+to not have.
+
 Usage:
     py scripts/seed_employees.py --wipe --seed --yes
     py scripts/seed_employees.py --seed --base-url https://... /dev
@@ -29,10 +37,14 @@ of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolv
 the table name the same way, from the stack's TableName output.
 """
 import argparse
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -173,6 +185,57 @@ def resolve_table_name(explicit):
     return stack_output('TableName')
 
 
+def aws_json(args, payloads=None):
+    """
+    One AWS CLI call returning parsed JSON, with any dict arguments written to
+    temp files and passed as file:// .
+
+    The file:// detour is not decoration. Passing inline JSON to the CLI on
+    Windows is a quoting minefield - PowerShell strips the double quotes before
+    the exe sees them, and a BOM from the wrong text writer makes the CLI reject
+    the file it just read. A plain UTF-8 file with no BOM sidesteps both.
+    """
+    temp_dir = tempfile.mkdtemp(prefix='onboarding-wipe-')
+    try:
+        argv = ['aws'] + args
+        for flag, payload in (payloads or {}).items():
+            path = os.path.join(temp_dir, flag.strip('-') + '.json')
+            with io.open(path, 'w', encoding='utf-8', newline='\n') as handle:
+                handle.write(json.dumps(payload))
+            argv += [flag, 'file://' + path]
+
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                shell=(os.name == 'nt'))
+        if result.returncode != 0:
+            raise SystemExit('AWS CLI failed:\n  {}\n{}'.format(
+                ' '.join(args), result.stderr.strip()))
+
+        return json.loads(result.stdout) if result.stdout.strip() else None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def scan_keys(table_name):
+    """Every PK/SK in the table, following pagination."""
+    keys = []
+    start_key = None
+
+    while True:
+        args = ['dynamodb', 'scan', '--table-name', table_name,
+                '--region', REGION, '--projection-expression', 'PK,SK',
+                '--output', 'json']
+        payloads = {}
+        if start_key:
+            payloads['--exclusive-start-key'] = start_key
+
+        result = aws_json(args, payloads)
+        keys.extend({'PK': i['PK'], 'SK': i['SK']} for i in result.get('Items', []))
+
+        start_key = result.get('LastEvaluatedKey')
+        if not start_key:
+            return keys
+
+
 def wipe(table_name, assume_yes):
     """
     Delete every row in the table - employees, checklist items and email guards.
@@ -181,27 +244,19 @@ def wipe(table_name, assume_yes):
     employees and their guards are exactly what would break the seed that
     follows. Scan reaches everything; the list endpoint reaches what is live.
     """
-    import boto3
+    keys = scan_keys(table_name)
 
-    table = boto3.resource('dynamodb', region_name=REGION).Table(table_name)
-
-    items = []
-    kwargs = {'ProjectionExpression': 'PK, SK'}
-    while True:
-        result = table.scan(**kwargs)
-        items.extend(result.get('Items', []))
-        if not result.get('LastEvaluatedKey'):
-            break
-        kwargs['ExclusiveStartKey'] = result['LastEvaluatedKey']
-
-    if not items:
+    if not keys:
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    employees = sorted({i['PK'] for i in items if i['PK'].startswith('EMP#')})
-    print('\nAbout to hard-delete {} row(s) from {}:'.format(len(items), table_name))
-    print('  {} employee partition(s), including any already archived'.format(len(employees)))
-    print('  plus their checklist rows and email uniqueness guards')
+    partitions = {k['PK']['S'] for k in keys}
+    employees = {p for p in partitions if p.startswith('EMP#')}
+    guards = {p for p in partitions if p.startswith('EMAIL#')}
+
+    print('\nAbout to hard-delete {} row(s) from {}:'.format(len(keys), table_name))
+    print('  {} employee partition(s), archived ones included'.format(len(employees)))
+    print('  {} email uniqueness guard(s)'.format(len(guards)))
 
     if not assume_yes:
         # Irreversible, and unlike the API it really does destroy the history -
@@ -209,11 +264,28 @@ def wipe(table_name, assume_yes):
         if input('\nType "delete" to confirm: ').strip().lower() != 'delete':
             raise SystemExit('Aborted.')
 
-    with table.batch_writer() as batch:
-        for item in items:
-            batch.delete_item(Key={'PK': item['PK'], 'SK': item['SK']})
+    # 25 is the BatchWriteItem ceiling. Unprocessed items are retried rather than
+    # ignored - DynamoDB returns them on throttling, and a wipe that quietly left
+    # rows behind would strand exactly the guards that break the next seed.
+    deleted = 0
+    for start in range(0, len(keys), 25):
+        pending = [{'DeleteRequest': {'Key': key}} for key in keys[start:start + 25]]
 
-    print('Wiped {} row(s).'.format(len(items)))
+        for attempt in range(5):
+            result = aws_json(
+                ['dynamodb', 'batch-write-item', '--region', REGION, '--output', 'json'],
+                {'--request-items': {table_name: pending}},
+            )
+            unprocessed = (result or {}).get('UnprocessedItems', {}).get(table_name, [])
+            deleted += len(pending) - len(unprocessed)
+            if not unprocessed:
+                break
+            pending = unprocessed
+            time.sleep(2 ** attempt)
+        else:
+            raise SystemExit('Gave up with {} row(s) still undeleted.'.format(len(pending)))
+
+    print('Wiped {} row(s).'.format(deleted))
 
 
 def seed(base_url):
