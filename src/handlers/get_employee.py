@@ -6,6 +6,10 @@ single round trip. That is the whole point of keeping them under one PK.
 
 Eventually consistent, deliberately - see common/repository.py. PUT and PATCH are
 the calls that need the strong read, because they wrote a moment earlier.
+
+Archived employees are returned here, carrying `archived` and `archivedAs`. Only
+the list endpoint hides them: "removed" means off the list, and a record nobody
+can read is not an archive, it is a slower delete.
 """
 from common import responses
 from common.handler import api_handler, path_param

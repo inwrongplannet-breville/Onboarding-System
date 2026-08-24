@@ -42,7 +42,10 @@ only had to change the bodies of the functions in `js/store.js`.
       "comment": "Passport, not licence." }
   ],
   "status": "In Progress",
-  "progress": { "done": 1, "total": 8, "percent": 13 }
+  "progress": { "done": 1, "total": 8, "percent": 13 },
+  "archived": false,
+  "archivedAs": "",
+  "archivedAt": ""
 }
 ```
 
@@ -50,8 +53,14 @@ only had to change the bodies of the functions in `js/store.js`.
 sync with the checklist. They are also the only copy: the UI renders the badge and the progress bar
 from these fields rather than computing its own.
 
-`id` and `checklist` are **never settable from a request body**. Send them and they're silently
-dropped, matching `pickEditable` in `js/store.js`.
+`archived` says whether the employee has been taken off the list. `archivedAs` is `"Onboarding
+Cancelled"` or `"Onboarded"` on an archived record and `""` on a live one; `archivedAt` is the ISO
+timestamp of the archiving. Unlike `status`, these are **stored** — they record a decision someone
+made at a point in time, not a fact about the checklist as it stands. See
+[`DELETE /employees/{id}`](#delete-employeesid).
+
+`id`, `checklist` and the three archive fields are **never settable from a request body**. Send them
+and they're silently dropped, matching `pickEditable` in `js/store.js`.
 
 ### Field rules
 
@@ -81,7 +90,7 @@ no author to attribute a thread to.
 |---|---|
 | `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done`, non-text or over-long `comment`, or a PATCH body asking for nothing |
 | `404` `NotFound` | unknown employee id or checklist item id |
-| `409` `Conflict` | work email already on another employee (carries `fields.email`); UUID collision on create |
+| `409` `Conflict` | work email already on another employee (carries `fields.email`); a `PUT` or `PATCH` against an **archived** employee; UUID collision on create |
 | `500` `InternalError` | anything unhandled — details are in CloudWatch, never in the response |
 
 ---
@@ -90,7 +99,8 @@ no author to attribute a thread to.
 
 ### `GET /employees`
 
-Returns every employee, each with their full checklist.
+Returns every **active** employee, each with their full checklist. Archived employees are excluded —
+this endpoint is what decides they are "removed", and there is no flag to include them.
 
 ```bash
 curl -s "$BASE_URL/employees"
@@ -151,7 +161,7 @@ the id is unknown.
 ### `PUT /employees/{id}`
 
 Full replace of the editable fields. **Checklist progress is preserved** — the checklist lives in
-separate items that this endpoint never touches.
+separate items that this endpoint never touches. `409` if the employee is archived.
 
 ```bash
 curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
@@ -171,13 +181,46 @@ The response is read back with a **consistent** read, so it always shows the val
 
 ### `DELETE /employees/{id}`
 
-Deletes the whole partition — profile and all 8 checklist rows — plus the employee's email
-uniqueness guard, in one transaction. `204` with no body, `404` if unknown. The work email is
-immediately reusable.
+**Archives. Does not delete.** Nothing is removed from the table. The profile is stamped with a
+terminal state, the employee drops out of `GET /employees`, and the record stops accepting writes.
+
+Which state depends on where the checklist had got to at that moment:
+
+| Checklist | `archivedAs` |
+|---|---|
+| all 8 ticked | `Onboarded` |
+| anything less | `Onboarding Cancelled` |
+
+Returns `200` with the archived employee — not the old `204` — so the caller can report which state
+it landed in without re-deriving the rule. `404` if the id is unknown.
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
 ```
+
+```json
+{ "id": "...", "status": "In Progress",
+  "progress": { "done": 2, "total": 8, "percent": 25 },
+  "archived": true, "archivedAs": "Onboarding Cancelled",
+  "archivedAt": "2026-08-24T02:15:00Z" }
+```
+
+Note `status` still reads `In Progress`: it goes on describing the checklist, while `archivedAs`
+records the decision. An archived record showing 2 of 8 is correct, not a contradiction.
+
+Three consequences, all deliberate:
+
+- **The work email stays reserved.** The uniqueness guard is not removed, so re-hiring under the
+  same address is a `409`. Nothing in the API releases it.
+- **The record freezes.** `PUT` and `PATCH` both return `409` with
+  `"This employee is archived. Their record is read-only."` This is enforced by a condition on the
+  write itself, not just a check before it, so a cancelled onboarding cannot be ticked to 8 of 8
+  afterwards and left still claiming it was cancelled.
+- **Repeating it is idempotent.** A second `DELETE` returns `200` with the *first* stamp — it does
+  not move `archivedAt` or recompute `archivedAs`.
+
+Archived employees remain readable at `GET /employees/{id}` and in the DynamoDB console. There is no
+un-archive endpoint; reversing one means clearing `archivedAs` on the profile row directly.
 
 ### `PATCH /employees/{id}/checklist/{itemId}`
 
@@ -237,9 +280,11 @@ curl -s -o /dev/null -w 'get                   %{http_code}\n' "$BASE_URL/employ
 curl -s -o /dev/null -w 'tick offer-letter     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" -H 'Content-Type: application/json' -d '{"done":true}'
 curl -s -o /dev/null -w 'tick unknown item     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/not-a-thing" -H 'Content-Type: application/json' -d '{"done":true}'
 curl -s -o /dev/null -w 'bad email             %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"email":"nope"}'
-curl -s -o /dev/null -w 'delete                %{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
-curl -s -o /dev/null -w 'get after delete      %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
-curl -s -o /dev/null -w 'update after delete   %{http_code}\n' -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"t@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'archive               %{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s -o /dev/null -w 'get after archive     %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s -o /dev/null -w 'update after archive  %{http_code}\n' -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"t@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'tick after archive    %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/id-proof" -H 'Content-Type: application/json' -d '{"done":true}'
+curl -s -o /dev/null -w 'email still reserved  %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
 ```
 
 Expected:
@@ -252,15 +297,19 @@ tick unknown item     404
 bad email             400
 impossible date       400
 duplicate email       409
-delete                204
-get after delete      404
-update after delete   404
+archive               200
+get after archive     200
+update after archive  409
+tick after archive    409
+email still reserved  409
 ```
 
-Two more checks that curl can't make for you:
+Three more checks that curl can't make for you:
 
 1. **Persistence** — run `GET /employees` from a fresh terminal minutes later. The employee is
    still there. This is the thing Phase 1 could not do.
-2. **No orphans** — after the DELETE, scan the table in the DynamoDB console and confirm zero
-   remaining `CHK#` items under that `PK`, and no `EMAIL#` item for that address. A stranded guard
-   would lock the address out for good.
+2. **Off the list, not gone** — after the archive, confirm the employee is absent from
+   `GET /employees` and still present in the DynamoDB console: 1 profile row carrying `archivedAs`,
+   8 `CHK#` rows, and the `EMAIL#` guard.
+3. **Comments survived** — any note written on a checklist item is still on the archived record.
+   That history is the reason the row is still there.

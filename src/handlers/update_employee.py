@@ -7,6 +7,11 @@ not touched, which is what preserves onboarding progress across an edit.
 The condition expression is load-bearing: UpdateItem *upserts* by default, so a
 PUT to a deleted id would happily create a profile with no checklist behind it.
 
+An archived employee is refused outright with a 409 - see handlers/delete_employee
+for why the record freezes. The check is made twice on purpose: once up front so
+the caller gets a message that names the actual problem, and once as a condition
+on the write itself, so an archive landing in between cannot be overwritten.
+
 Two shapes of write, decided by whether the email changed:
 
   unchanged  a plain UpdateItem, exactly as before.
@@ -31,8 +36,29 @@ from common.handler import (
     path_param,
 )
 from common.keys import EMAIL_SK, PROFILE_SK, email_pk, pk
-from common.models import EDITABLE_FIELDS, pick_editable, validate_employee
-from common.repository import current_email, load_employee
+from common.models import ARCHIVED_MESSAGE, EDITABLE_FIELDS, pick_editable, validate_employee
+from common.repository import load_employee, load_profile
+
+
+# The profile row has to exist and must not be archived. Shared by both write
+# paths so the two cannot drift, which matters here: a condition that is right on
+# one path and stale on the other is a hole you only find in production.
+PROFILE_GUARD = ('attribute_exists(PK) AND attribute_exists(SK) '
+                 'AND attribute_not_exists(#archivedAs)')
+
+
+def _guard_failure(employee_id):
+    """
+    Turn a fired PROFILE_GUARD into the right status code.
+
+    Re-reads rather than guessing which half of the condition it was, because
+    'archived' and 'never existed' are a 409 and a 404 and telling a caller the
+    wrong one sends them looking in the wrong place.
+    """
+    profile = load_profile(employee_id)
+    if profile is not None and profile['archivedAs']:
+        return responses.conflict(ARCHIVED_MESSAGE)
+    return responses.not_found('No employee with id ' + employee_id + '.')
 
 
 def _profile_update(values, now):
@@ -52,6 +78,11 @@ def _profile_update(values, now):
     names['#updatedAt'] = 'updatedAt'
     values_map[':updatedAt'] = now
 
+    # Not in the SET clause - it is here for PROFILE_GUARD below, which shares
+    # this names map. DynamoDB rejects an ExpressionAttributeNames entry that no
+    # expression uses, so this is only legal because every caller pairs the two.
+    names['#archivedAs'] = 'archivedAs'
+
     return 'SET ' + ', '.join(assignments), names, values_map
 
 
@@ -68,9 +99,12 @@ def lambda_handler(event, context):
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
     expression, names, values_map = _profile_update(values, now)
 
-    existing_email = current_email(employee_id)
-    if existing_email is None:
+    profile = load_profile(employee_id)
+    if profile is None:
         return responses.not_found('No employee with id ' + employee_id + '.')
+    if profile['archivedAs']:
+        return responses.conflict(ARCHIVED_MESSAGE)
+    existing_email = profile['email']
 
     moving_email = email_pk(existing_email) != email_pk(values['email'])
 
@@ -86,11 +120,11 @@ def lambda_handler(event, context):
                 UpdateExpression=expression,
                 ExpressionAttributeNames=names,
                 ExpressionAttributeValues=values_map,
-                ConditionExpression='attribute_exists(PK) AND attribute_exists(SK)',
+                ConditionExpression=PROFILE_GUARD,
             )
         except ClientError as error:
             if is_condition_failure(error):
-                return responses.not_found('No employee with id ' + employee_id + '.')
+                return _guard_failure(employee_id)
             raise
 
     # Re-read so the response carries the checklist too, matching GET exactly.
@@ -138,7 +172,7 @@ def _swap_email_and_update(employee_id, existing_email, values, now,
                 'UpdateExpression': expression,
                 'ExpressionAttributeNames': names,
                 'ExpressionAttributeValues': serialize(values_map),
-                'ConditionExpression': 'attribute_exists(PK) AND attribute_exists(SK)',
+                'ConditionExpression': PROFILE_GUARD,
             }
         },
     ]
@@ -154,8 +188,9 @@ def _swap_email_and_update(employee_id, existing_email, values, now,
                 {'email': 'Already in use by another employee.'},
             )
         if failed_at(error, 2):
-            # Deleted between the read above and this write.
-            return responses.not_found('No employee with id ' + employee_id + '.')
+            # Archived between the read above and this write. (Deleted is no
+            # longer reachable through the API, but the guard still covers it.)
+            return _guard_failure(employee_id)
         raise
 
     return None

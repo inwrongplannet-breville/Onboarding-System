@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Employee Management & Onboarding System - Phase 2.
-  DynamoDB single table + six Lambdas behind API Gateway. No UI integration yet.
+  Employee Management & Onboarding System.
+  DynamoDB single table + six Lambdas behind API Gateway, wired to the UI.
+  DELETE archives rather than erases - see src/handlers/delete_employee.py.
 
 Parameters:
   Stage:
@@ -169,10 +170,15 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
+            # No DeleteItem. DELETE archives the profile rather than erasing the
+            # partition, so this function reads the checklist to decide which
+            # terminal state to stamp and then writes that one attribute.
+            # Removing DeleteItem is the point: with it gone, a bug in this
+            # handler cannot destroy an employee record even if it tries.
             - Effect: Allow
               Action:
                 - dynamodb:Query
-                - dynamodb:DeleteItem
+                - dynamodb:UpdateItem
               Resource: !GetAtt OnboardingTable.Arn
       Events:
         Api:
@@ -189,9 +195,16 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
+            # ConditionCheckItem is what the transaction's ConditionCheck on the
+            # profile authorises against - it is its own IAM action, and leaving
+            # it out fails the tick with an AccessDenied that names the table
+            # rather than the check. GetItem is only used on the failure path,
+            # to tell an archived employee apart from a missing one.
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
+                - dynamodb:ConditionCheckItem
+                - dynamodb:GetItem
                 - dynamodb:Query
               Resource: !GetAtt OnboardingTable.Arn
       Events:

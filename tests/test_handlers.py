@@ -58,6 +58,22 @@ def item_of(employee, item_id):
     return [i for i in employee['checklist'] if i['id'] == item_id][0]
 
 
+def archive(handlers, employee_id):
+    """DELETE, asserting it archived, and hand back the archived record."""
+    response = delete(handlers, employee_id)
+    assert response['statusCode'] == 200, response['body']
+    return body(response)
+
+
+def tick_everything(handlers, employee_id):
+    for item in body(get(handlers, employee_id))['checklist']:
+        assert patch(handlers, employee_id, item['id'], True)['statusCode'] == 200
+
+
+def listed_ids(handlers):
+    return [e['id'] for e in body(handlers['list_employees']({}, None))['employees']]
+
+
 def create(handlers, **overrides):
     response = post(handlers, dict(VALID, **overrides))
     assert response['statusCode'] == 201, response['body']
@@ -157,17 +173,22 @@ def test_changing_an_email_frees_the_old_one(handlers):
     assert post(handlers, dict(VALID, email='new@breville.com'))['statusCode'] == 409
 
 
-def test_deleting_an_employee_frees_their_email(handlers):
-    employee_id = create(handlers)['id']
-    delete(handlers, employee_id)
-    assert post(handlers, VALID)['statusCode'] == 201
+def test_archiving_an_employee_keeps_their_email_reserved(handlers):
+    # The deliberate opposite of the old hard delete. The archived record still
+    # holds that address, so re-hiring under it would put two records on one
+    # mailbox - which is the thing the guard exists to prevent.
+    archive(handlers, create(handlers)['id'])
+    assert post(handlers, VALID)['statusCode'] == 409
 
 
-def test_delete_leaves_no_guard_behind(handlers):
+def test_archiving_leaves_the_guard_in_place(handlers):
     from common.db import table
+    from common.keys import email_pk
 
-    delete(handlers, create(handlers)['id'])
-    assert table.scan()['Items'] == [], 'an orphan guard would lock that email forever'
+    archive(handlers, create(handlers)['id'])
+
+    guards = [i for i in table.scan()['Items'] if i['PK'] == email_pk(VALID['email'])]
+    assert len(guards) == 1, 'the guard is what reserves the address after archiving'
 
 
 # ------------------------------------------------------------------------- get
@@ -411,46 +432,205 @@ def test_a_comment_on_an_unknown_item_is_404(handlers):
                      {'comment': 'hello'})['statusCode'] == 404
 
 
-def test_comments_are_deleted_with_the_employee(handlers):
-    from common.db import table
-
+def test_comments_survive_archiving(handlers):
+    # Archiving exists so the history is still there to read, and a note saying
+    # why onboarding stalled is the most useful part of that history.
     employee_id = create(handlers)['id']
-    patch_raw(handlers, employee_id, 'laptop', {'comment': 'Should not outlive them.'})
-    delete(handlers, employee_id)
+    patch_raw(handlers, employee_id, 'laptop', {'comment': 'Never collected it.'})
 
-    assert table.scan()['Items'] == []
+    archived = archive(handlers, employee_id)
+    assert item_of(archived, 'laptop')['comment'] == 'Never collected it.'
 
 
 # ---------------------------------------------------------------------- delete
 
-def test_delete_returns_204_with_no_body(handlers):
-    response = delete(handlers, create(handlers)['id'])
-    assert response['statusCode'] == 204
-    assert 'body' not in response
+def test_delete_returns_200_with_the_archived_record(handlers):
+    archived = archive(handlers, create(handlers)['id'])
+    assert archived['archived'] is True
+    assert archived['archivedAt']
 
 
-def test_delete_removes_the_profile_and_every_checklist_row(handlers):
+def test_delete_takes_nothing_away(handlers):
     from common.db import table
 
     employee_id = create(handlers)['id']
-    delete(handlers, employee_id)
+    before = len(table.scan()['Items'])
+    archive(handlers, employee_id)
 
-    leftovers = table.scan()['Items']
-    assert leftovers == [], 'orphan checklist items were left behind'
+    assert len(table.scan()['Items']) == before, 'archiving must not remove rows'
+
+
+def test_an_incomplete_checklist_archives_as_cancelled(handlers):
+    employee_id = create(handlers)['id']
+    patch(handlers, employee_id, 'offer-letter', True)
+
+    assert archive(handlers, employee_id)['archivedAs'] == 'Onboarding Cancelled'
+
+
+def test_an_untouched_checklist_archives_as_cancelled(handlers):
+    assert archive(handlers, create(handlers)['id'])['archivedAs'] == 'Onboarding Cancelled'
+
+
+def test_a_complete_checklist_archives_as_onboarded(handlers):
+    employee_id = create(handlers)['id']
+    tick_everything(handlers, employee_id)
+
+    assert archive(handlers, employee_id)['archivedAs'] == 'Onboarded'
+
+
+def test_one_unticked_box_is_the_difference_between_the_two_states(handlers):
+    employee_id = create(handlers)['id']
+    tick_everything(handlers, employee_id)
+    patch(handlers, employee_id, 'policy-ack', False)
+
+    assert archive(handlers, employee_id)['archivedAs'] == 'Onboarding Cancelled'
+
+
+def test_archiving_preserves_the_progress_it_was_stamped_at(handlers):
+    employee_id = create(handlers)['id']
+    patch(handlers, employee_id, 'offer-letter', True)
+    patch(handlers, employee_id, 'laptop', True)
+
+    archived = archive(handlers, employee_id)
+    assert archived['progress'] == {'done': 2, 'total': 8, 'percent': 25}
+    assert archived['status'] == 'In Progress', 'derived status still describes the checklist'
+
+
+def test_an_active_employee_is_not_archived(handlers):
+    employee = create(handlers)
+    assert employee['archived'] is False
+    assert employee['archivedAs'] == ''
+    assert employee['archivedAt'] == ''
 
 
 def test_delete_of_an_unknown_id_is_404(handlers):
     assert delete(handlers, 'does-not-exist')['statusCode'] == 404
 
 
-def test_deleting_one_employee_leaves_the_others_alone(handlers):
+def test_archiving_one_employee_leaves_the_others_alone(handlers):
     keep = create(handlers, email='keep@breville.com')['id']
     remove = create(handlers, email='remove@breville.com')['id']
 
-    delete(handlers, remove)
+    archive(handlers, remove)
 
     assert get(handlers, keep)['statusCode'] == 200
     assert len(body(get(handlers, keep))['checklist']) == 8
+    assert body(get(handlers, keep))['archived'] is False
+
+
+# ------------------------------------------------- archived: gone from the list
+
+def test_an_archived_employee_drops_off_the_list(handlers):
+    keep = create(handlers, email='keep@breville.com')['id']
+    gone = create(handlers, email='gone@breville.com')['id']
+
+    archive(handlers, gone)
+
+    assert listed_ids(handlers) == [keep]
+
+
+def test_the_list_count_matches_the_employees_it_returns(handlers):
+    # The count is what the UI puts on screen; an archived employee inflating it
+    # would show "2 employees" above a table with one row in it.
+    create(handlers, email='keep@breville.com')
+    archive(handlers, create(handlers, email='gone@breville.com')['id'])
+
+    result = body(handlers['list_employees']({}, None))
+    assert result['count'] == len(result['employees']) == 1
+
+
+def test_an_archived_employee_is_still_readable_by_id(handlers):
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    fetched = body(get(handlers, employee_id))
+    assert fetched['archived'] is True
+    assert fetched['archivedAs'] == 'Onboarding Cancelled'
+    assert len(fetched['checklist']) == 8
+
+
+# ------------------------------------------------------------ archived: frozen
+
+def test_an_archived_employee_cannot_be_edited(handlers):
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    response = put(handlers, employee_id, dict(VALID, jobTitle='Sneaky Promotion'))
+    assert response['statusCode'] == 409
+    assert body(response)['error']['code'] == 'Conflict'
+    assert body(get(handlers, employee_id))['jobTitle'] == VALID['jobTitle']
+
+
+def test_an_archived_employee_cannot_be_edited_onto_a_new_email(handlers):
+    # The transactional path through update_employee - a different write from
+    # the one above, so it needs its own guard and its own test.
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    assert put(handlers, employee_id,
+               dict(VALID, email='new@breville.com'))['statusCode'] == 409
+    assert post(handlers, dict(VALID, email='new@breville.com'))['statusCode'] == 201
+
+
+def test_an_archived_checklist_cannot_be_ticked(handlers):
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    response = patch(handlers, employee_id, 'offer-letter', True)
+    assert response['statusCode'] == 409
+    assert item_of(body(get(handlers, employee_id)), 'offer-letter')['done'] is False
+
+
+def test_an_archived_checklist_cannot_be_commented_on(handlers):
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    assert patch_raw(handlers, employee_id, 'laptop',
+                     {'comment': 'After the fact.'})['statusCode'] == 409
+
+
+def test_a_cancelled_record_cannot_be_ticked_up_to_complete(handlers):
+    # The reason the freeze exists at all: without it this record would end up
+    # stamped Onboarding Cancelled while showing 8 of 8 done, and nothing in the
+    # table would say which of the two was the lie.
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    for item in body(get(handlers, employee_id))['checklist']:
+        assert patch(handlers, employee_id, item['id'], True)['statusCode'] == 409
+
+    still = body(get(handlers, employee_id))
+    assert still['archivedAs'] == 'Onboarding Cancelled'
+    assert still['progress']['done'] == 0
+
+
+def test_archiving_twice_is_idempotent_and_keeps_the_first_stamp(handlers):
+    employee_id = create(handlers)['id']
+    first = archive(handlers, employee_id)
+    second = archive(handlers, employee_id)
+
+    assert second['archivedAt'] == first['archivedAt']
+    assert second['archivedAs'] == first['archivedAs']
+
+
+def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
+    # Belt and braces on the above. Even with the checklist moved underneath it,
+    # the stamp is a record of a decision someone made and is not recomputed.
+    from common.db import table
+    from common.keys import chk_sk, pk
+
+    employee_id = create(handlers)['id']
+    archive(handlers, employee_id)
+
+    for item in body(get(handlers, employee_id))['checklist']:
+        table.update_item(
+            Key={'PK': pk(employee_id), 'SK': chk_sk(item['id'])},
+            UpdateExpression='SET #done = :done',
+            ExpressionAttributeNames={'#done': 'done'},
+            ExpressionAttributeValues={':done': True},
+        )
+
+    assert archive(handlers, employee_id)['archivedAs'] == 'Onboarding Cancelled'
 
 
 # ------------------------------------------------------- the acceptance run
@@ -463,9 +643,14 @@ def test_the_full_lifecycle_from_docs_api_md(handlers):
     assert patch(handlers, employee_id, 'offer-letter', True)['statusCode'] == 200
     assert patch(handlers, employee_id, 'not-a-thing', True)['statusCode'] == 404
     assert post(handlers, {'email': 'nope'})['statusCode'] == 400
-    assert delete(handlers, employee_id)['statusCode'] == 204
-    assert get(handlers, employee_id)['statusCode'] == 404
-    assert put(handlers, employee_id, VALID)['statusCode'] == 404
+
+    # Where the run diverges from Phase 2: DELETE archives. The employee leaves
+    # the list, stays readable by id, and stops accepting writes.
+    assert delete(handlers, employee_id)['statusCode'] == 200
+    assert listed_ids(handlers) == []
+    assert get(handlers, employee_id)['statusCode'] == 200
+    assert put(handlers, employee_id, VALID)['statusCode'] == 409
+    assert patch(handlers, employee_id, 'id-proof', True)['statusCode'] == 409
 
 
 def test_every_response_carries_cors_headers(handlers):

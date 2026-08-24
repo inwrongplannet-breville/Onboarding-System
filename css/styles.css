@@ -442,3 +442,26 @@ td.actions > * + * { margin-left: 6px; }
 }
 
 input[type="checkbox"]:disabled + .item-label { opacity: 0.55; }
+
+/* Archived banner. Amber rather than the red accent - an archived record is a
+   normal end state, not an error, and painting it in the delete colour reads
+   as "something went wrong here". */
+.archived-notice {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #e6c88a;
+  border-left: 4px solid #b8860b;
+  border-radius: var(--radius);
+  background: #fdf8ec;
+  color: #5c4708;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+/* Frozen checklist. Still legible - the whole point of keeping the record is
+   that someone can read it - but visibly not something you can act on. */
+.checklist input[type="checkbox"]:disabled,
+.comment-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

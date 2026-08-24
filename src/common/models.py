@@ -42,6 +42,23 @@ DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 # limit and to stop a paste of an entire email thread from becoming the record.
 COMMENT_MAX_LENGTH = 500
 
+# Archiving replaced hard deletion. DELETE /employees/{id} stamps one of these on
+# the profile row instead of removing it, and which one depends on whether
+# onboarding had finished: someone who completed the checklist and then left is a
+# different piece of history from someone whose onboarding was abandoned halfway.
+#
+# Stored, unlike `status` - and the exception proves the rule. `status` is derived
+# because it is a fact about the checklist as it stands right now. This records a
+# decision a person made at a point in time, and there is nothing in the table to
+# recompute it from. Deriving it would mean a cancelled record silently promoting
+# itself to a completed one the moment someone ticked a leftover box.
+ARCHIVED_CANCELLED = 'Onboarding Cancelled'
+ARCHIVED_ONBOARDED = 'Onboarded'
+
+# One message, because a caller hitting this on PUT and on PATCH is hitting the
+# same wall and should not have to notice it was worded twice.
+ARCHIVED_MESSAGE = 'This employee is archived. Their record is read-only.'
+
 
 def pick_editable(body):
     """Whitelist and trim. Anything not on the list is dropped, not rejected."""
@@ -133,6 +150,21 @@ def progress(checklist):
     }
 
 
+def archive_state(checklist):
+    """
+    Which terminal state an employee archives into, decided by their checklist.
+
+    Deliberately expressed in terms of derive_status rather than re-counting the
+    ticks, so "complete" means exactly one thing across the whole system.
+    """
+    return ARCHIVED_ONBOARDED if derive_status(checklist) == 'Onboarded' else ARCHIVED_CANCELLED
+
+
+def is_archived(profile):
+    """True for an archived profile row. The attribute is absent on active ones."""
+    return bool(profile.get('archivedAs'))
+
+
 def new_checklist_items():
     """A fresh, all-unchecked checklist for a new hire."""
     return [
@@ -191,6 +223,13 @@ def to_api_employee(items):
     # badge and the progress bar straight from them.
     employee['status'] = derive_status(checklist)
     employee['progress'] = progress(checklist)
+    # Read off the profile, not derived - see the constants at the top. `archived`
+    # is the flag callers branch on; `archivedAs` says which of the two terminal
+    # states it was and is '' for an active employee, for the same reason a
+    # checklist comment is: absent and empty mean the same thing to a reader.
+    employee['archived'] = is_archived(profile)
+    employee['archivedAs'] = profile.get('archivedAs') or ''
+    employee['archivedAt'] = profile.get('archivedAt') or ''
     return employee
 
 

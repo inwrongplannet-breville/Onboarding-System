@@ -290,15 +290,20 @@ window.App = window.App || {};
         var employee = loadedEmployees.filter(function (item) { return item.id === id; })[0];
         if (!employee) return;
 
-        if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the system?')) return;
+        // Says what actually happens now. "Delete" would be a lie: the record
+        // and its checklist survive, they just stop being listed here.
+        if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the employee list?' +
+            '\n\nTheir record and onboarding history are kept, and can no longer be edited.')) return;
 
         clearError();
         button.disabled = true;
 
-        store.deleteEmployee(id).then(function () {
+        store.archiveEmployee(id).then(function (archived) {
           // Said out loud, because the row simply vanishing is not an event a
-          // screen reader reports.
-          announce(ui.fullName(employee) + ' was removed.');
+          // screen reader reports. The state comes off the response rather than
+          // being recomputed here - the server owns that rule.
+          announce(ui.fullName(employee) + ' was removed from the list and marked ' +
+            archived.archivedAs + '.');
           renderList();
         }, function (error) {
           // The list is still on screen and still correct apart from this row,
@@ -402,6 +407,16 @@ window.App = window.App || {};
         return;
       }
 
+      // An archived record is read-only server side, so rendering an editable
+      // form over it would only produce a 409 on save. Reachable by URL or a
+      // stale bookmark, since archiving is what took it off the list.
+      if (employee && employee.archived) {
+        setTitle(ui.fullName(employee) + ' \u2014 archived');
+        paint(ui.archivedView(employee));
+        focusHeading();
+        return;
+      }
+
       setTitle(employee ? 'Edit ' + ui.fullName(employee) : 'Add Employee');
       paint(ui.formView(employee, formFacets(employee)));
       focusHeading();
@@ -446,13 +461,15 @@ window.App = window.App || {};
       var deleteButton = form.querySelector('[data-action="delete"]');
       if (deleteButton) {
         deleteButton.addEventListener('click', function () {
-          if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the system?')) return;
+          if (!window.confirm('Remove ' + ui.fullName(employee) + ' from the employee list?' +
+              '\n\nTheir record and onboarding history are kept, and can no longer be edited.')) return;
 
           clearError();
           deleteButton.disabled = true;
 
-          store.deleteEmployee(employee.id).then(function () {
-            announce(ui.fullName(employee) + ' was removed.');
+          store.archiveEmployee(employee.id).then(function (archived) {
+            announce(ui.fullName(employee) + ' was removed from the list and marked ' +
+              archived.archivedAs + '.');
             navigate('#/employees');
           }, function (error) {
             // The form is still filled in and still valid; keep it usable.

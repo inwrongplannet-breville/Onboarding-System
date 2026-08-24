@@ -51,7 +51,10 @@ Each step feeds the next, so run them in order.
 | 6f | Click the icon, then click the same icon again | the box closes. The tooltip reads "Close the comment box on …" while it is open, and focus lands back on the icon |
 | 6g | Open a box, type something, then click that icon again | it asks before discarding. Cancel and Esc don't ask — they say "discard" in as many words; the icon doesn't |
 | 7 | Hard-refresh (Ctrl+Shift+R) on the checklist URL | state persisted, comments included. This is the proof the writes reached DynamoDB |
-| 8 | Delete it, from the row button and from the form button | `DELETE` 204, empty response body |
+| 8 | Delete it, from the row button and from the form button | `DELETE` 200; the row leaves the list, and the record is still in the table stamped `archivedAs` |
+| 8a | Open the archived employee's URL directly (`#/employees/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
+| 8b | Open the archived employee's edit URL (`#/employees/<id>/edit`) | the read-only archived page, not the form |
+| 8c | Re-add someone on the archived employee's work email | `409` — the address is still reserved |
 | 9 | Hand-type `#/employees/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
 | 10 | Deep-link `#/employees/<uuid>/checklist` in a fresh tab | loads directly; proves the router handles UUIDs |
 
@@ -70,7 +73,7 @@ The part Phase 1 had no answer for. Each one is forceable in seconds.
 | Failed comment save | Offline, save a comment | the editor **stays open with your text in it**; banner shown |
 | Over-long comment | console: `App.store.setChecklistComment(id, 'laptop', 'x'.repeat(600))` | `400` with `fields.comment`. In the UI the message lands **under the box**, not in the banner, and the draft is kept |
 | Failed delete | Offline, delete a row | banner; the row is still there and the page still works |
-| Stale delete | delete a row in one tab, then delete the same row in a second tab | 404 → banner |
+| Stale delete | delete a row in one tab, then delete the same row in a second tab | 200 both times — archiving is idempotent and the second call keeps the first stamp |
 | Duplicate email | add a new employee using a seeded person's address | `409` under the email input; nothing is created — the list count is unchanged |
 | Impossible date | console: `App.store.createEmployee({...VALID, startDate:'2026-02-30'})` | rejects with `status: 400` and `fields.startDate` |
 | Empty table | `py scripts/seed_employees.py --wipe`, then open Add Employee | department and employment type render as **text inputs**, not empty dropdowns. Typing `Engineering` / `Full-time` creates the first hire; typing `Marketing` comes back as a `400` under the input |

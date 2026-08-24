@@ -111,7 +111,28 @@ window.App = window.App || {};
       '/></svg>';
   }
 
-  function commentButton(item, isEditing) {
+  /*
+   * The archived banner. Its wording leans on employee.archivedAs rather than
+   * looking at the checklist, for the reason in this file's header: the server
+   * decides what state a record archived into, and a second opinion here is how
+   * the two start disagreeing.
+   */
+  function archivedNotice(employee) {
+    if (!employee.archived) return '';
+
+    var when = employee.archivedAt
+      ? ' on ' + escapeHtml(formatDate(employee.archivedAt.slice(0, 10)))
+      : '';
+
+    return '' +
+      '<div class="archived-notice" role="note">' +
+        '<strong>Archived' + when + '</strong> &middot; ' +
+        escapeHtml(employee.archivedAs) + '. ' +
+        'This record is kept for reference and can no longer be changed.' +
+      '</div>';
+  }
+
+  function commentButton(item, isEditing, frozen) {
     // One control, two jobs, so it has to name the one it is about to do.
     var verb = isEditing
       ? 'Close the comment box on '
@@ -120,6 +141,7 @@ window.App = window.App || {};
     return '<button type="button" class="comment-btn' +
       (item.comment ? ' has-comment' : '') + '"' +
       ' data-action="comment" data-item-id="' + escapeHtml(item.id) + '"' +
+      (frozen ? ' disabled' : '') +
       ' aria-expanded="' + (isEditing ? 'true' : 'false') + '"' +
       // title for the mouse, aria-label for everyone else. Same words, because
       // an icon with no text needs to answer "what is this" both ways.
@@ -335,6 +357,9 @@ window.App = window.App || {};
       */
     checklistView: function (employee, editing) {
       var p = employee.progress;
+      // Archived records are frozen server side. Presenting live checkboxes over
+      // one would offer the user an action that can only ever fail with a 409.
+      var frozen = !!employee.archived;
 
       var items = employee.checklist.map(function (item) {
         var isEditing = !!editing && editing.itemId === item.id;
@@ -353,11 +378,11 @@ window.App = window.App || {};
             '<div class="item-row">' +
               '<label>' +
                 '<input type="checkbox" data-item-id="' + escapeHtml(item.id) + '"' +
-                  (item.done ? ' checked' : '') + '>' +
+                  (item.done ? ' checked' : '') + (frozen ? ' disabled' : '') + '>' +
                 '<span class="item-label">' + escapeHtml(item.label) + '</span>' +
                 '<span class="owner">' + escapeHtml(item.owner) + '</span>' +
               '</label>' +
-              commentButton(item, isEditing) +
+              commentButton(item, isEditing, frozen) +
             '</div>' +
             trailing +
           '</li>';
@@ -371,8 +396,13 @@ window.App = window.App || {};
             '<p class="subtitle">' + escapeHtml(employee.jobTitle) + ' &middot; ' +
               escapeHtml(employee.department) + '</p>' +
           '</div>' +
-          '<a class="btn" href="#/employees/' + encodeURIComponent(employee.id) + '/edit">Edit details</a>' +
+          (frozen
+            ? ''
+            : '<a class="btn" href="#/employees/' + encodeURIComponent(employee.id) +
+              '/edit">Edit details</a>') +
         '</div>' +
+
+        archivedNotice(employee) +
 
         '<div class="summary-card">' +
           statusBadge(employee) +
@@ -397,6 +427,22 @@ window.App = window.App || {};
         '<h2>Documents</h2>' +
         '<div class="stub">Offer letter, ID proof and signed policy uploads land here ' +
           'once document storage (S3) is built in a later phase.</div>';
+    },
+
+    /*
+     * Stands in for the edit form on an archived employee. Not notFoundView:
+     * the record is right there and readable, it just cannot be edited, and
+     * "does not exist" would send someone looking for a record that does.
+     */
+    archivedView: function (employee) {
+      return '' +
+        '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
+        '<h1 tabindex="-1">' + escapeHtml(fullName(employee)) + '</h1>' +
+        '<p class="subtitle">' + escapeHtml(employee.jobTitle) + ' &middot; ' +
+          escapeHtml(employee.department) + '</p>' +
+        archivedNotice(employee) +
+        '<p><a class="btn" href="#/employees/' + encodeURIComponent(employee.id) +
+          '/checklist">View onboarding record</a></p>';
     },
 
     notFoundView: function () {

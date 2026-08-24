@@ -143,8 +143,19 @@ window.App = window.App || {};
       return request('PUT', employeePath(id), pickEditable(input));
     },
 
-    deleteEmployee: function (id) {
-      // Resolves null - 204 has no body, and no caller uses the value.
+    /*
+     * Takes someone off the employee list. Still a DELETE, and deliberately so -
+     * from here that is exactly what it is - but the server archives rather than
+     * erases: the record and its checklist stay in DynamoDB stamped with a
+     * terminal state, and stop accepting writes. src/handlers/delete_employee.py
+     * has the reasoning.
+     *
+     * Resolves the archived employee. That is the whole reason it is a 200 and
+     * not the old 204: the caller needs to tell the user which state it landed
+     * in, and asking the caller to work that out from the checklist would put a
+     * second copy of the rule in the frontend.
+     */
+    archiveEmployee: function (id) {
       return request('DELETE', employeePath(id));
     },
 

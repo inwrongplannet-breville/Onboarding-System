@@ -15,6 +15,14 @@ PATCH rather than PUT because the body is a partial mutation of a sub-resource:
 present are the ones that change - which is what PATCH means, and why the comment
 needed no endpoint of its own. Sending neither is a 400 rather than a silent
 no-op, because a request that asks for nothing is a bug at the caller.
+
+An archived employee is frozen: this returns 409 and writes nothing. That is
+enforced with a transaction rather than a read-then-write, and the difference is
+not academic. The archive stamp records how far onboarding got at the moment
+someone cancelled it; a tick sneaking in afterwards would leave a record marked
+Onboarding Cancelled sitting at 8 of 8, and nothing in the table to say which of
+the two was the lie. A ConditionCheck on the profile makes that unrepresentable
+instead of unlikely.
 """
 from datetime import datetime, timezone
 
@@ -22,11 +30,18 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.checklist_template import VALID_ITEM_IDS
-from common.db import table
-from common.handler import BadRequest, api_handler, is_condition_failure, parse_body, path_param
-from common.keys import chk_sk, pk
-from common.models import COMMENT_MAX_LENGTH, clean_comment
-from common.repository import load_employee
+from common.db import TABLE_NAME, client, serialize
+from common.handler import (
+    BadRequest,
+    api_handler,
+    failed_at,
+    is_transaction_cancelled,
+    parse_body,
+    path_param,
+)
+from common.keys import PROFILE_SK, chk_sk, pk
+from common.models import ARCHIVED_MESSAGE, COMMENT_MAX_LENGTH, clean_comment
+from common.repository import load_employee, load_profile
 
 
 def _changes(body):
@@ -79,6 +94,17 @@ def _changes(body):
     return assignments, removals, names, values
 
 
+def _profile_failure(employee_id):
+    """
+    Why the ConditionCheck fired: no such employee, or an archived one.
+
+    Only reached on a failed write, so the extra read is off the hot path.
+    """
+    if load_profile(employee_id) is None:
+        return responses.not_found('No employee with id ' + employee_id + '.')
+    return responses.conflict(ARCHIVED_MESSAGE)
+
+
 @api_handler
 def lambda_handler(event, context):
     employee_id = path_param(event, 'id')
@@ -99,16 +125,39 @@ def lambda_handler(event, context):
     if removals:
         expression += ' REMOVE ' + ', '.join(removals)
 
+    transact_items = [
+        {
+            # Reads nothing and writes nothing - it exists purely so the tick
+            # below cannot land on an archived employee. Same partition as the
+            # Update, so this costs no extra round trip.
+            'ConditionCheck': {
+                'TableName': TABLE_NAME,
+                'Key': serialize({'PK': pk(employee_id), 'SK': PROFILE_SK}),
+                'ConditionExpression': ('attribute_exists(SK) '
+                                        'AND attribute_not_exists(#archivedAs)'),
+                'ExpressionAttributeNames': {'#archivedAs': 'archivedAs'},
+            }
+        },
+        {
+            'Update': {
+                'TableName': TABLE_NAME,
+                'Key': serialize({'PK': pk(employee_id), 'SK': chk_sk(item_id)}),
+                'UpdateExpression': expression,
+                'ExpressionAttributeNames': names,
+                'ExpressionAttributeValues': serialize(values),
+                'ConditionExpression': 'attribute_exists(PK) AND attribute_exists(SK)',
+            }
+        },
+    ]
+
     try:
-        table.update_item(
-            Key={'PK': pk(employee_id), 'SK': chk_sk(item_id)},
-            UpdateExpression=expression,
-            ExpressionAttributeNames=names,
-            ExpressionAttributeValues=values,
-            ConditionExpression='attribute_exists(PK) AND attribute_exists(SK)',
-        )
+        client.transact_write_items(TransactItems=transact_items)
     except ClientError as error:
-        if is_condition_failure(error):
+        if not is_transaction_cancelled(error):
+            raise
+        if failed_at(error, 0):
+            return _profile_failure(employee_id)
+        if failed_at(error, 1):
             return responses.not_found(
                 'No checklist item ' + item_id + ' for employee ' + employee_id + '.'
             )

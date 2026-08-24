@@ -1,79 +1,98 @@
 """
-DELETE /employees/{id} - brief task 6.
+DELETE /employees/{id} - archive, not erase.
 
-Deleting an employee means deleting the whole partition, not one item. Query for
-the keys first, then remove them all in one TransactWriteItems so a half-deleted
-employee is not a reachable state.
+This used to delete the whole partition in one transaction. It no longer deletes
+anything. HR needs the history: who was hired, how far their onboarding got, and
+what the notes on it said. A row that is gone answers none of those, and "we
+deleted it" is the wrong answer to an audit.
 
-If the child count were unbounded you could not do this - you would page the
-Query and chunk BatchWriteItem 25 at a time with an UnprocessedItems retry loop,
-giving up atomicity. A fixed 8-item checklist means atomicity is free, so take it.
+So the profile is stamped with a terminal state and the employee drops out of
+GET /employees. Which state depends on where the checklist had got to:
 
-The employee's email uniqueness guard lives outside the partition, so the Query
-cannot see it - it has to be read off the profile and deleted by name. Miss it
-and that address is permanently unusable by anyone, with only an orphan row in a
-partition nobody lists to say why.
+    checklist complete     ->  Onboarded
+    checklist incomplete   ->  Onboarding Cancelled
+
+Two consequences, both deliberate:
+
+  The email guard stays put. The address remains reserved to the archived
+  employee, so re-hiring under the same work email is a 409 rather than a second
+  record quietly sharing one mailbox. Nothing in the UI releases it - freeing an
+  address is now a deliberate act against the table.
+
+  The record freezes. PUT and PATCH both refuse an archived employee, which is
+  what keeps the stamp honest: a cancelled onboarding cannot be ticked up to 100%
+  afterwards and left sitting there still claiming it was cancelled.
+
+Still a DELETE and still the same route. From the caller's side "take this person
+off the list" is exactly what happens; what changed is that it is now reversible
+by someone with table access rather than by nobody.
 """
-from boto3.dynamodb.conditions import Key
+from datetime import datetime, timezone
+
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import TABLE_NAME, client, serialize, table
-from common.handler import api_handler, is_transaction_cancelled, path_param
-from common.keys import EMAIL_SK, PROFILE_SK, email_pk, is_profile, pk
+from common.db import table
+from common.handler import api_handler, is_condition_failure, path_param
+from common.keys import PROFILE_SK, pk
+from common.models import archive_state
+from common.repository import load_employee
 
 
 @api_handler
 def lambda_handler(event, context):
     employee_id = path_param(event, 'id')
-    partition = pk(employee_id)
 
-    result = table.query(
-        KeyConditionExpression=Key('PK').eq(partition),
-        # Keys plus the one attribute that is not in the keys and still has to be
-        # deleted. Only the profile row carries it; the checklist rows return the
-        # keys alone.
-        ProjectionExpression='PK, SK, #email',
-        ExpressionAttributeNames={'#email': 'email'},
-        ConsistentRead=True,
-    )
-    items = result.get('Items', [])
-
-    # Near-keys-only projection, so check for the profile row directly rather
-    # than trying to rebuild an employee object out of it.
-    profile = next((item for item in items if is_profile(item)), None)
-    if profile is None:
+    # Consistent, because the stamp is computed from this read. An eventually
+    # consistent Query can hand back a checklist one tick behind, and that tick
+    # is the whole difference between archiving as Onboarded and as Onboarding
+    # Cancelled - a distinction nobody would ever think to go back and check.
+    employee = load_employee(employee_id, consistent=True)
+    if employee is None:
         return responses.not_found('No employee with id ' + employee_id + '.')
 
-    transact_items = []
-    for item in items:
-        delete = {
-            'TableName': TABLE_NAME,
-            'Key': serialize({'PK': item['PK'], 'SK': item['SK']}),
-        }
-        # Only the profile row carries a condition - if it vanished between the
-        # Query and this write, the whole transaction aborts and the caller gets
-        # a 404 instead of a 204 that deleted nothing.
-        if item['SK'] == PROFILE_SK:
-            delete['ConditionExpression'] = 'attribute_exists(SK)'
-        transact_items.append({'Delete': delete})
+    if not employee['archived']:
+        _stamp(employee_id, archive_state(employee['checklist']))
 
-    # Unconditional: employees created before uniqueness guards existed have no
-    # guard, and the delete of a missing item is a harmless no-op.
-    if profile.get('email'):
-        transact_items.append({'Delete': {
-            'TableName': TABLE_NAME,
-            'Key': serialize({'PK': email_pk(profile['email']), 'SK': EMAIL_SK}),
-        }})
+    # Re-read rather than patching the three fields onto the object above: it is
+    # the same round trip PUT and PATCH make, and it means this response cannot
+    # drift from what GET would say a moment later. Also covers the archived
+    # case, where the right answer is the stamp the *first* DELETE wrote.
+    archived = load_employee(employee_id, consistent=True)
+    if archived is None:
+        return responses.not_found('No employee with id ' + employee_id + '.')
+    return responses.ok(archived)
+
+
+def _stamp(employee_id, state):
+    now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
     try:
-        client.transact_write_items(TransactItems=transact_items)
+        table.update_item(
+            Key={'PK': pk(employee_id), 'SK': PROFILE_SK},
+            UpdateExpression=('SET #archivedAs = :archivedAs, #archivedAt = :archivedAt, '
+                              '#updatedAt = :updatedAt'),
+            ExpressionAttributeNames={
+                '#archivedAs': 'archivedAs',
+                '#archivedAt': 'archivedAt',
+                '#updatedAt': 'updatedAt',
+            },
+            ExpressionAttributeValues={
+                ':archivedAs': state,
+                ':archivedAt': now,
+                ':updatedAt': now,
+            },
+            # attribute_exists(SK) for the same reason PUT carries it - UpdateItem
+            # upserts, and an archive of a missing id would otherwise conjure a
+            # profile with no checklist behind it.
+            #
+            # attribute_not_exists(archivedAs) makes a second stamp impossible, so
+            # two DELETEs racing cannot produce a record whose archivedAt says one
+            # thing and whose history says another. The loser fails here and the
+            # caller still gets a 200, because from its side the employee is
+            # archived either way.
+            ConditionExpression='attribute_exists(SK) AND attribute_not_exists(#archivedAs)',
+        )
     except ClientError as error:
-        # The only condition in this transaction is the profile guard, so a
-        # cancellation here means it went between the Query and the write.
-        if is_transaction_cancelled(error):
-            return responses.not_found('No employee with id ' + employee_id + '.')
-        raise
-
-    return responses.no_content()
-
+        if not is_condition_failure(error):
+            raise

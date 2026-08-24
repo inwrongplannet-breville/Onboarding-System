@@ -549,15 +549,24 @@
       }
     },
     {
-      "name": "Delete employee",
+      "name": "Delete employee - archives, does not erase",
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-              "pm.test('empty body', () => pm.expect(pm.response.text()).to.be.empty);"
+              "pm.test('200 with the archived record', () => pm.response.to.have.status(200));",
+              "const employee = pm.response.json();",
+              "pm.test('flagged archived', () => pm.expect(employee.archived).to.be.true);",
+              "pm.test('stamped with a terminal state', () =>",
+              "  pm.expect(employee.archivedAs).to.be.oneOf(['Onboarded', 'Onboarding Cancelled']));",
+              "pm.test('stamped with a time', () => pm.expect(employee.archivedAt).to.not.be.empty);",
+              "// One box was ticked earlier in this run, so onboarding never finished.",
+              "pm.test('incomplete onboarding cancels', () =>",
+              "  pm.expect(employee.archivedAs).to.eql('Onboarding Cancelled'));",
+              "pm.test('the checklist is still there', () =>",
+              "  pm.expect(employee.checklist).to.have.lengthOf(8));"
             ]
           }
         }
@@ -577,14 +586,16 @@
       }
     },
     {
-      "name": "Get after delete - 404",
+      "name": "Get after archive - still readable by id",
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+              "pm.test('200 - archiving hides it from the list, not from GET', () =>",
+              "  pm.response.to.have.status(200));",
+              "pm.test('still archived', () => pm.expect(pm.response.json().archived).to.be.true);"
             ]
           }
         }
@@ -604,16 +615,60 @@
       }
     },
     {
-      "name": "Update after delete - 404 (proves the condition expression)",
+      "name": "Tick after archive - 409 (the ConditionCheck in the transaction)",
       "event": [
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404, not a resurrected ghost record', () => pm.response.to.have.status(404));",
-              "// Without ConditionExpression: attribute_exists(PK), UpdateItem would upsert",
-              "// here and create a profile with no checklist rows behind it."
+              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "// This is the one that matters. Without it a cancelled record could be",
+              "// ticked to 8 of 8 and left stamped 'Onboarding Cancelled', with nothing",
+              "// in the table to say which of the two claims was the lie."
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{employeeId}}/checklist/id-proof",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{employeeId}}",
+            "checklist",
+            "id-proof"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"done\": true\n}"
+        }
+      }
+    },
+    {
+      "name": "Update after archive - 409 (proves the record is frozen)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "pm.test('says why', () =>",
+              "  pm.expect(pm.response.json().error.message).to.include('archived'));",
+              "// Two guards behind this: a check before the write for the message, and",
+              "// attribute_not_exists(archivedAs) on the write itself for the race."
             ]
           }
         }

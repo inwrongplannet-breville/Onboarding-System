@@ -82,9 +82,15 @@ value in `js/config.js` — update that one line if you deploy your own.
 
 ## Project status
 
-Phases 1–3 of the brief are complete, including the review with Santosh: UI shell, CRUD backend on
-AWS, and the two connected. Phase 4 (S3 document upload, SNS/SQS onboarding triggers) is not
-started.
+Phases 1–4 of the brief are complete, including the review with Santosh: UI shell, CRUD backend on
+AWS, the two connected, and the onboarding checklist tracked per employee end to end.
+
+`DELETE /employees/{id}` archives rather than erases — the employee leaves the list, the record and
+its checklist stay in DynamoDB stamped `Onboarded` or `Onboarding Cancelled`, and stop accepting
+writes. That reverses decision 3 from the review; the reasoning is in
+[design.md](docs/design.md#number-3-reversed-archiving-instead-of-deleting).
+
+Phase 5 (S3 document upload, SNS/SQS onboarding triggers) is not started.
 
 The five data-model decisions that came out of the review are recorded in
 [design.md](docs/design.md#data-model-decisions-from-the-review).

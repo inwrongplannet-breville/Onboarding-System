@@ -9,8 +9,12 @@ import pytest
 from common.checklist_template import CHECKLIST_TEMPLATE, VALID_ITEM_IDS
 from common.keys import chk_sk, email_pk, employee_id_from_pk, is_profile, pk
 from common.models import (
+    ARCHIVED_CANCELLED,
+    ARCHIVED_ONBOARDED,
+    archive_state,
     clean_comment,
     derive_status,
+    is_archived,
     group_by_partition,
     new_checklist_items,
     pick_editable,
@@ -181,6 +185,48 @@ def test_a_stored_comment_is_passed_through():
     assert to_api_checklist_item(item)['comment'] == 'Dell, collected Friday.'
 
 
+# --------------------------------------------------------------- archive state
+
+def _checklist(done_count):
+    return [{'done': i < done_count} for i in range(8)]
+
+
+def test_an_untouched_checklist_archives_as_cancelled():
+    assert archive_state(_checklist(0)) == ARCHIVED_CANCELLED
+
+
+@pytest.mark.parametrize('done', [1, 4, 7])
+def test_a_partly_done_checklist_archives_as_cancelled(done):
+    assert archive_state(_checklist(done)) == ARCHIVED_CANCELLED
+
+
+def test_a_finished_checklist_archives_as_onboarded():
+    assert archive_state(_checklist(8)) == ARCHIVED_ONBOARDED
+
+
+def test_archive_state_agrees_with_derive_status_at_every_step():
+    # The two must never disagree about what "complete" means - archive_state is
+    # written in terms of derive_status precisely so they cannot.
+    for done in range(9):
+        checklist = _checklist(done)
+        onboarded = derive_status(checklist) == 'Onboarded'
+        assert (archive_state(checklist) == ARCHIVED_ONBOARDED) is onboarded
+
+
+def test_an_empty_checklist_archives_as_cancelled_not_onboarded():
+    # Mirrors derive_status: nothing to do is not the same as everything done.
+    assert archive_state([]) == ARCHIVED_CANCELLED
+
+
+def test_a_profile_with_no_stamp_is_active():
+    assert is_archived({'firstName': 'Priya'}) is False
+    assert is_archived({'archivedAs': ''}) is False
+
+
+def test_a_stamped_profile_is_archived():
+    assert is_archived({'archivedAs': ARCHIVED_CANCELLED}) is True
+
+
 # ------------------------------------------------------------ item -> API shape
 
 def _items(done_ids=(), employee_id='abc-123'):
@@ -202,6 +248,35 @@ def test_rebuilds_exactly_the_shape_the_phase_1_frontend_expects():
     assert employee['firstName'] == 'Priya'
     assert set(employee['checklist'][0]) == {'id', 'label', 'owner', 'done', 'comment'}
     assert employee['checklist'][0]['id'] == 'offer-letter'
+    assert employee['status'] == 'In Progress'
+    assert employee['progress']['done'] == 2
+
+
+def test_an_unstamped_profile_reports_itself_active_on_the_wire():
+    employee = to_api_employee(_items())
+    assert employee['archived'] is False
+    assert employee['archivedAs'] == ''
+    assert employee['archivedAt'] == ''
+
+
+def test_a_stamped_profile_carries_its_archive_state_onto_the_wire():
+    items = _items(done_ids={'offer-letter'})
+    items[0]['archivedAs'] = ARCHIVED_CANCELLED
+    items[0]['archivedAt'] = '2026-08-24T02:15:00Z'
+
+    employee = to_api_employee(items)
+    assert employee['archived'] is True
+    assert employee['archivedAs'] == ARCHIVED_CANCELLED
+    assert employee['archivedAt'] == '2026-08-24T02:15:00Z'
+
+
+def test_archiving_does_not_disturb_the_derived_status():
+    # `status` keeps describing the checklist; `archivedAs` describes the
+    # decision. An archived record showing "In Progress" is correct, not a bug.
+    items = _items(done_ids={'offer-letter', 'id-proof'})
+    items[0]['archivedAs'] = ARCHIVED_CANCELLED
+
+    employee = to_api_employee(items)
     assert employee['status'] == 'In Progress'
     assert employee['progress']['done'] == 2
 

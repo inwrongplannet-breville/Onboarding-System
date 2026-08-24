@@ -27,19 +27,27 @@ def load_employee(employee_id, consistent=False):
     return to_api_employee(result.get('Items', []))
 
 
-def current_email(employee_id):
+def load_profile(employee_id):
     """
-    The email on the profile right now, or None if the employee does not exist.
+    The two profile facts a write has to check first, or None if there is no
+    such employee: the email it might have to move a guard for, and whether the
+    record has been archived and is therefore frozen.
 
-    Read consistently: it decides whether the update has to move the uniqueness
+    One GetItem rather than two, and a projection rather than the whole row -
+    neither caller wants the profile itself, they want permission to proceed.
+
+    Read consistently. The email decides whether the update moves the uniqueness
     guard, and acting on a stale address there could strand a guard on an email
-    nobody holds any more.
+    nobody holds any more. The archive flag decides whether the write happens at
+    all, and a stale read of that one lets an edit land on a frozen record.
     """
     result = table.get_item(
         Key={'PK': pk(employee_id), 'SK': PROFILE_SK},
-        ProjectionExpression='#email',
-        ExpressionAttributeNames={'#email': 'email'},
+        ProjectionExpression='#email, #archivedAs',
+        ExpressionAttributeNames={'#email': 'email', '#archivedAs': 'archivedAs'},
         ConsistentRead=True,
     )
     item = result.get('Item')
-    return None if item is None else item.get('email', '')
+    if item is None:
+        return None
+    return {'email': item.get('email', ''), 'archivedAs': item.get('archivedAs', '')}

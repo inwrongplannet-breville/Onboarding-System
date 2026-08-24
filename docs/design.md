@@ -154,8 +154,9 @@ PK = EMAIL#<lowercased address>   SK = EMAIL    uniqueness guard, one per employ
 partition key, and the partition key here is a UUID. So "one employee per work email" is enforced
 by a second item, keyed on the address, written in the *same transaction* as the profile with
 `attribute_not_exists(PK)`. Reading first and then writing is a race that two simultaneous POSTs
-will win. The guard travels with its employee: created with them, moved when the address is edited,
-deleted when they are — miss any of those and an address is either duplicated or locked forever.
+will win. The guard travels with its employee: created with them, moved when the address is edited, and — since
+DELETE became an archive — **kept** when they are archived, so the address stays reserved rather than
+falling to the next hire. Miss any of those and an address is either duplicated or locked forever.
 It lives outside the employee's partition, so `list_employees` filters it out by prefix.
 
 One caveat for the records already in the dev table: they predate the guard and have none, so their
@@ -188,9 +189,12 @@ you know the partition key, `Scan` only when you genuinely need every item.**
 
 ### Choices worth defending in review
 
-- **Atomic writes.** Create writes all 9 items with `TransactWriteItems`, delete removes all 9 the
-  same way. `BatchWriteItem` would be cheaper and wrong: it isn't atomic, so a partial failure
-  leaves an employee holding 5 of 8 checklist rows.
+- **Atomic writes.** Create writes all 9 items with `TransactWriteItems`. `BatchWriteItem` would be
+  cheaper and wrong: it isn't atomic, so a partial failure leaves an employee holding 5 of 8
+  checklist rows. Archiving needs none of this — it is one attribute on one row.
+- **Archiving is enforced, not requested.** `PATCH` on a checklist item runs a `ConditionCheck`
+  against the profile in the same transaction as the tick, so "an archived record is frozen" is a
+  property of the table rather than a check someone remembered to write. See below.
 - **Condition expressions everywhere.** `UpdateItem` upserts by default, so without
   `attribute_exists(PK)` a `PUT` to a deleted id would silently resurrect a profile with no
   checklist behind it. Update, patch and delete all guard against it and return `404` instead.
@@ -385,13 +389,14 @@ double-serialised the `TransactWriteItems` payload and made every create fail.
 | tick an unknown item | 404 | 404 |
 | invalid email | 400 | 400 |
 | update | 200 | 200 |
-| delete | 204 | 204 |
-| get after delete | 404 | 404 |
-| update after delete | 404 | 404 |
+| archive | 200 | 200 |
+| get after archive | 200 | 200 |
+| update after archive | 409 | 409 |
 
-Also confirmed: editing an employee left their ticked checklist item intact; a table scan after the
-delete showed **zero** orphan `CHK#` rows; a record created earlier was still readable from a
-separate process minutes later; and every response carries the CORS headers.
+Also confirmed: editing an employee left their ticked checklist item intact; a record created
+earlier was still readable from a separate process minutes later; and every response carries the
+CORS headers. (The delete rows in that table were re-run after DELETE became an archive; the earlier
+Phase 2 run showed `204 / 404 / 404` against the hard delete it replaced.)
 
 One defect was found and fixed: `progress.percent` used Python's `round()`, which is banker's
 rounding, so a 1-of-8 checklist reported 12% while the UI's `Math.round` said 13%.
@@ -418,8 +423,9 @@ degrades to text inputs rather than to empty dropdowns nobody can submit.
 The store was exercised end to end through the real `App.store` — 23 assertions, all passing,
 including the ones easy to get wrong:
 
-- `DELETE` returns 204 with an empty body, which `response.json()` would throw on
-- `getEmployee` resolves `null` on a 404 while `updateEmployee` and `deleteEmployee` reject on one
+- `DELETE` used to return 204 with an empty body, which `response.json()` would throw on — the
+  204 branch in `request()` stays because that shape is still worth handling
+- `getEmployee` resolves `null` on a 404 while `updateEmployee` and `archiveEmployee` reject on one
 - a 400 arrives with a `fields` map whose keys match the form inputs exactly
 - `id` and `checklist` smuggled into a request body are stripped before sending
 - the client's `computeStatus` / `progress` agree with the server's on the same record
@@ -463,9 +469,41 @@ table holds real records — if any of them is revisited later, this is the list
 |---|---|
 | 1. Is the checklist fixed for everyone, or does it vary by department/role? | Fixed — the same 8 items |
 | 2. Should IT-owned items be tickable by HR? | Yes; `owner` is display-only, no permissions |
-| 3. Are employees hard-deleted or deactivated? | Hard-deleted, whole partition at once |
+| 3. Are employees hard-deleted or deactivated? | ~~Hard-deleted, whole partition at once~~ → **reversed after Phase 4**: archived in place, see below |
 | 4. Should the list default to in-progress hires only? | No — returns everyone |
 | 5. Does status need a manual override? | No — still derived from the checklist |
 
 Number 5 is the one to watch. Reversing it turns `status` from a derived value into a stored field
 that can drift out of sync with the checklist — which the current design makes impossible.
+
+### Number 3, reversed: archiving instead of deleting
+
+`DELETE /employees/{id}` no longer removes anything. It stamps `archivedAs` on the profile —
+`Onboarded` if the checklist was complete, `Onboarding Cancelled` if it wasn't — and the employee
+drops out of `GET /employees`. The reasoning, and the three decisions that came with it:
+
+**Why reverse it.** A deleted row answers no questions. HR needs to know who was hired, how far
+their onboarding got, and what the notes on it said; "we deleted it" is the wrong answer to an
+audit. The old hard delete also threw away the comments, which are the most useful part of the
+record when onboarding stalls.
+
+**`archivedAs` is stored, and that is not a contradiction of number 5.** `status` is derived because
+it describes the checklist as it stands right now. `archivedAs` records a decision a person made at
+a point in time, and there is nothing in the table to recompute it from. Derive it and a cancelled
+record silently promotes itself to a completed one the moment someone ticks a leftover box. The two
+coexist on the wire: an archived employee can read `"status": "In Progress"` and
+`"archivedAs": "Onboarding Cancelled"` at once, and both are true.
+
+**The email stays reserved.** Releasing it would let a new hire take an address that an existing
+record still shows as theirs. The cost is that freeing an address is now a deliberate act against
+the table, which is the right way round for something irreversible.
+
+**The record freezes.** `PUT` and `PATCH` return `409`. Without this, a cancelled record could be
+ticked to 8 of 8 and left sitting there stamped `Onboarding Cancelled` — two claims in one record
+with nothing to say which is the lie. The tick path enforces it with a `ConditionCheck` on the
+profile inside the same transaction as the update, so the window between checking and writing does
+not exist.
+
+**What is deliberately missing.** There is no un-archive endpoint and no archived view in the UI.
+Reversing an archive means clearing `archivedAs` on the profile row directly. That is a decision to
+revisit the first time someone actually needs it, rather than three endpoints built on a guess.
