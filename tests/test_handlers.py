@@ -6,11 +6,13 @@ stack deploys - IAM is not emulated - but it does mean the DynamoDB calls,
 condition expressions and response shapes are right before anyone waits on
 `sam deploy`.
 """
+import itertools
 import json
 
 import pytest
 
 VALID = {
+    'employeeId': 'E1001',
     'firstName': 'Priya',
     'lastName': 'Sharma',
     'email': 'priya.sharma@breville.com',
@@ -74,7 +76,22 @@ def listed_ids(handlers):
     return [e['id'] for e in body(handlers['list_employees']({}, None))['employees']]
 
 
+# The employee id is the partition key now, so two creates in one test collide
+# unless they are told apart. Starts well clear of VALID['employeeId'] so a test
+# that mixes create() with a raw post(VALID) gets two employees rather than a 409.
+_ids = itertools.count(9000)
+
+
 def create(handlers, **overrides):
+    """
+    One employee, with a fresh employee id unless the caller names one.
+
+    The default used to be irrelevant - the server minted a UUID and every create
+    was unique for free. It is not free any more, and a test that wants two
+    employees has to say so, which is exactly what this default does on its
+    behalf.
+    """
+    overrides.setdefault('employeeId', 'E{}'.format(next(_ids)))
     response = post(handlers, dict(VALID, **overrides))
     assert response['statusCode'] == 201, response['body']
     return body(response)
@@ -107,9 +124,11 @@ def test_create_rejects_a_department_outside_the_enum(handlers):
     assert response['statusCode'] == 400
 
 
-def test_create_ignores_id_and_checklist_supplied_by_the_caller(handlers):
-    employee = create(handlers, id='hacked', checklist=[])
-    assert employee['id'] != 'hacked'
+def test_create_ignores_a_checklist_supplied_by_the_caller(handlers):
+    # `id` is not the input field - `employeeId` is - so a body naming `id` is
+    # just an unknown key, and pick_editable drops it along with the checklist.
+    employee = create(handlers, employeeId='E3001', id='hacked', checklist=[])
+    assert employee['id'] == 'E3001'
     assert len(employee['checklist']) == 8
 
 
@@ -124,16 +143,134 @@ def test_create_rejects_a_start_date_that_is_not_a_real_day(handlers):
     assert 'startDate' in body(response)['error']['fields']
 
 
+# ------------------------------------------------------------- the employee id
+
+def test_the_supplied_employee_id_becomes_the_records_id(handlers):
+    employee = create(handlers, employeeId='E1024')
+    assert employee['id'] == 'E1024'
+    assert body(get(handlers, 'E1024'))['id'] == 'E1024'
+
+
+def test_the_employee_id_is_the_partition_key(handlers):
+    from common.db import table
+
+    create(handlers, employeeId='E1024')
+    assert table.get_item(Key={'employeeKey': 'EMP#E1024'}).get('Item') is not None
+
+
+def test_create_requires_an_employee_id(handlers):
+    response = post(handlers, {k: v for k, v in VALID.items() if k != 'employeeId'})
+    assert response['statusCode'] == 400
+    assert 'employeeId' in body(response)['error']['fields']
+    assert body(handlers['list_employees']({}, None))['count'] == 0
+
+
+@pytest.mark.parametrize('bad', [
+    'E',                # one character
+    'E' * 21,           # one over the cap
+    'E 1024',           # a space, which would make two ids look identical
+    'E#1024',           # '#' is the key separator and must never appear
+    '-E1024',           # must start alphanumeric
+    'E1024/../admin',   # nothing that could be read as a path
+    '  ',               # whitespace only, which trims to nothing
+])
+def test_create_rejects_a_malformed_employee_id(handlers, bad):
+    response = post(handlers, dict(VALID, employeeId=bad))
+    assert response['statusCode'] == 400
+    assert 'employeeId' in body(response)['error']['fields']
+    assert body(handlers['list_employees']({}, None))['count'] == 0
+
+
+@pytest.mark.parametrize('bad', [1024, None, ['E1024'], {'id': 'E1024'}])
+def test_an_employee_id_that_is_not_text_is_a_400_not_a_500(handlers, bad):
+    assert post(handlers, dict(VALID, employeeId=bad))['statusCode'] == 400
+
+
+def test_an_employee_id_is_upper_cased(handlers):
+    # Otherwise "e1024" and "E1024" are two partition keys, which is one employee
+    # with two records and no error to say so.
+    assert create(handlers, employeeId='e1024')['id'] == 'E1024'
+
+
+def test_an_employee_id_is_trimmed(handlers):
+    assert create(handlers, employeeId='  E1024  ')['id'] == 'E1024'
+
+
+def test_a_duplicate_employee_id_is_a_409(handlers):
+    create(handlers, employeeId='E1024')
+    response = post(handlers, dict(VALID, employeeId='E1024',
+                                   firstName='Someone', lastName='Else'))
+
+    assert response['statusCode'] == 409
+    assert body(response)['error']['code'] == 'Conflict'
+    # Named, so the form paints it under the input rather than in the banner.
+    assert 'employeeId' in body(response)['error']['fields']
+
+
+def test_a_duplicate_employee_id_does_not_overwrite_the_first_employee(handlers):
+    # The whole reason the id belongs in the key. PutItem overwrites by default,
+    # so without the condition this second call would silently replace a real
+    # person and their entire onboarding history.
+    create(handlers, employeeId='E1024')
+    tick_everything(handlers, 'E1024')
+    post(handlers, dict(VALID, employeeId='E1024', firstName='Someone', lastName='Else'))
+
+    survivor = body(get(handlers, 'E1024'))
+    assert survivor['firstName'] == VALID['firstName']
+    assert survivor['status'] == 'Onboarded'
+
+
+def test_a_duplicate_differing_only_in_case_is_still_a_duplicate(handlers):
+    create(handlers, employeeId='E1024')
+    assert post(handlers, dict(VALID, employeeId='e1024'))['statusCode'] == 409
+
+
+def test_an_archived_employee_still_holds_its_id(handlers):
+    # Archiving leaves the item in the table, so the number stays taken. Re-hiring
+    # someone means a new number, which is the honest outcome - reusing it would
+    # attach a second person's history to the first person's id.
+    archive(handlers, create(handlers, employeeId='E1024')['id'])
+    assert post(handlers, dict(VALID, employeeId='E1024'))['statusCode'] == 409
+
+
+def test_an_employee_id_cannot_be_changed_by_an_update(handlers):
+    # Not a whitelist nicety: DynamoDB cannot move an item between partition
+    # keys, so a PUT that appeared to rename would have upserted a second
+    # employee and left the first one behind.
+    from common.db import table
+
+    create(handlers, employeeId='E1024')
+    assert put(handlers, 'E1024', dict(VALID, employeeId='E2048'))['statusCode'] == 200
+
+    assert body(get(handlers, 'E1024'))['id'] == 'E1024'
+    assert get(handlers, 'E2048')['statusCode'] == 404
+    assert table.get_item(Key={'employeeKey': 'EMP#E2048'}).get('Item') is None
+
+
+@pytest.mark.parametrize('typed', ['e1024', 'E1024', '  e1024  '])
+def test_the_id_in_the_url_is_matched_case_insensitively(handlers, typed):
+    # People type employee numbers, and they did not type UUIDs. A correct id in
+    # the wrong case must not 404 against a record that plainly exists.
+    create(handlers, employeeId='E1024')
+    assert get(handlers, typed)['statusCode'] == 200
+    assert patch(handlers, typed, 'laptop', True)['statusCode'] == 200
+    assert put(handlers, typed, VALID)['statusCode'] == 200
+    assert delete(handlers, typed)['statusCode'] == 200
+
+
 # ------------------------------------------------- email is no longer unique
 
 def test_two_employees_may_now_share_a_work_email(handlers):
     # Documenting a deliberate loss, not asserting a feature. Uniqueness used to
     # be enforced by a guard item in its own partition; the table now holds one
     # item per employee and nothing else, and DynamoDB can only enforce
-    # uniqueness on a partition key - which here is a UUID. If this test ever
-    # starts failing, someone reintroduced the guard and should say so loudly.
-    create(handlers)
-    second = post(handlers, dict(VALID, firstName='Someone', lastName='Else'))
+    # uniqueness on a partition key - which is the employee number, not the
+    # email. Moving a meaningful id into the key bought a real guarantee about
+    # employee numbers and none at all about mailboxes. If this test ever starts
+    # failing, someone reintroduced the guard and should say so loudly.
+    create(handlers, employeeId='E2001')
+    second = post(handlers, dict(VALID, employeeId='E2002',
+                                 firstName='Someone', lastName='Else'))
 
     assert second['statusCode'] == 201
     assert body(handlers['list_employees']({}, None))['count'] == 2
@@ -161,7 +298,7 @@ def test_get_of_an_unknown_id_is_404(handlers):
 
 def test_get_leaks_no_internal_attributes(handlers):
     employee = body(get(handlers, create(handlers)['id']))
-    for internal in ('PK', 'SK', 'employeeId', 'entityType'):
+    for internal in ('employeeKey', 'PK', 'SK', 'employeeId', 'entityType'):
         assert internal not in employee
 
 
@@ -208,7 +345,8 @@ def test_update_preserves_checklist_progress(handlers):
 
 def test_update_ignores_id_and_checklist_in_the_body(handlers):
     employee_id = create(handlers)['id']
-    updated = body(put(handlers, employee_id, dict(VALID, id='hacked', checklist=[])))
+    updated = body(put(handlers, employee_id,
+                       dict(VALID, id='hacked', employeeId='E9999', checklist=[])))
     assert updated['id'] == employee_id
     assert len(updated['checklist']) == 8
 
@@ -340,13 +478,13 @@ def test_a_comment_can_be_cleared(handlers, cleared):
 def test_clearing_a_comment_removes_the_attribute_rather_than_storing_empty(handlers):
     from common.checklist_template import CHECKLIST_INDEX
     from common.db import table
-    from common.keys import pk
+    from common.keys import key
 
     employee_id = create(handlers)['id']
     patch_raw(handlers, employee_id, 'laptop', {'comment': 'Temporary note.'})
     patch_raw(handlers, employee_id, 'laptop', {'comment': ''})
 
-    stored = table.get_item(Key={'PK': pk(employee_id)})['Item']
+    stored = table.get_item(Key=key(employee_id))['Item']
     entry = stored['checklist'][CHECKLIST_INDEX['laptop']]
     assert entry['itemId'] == 'laptop', 'the index must still point at the item it names'
     assert 'comment' not in entry
@@ -376,11 +514,11 @@ def test_a_tick_on_a_drifted_checklist_fails_instead_of_landing_on_the_wrong_ite
     # this would either tick the wrong box or grow a bogus ninth entry. Simulate
     # the drift by deleting an element out from under the index.
     from common.db import table
-    from common.keys import pk
+    from common.keys import key
 
     employee_id = create(handlers)['id']
     table.update_item(
-        Key={'PK': pk(employee_id)},
+        Key=key(employee_id),
         UpdateExpression='REMOVE #checklist[0]',
         ExpressionAttributeNames={'#checklist': 'checklist'},
     )
@@ -390,7 +528,7 @@ def test_a_tick_on_a_drifted_checklist_fails_instead_of_landing_on_the_wrong_ite
     # induction is index 6; after the shift, index 6 holds policy-ack.
     assert patch(handlers, employee_id, 'induction', True)['statusCode'] == 500
 
-    stored = table.get_item(Key={'PK': pk(employee_id)})['Item']
+    stored = table.get_item(Key=key(employee_id))['Item']
     assert len(stored['checklist']) == 7, 'the failed writes must not have appended'
     assert all(not entry['done'] for entry in stored['checklist'])
 
@@ -609,7 +747,7 @@ def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
     # the stamp is a record of a decision someone made and is not recomputed.
     from common.checklist_template import CHECKLIST_INDEX
     from common.db import table
-    from common.keys import pk
+    from common.keys import key
 
     employee_id = create(handlers)['id']
     archive(handlers, employee_id)
@@ -619,7 +757,7 @@ def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
     for item in body(get(handlers, employee_id))['checklist']:
         index = CHECKLIST_INDEX[item['id']]
         table.update_item(
-            Key={'PK': pk(employee_id)},
+            Key=key(employee_id),
             UpdateExpression='SET #checklist[{}].#done = :done'.format(index),
             ExpressionAttributeNames={'#checklist': 'checklist', '#done': 'done'},
             ExpressionAttributeValues={':done': True},

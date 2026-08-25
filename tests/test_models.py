@@ -7,12 +7,13 @@ which no emulator reproduces.
 import pytest
 
 from common.checklist_template import CHECKLIST_INDEX, CHECKLIST_TEMPLATE, VALID_ITEM_IDS
-from common.keys import employee_id_from_pk, pk
+from common.keys import employee_id_from_pk, key, pk
 from common.models import (
     ARCHIVED_CANCELLED,
     ARCHIVED_ONBOARDED,
     archive_state,
     clean_comment,
+    clean_employee_id,
     derive_status,
     is_archived,
     new_checklist_items,
@@ -21,6 +22,7 @@ from common.models import (
     to_api_checklist_item,
     to_api_employee,
     validate_employee,
+    validate_employee_id,
 )
 
 VALID = {
@@ -35,15 +37,68 @@ VALID = {
 # ----------------------------------------------------------------------- keys
 
 def test_round_trips_the_employee_id_through_the_partition_key():
-    assert employee_id_from_pk(pk('abc-123')) == 'abc-123'
+    assert employee_id_from_pk(pk('E1024')) == 'E1024'
+
+
+def test_a_hyphenated_id_survives_the_round_trip():
+    # The prefix is stripped by length, not by splitting on the separator, so a
+    # hyphen in the id is not a place the key could be cut in the wrong spot.
+    assert employee_id_from_pk(pk('BRV-1024')) == 'BRV-1024'
+
+
+# ---------------------------------------------------------- the employee id
+
+@pytest.mark.parametrize('raw, expected', [
+    ('E1024', 'E1024'),
+    ('e1024', 'E1024'),
+    ('  e1024  ', 'E1024'),
+    ('brv-1024', 'BRV-1024'),
+])
+def test_an_employee_id_is_trimmed_and_upper_cased(raw, expected):
+    assert clean_employee_id(raw) == expected
+
+
+@pytest.mark.parametrize('raw', [None, 1024, ['E1024'], {'id': 'E1024'}, True])
+def test_a_non_string_employee_id_collapses_to_empty_rather_than_raising(raw):
+    # It becomes "required" further down instead of a 500 out of the handler.
+    assert clean_employee_id(raw) == ''
+
+
+@pytest.mark.parametrize('employee_id', ['E1', 'E1024', 'BRV-1024', '1024', 'A' * 20])
+def test_accepts_a_well_formed_employee_id(employee_id):
+    assert validate_employee_id(employee_id) is None
+
+
+@pytest.mark.parametrize('employee_id', ['', 'E', 'A' * 21, 'E 1024', 'E#1024',
+                                         '-E1024', 'E1024!', 'E_1024', 'e1024'])
+def test_rejects_a_malformed_employee_id(employee_id):
+    # Note 'e1024' is on this list. The pattern is upper-case only by design -
+    # clean_employee_id runs first, so anything reaching here in lower case
+    # skipped the fold and should not be trusted to be the id it looks like.
+    assert validate_employee_id(employee_id) is not None
+
+
+def test_the_pattern_refuses_the_key_separator():
+    # '#' separates the prefix from the id. Letting one through would let a
+    # caller write "EMP#EMP#x" and address a key the rest of the system does not
+    # believe exists.
+    assert validate_employee_id('EMP#X') is not None
+
+
+def test_a_missing_id_says_it_is_required_rather_than_describing_the_format():
+    assert validate_employee_id('') == 'Employee ID is required.'
 
 
 # --------------------------------------------------------------- whitelisting
 
 def test_drops_fields_that_are_not_on_the_whitelist():
-    picked = pick_editable(dict(VALID, id='hacked', checklist=[{'id': 'laptop'}]))
+    picked = pick_editable(dict(VALID, id='hacked', employeeId='E9999',
+                                checklist=[{'id': 'laptop'}]))
     assert 'id' not in picked
     assert 'checklist' not in picked
+    # The one that matters most: this whitelist is what PUT builds its SET clause
+    # from, and the id is the partition key. It must not be reachable from a body.
+    assert 'employeeId' not in picked
 
 
 def test_trims_whitespace_and_defaults_missing_fields_to_empty():
@@ -223,11 +278,13 @@ def test_a_stamped_profile_is_archived():
 
 # ------------------------------------------------------------ item -> API shape
 
-def _item(done_ids=(), employee_id='abc-123'):
+def _item(done_ids=(), employee_id='E1024'):
     """One stored employee item, which is now the whole employee."""
     return dict(
         VALID,
-        PK=pk(employee_id),
+        # **key(...) rather than a literal, so the fixture cannot go on
+        # describing a key attribute the handlers have stopped writing.
+        **key(employee_id),
         employeeId=employee_id,
         entityType='Employee',
         checklist=[
@@ -240,7 +297,7 @@ def _item(done_ids=(), employee_id='abc-123'):
 def test_rebuilds_exactly_the_shape_the_phase_1_frontend_expects():
     employee = to_api_employee(_item(done_ids={'offer-letter', 'id-proof'}))
 
-    assert employee['id'] == 'abc-123'
+    assert employee['id'] == 'E1024'
     assert employee['firstName'] == 'Priya'
     assert set(employee['checklist'][0]) == {'id', 'label', 'owner', 'done', 'comment'}
     assert employee['checklist'][0]['id'] == 'offer-letter'
@@ -279,7 +336,7 @@ def test_archiving_does_not_disturb_the_derived_status():
 
 def test_never_leaks_internal_attributes_onto_the_wire():
     employee = to_api_employee(_item())
-    for internal in ('PK', 'SK', 'employeeId', 'entityType', 'order'):
+    for internal in ('employeeKey', 'PK', 'SK', 'employeeId', 'entityType', 'order'):
         assert internal not in employee
 
 

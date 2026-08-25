@@ -80,21 +80,43 @@ window.App = window.App || {};
   }
 
   /**
-   * Only the fields a form is allowed to set. The API drops unknown keys anyway,
-   * but sending exactly nine makes the request body self-documenting in devtools
-   * and stops a control added to the form later from leaking into every write.
+   * Only the fields a form is allowed to *change*. The API drops unknown keys
+   * anyway, but sending exactly nine makes the request body self-documenting in
+   * devtools and stops a control added to the form later from leaking into every
+   * write.
+   *
+   * `employeeId` is not here on purpose - it is set at creation and never after.
+   * See pickCreatable.
    */
   var EDITABLE_FIELDS = [
     'firstName', 'lastName', 'email', 'phone',
     'department', 'jobTitle', 'manager', 'startDate', 'employmentType'
   ];
 
-  function pickEditable(input) {
+  function pick(fields, input) {
     var out = {};
-    EDITABLE_FIELDS.forEach(function (field) {
+    fields.forEach(function (field) {
       out[field] = typeof input[field] === 'string' ? input[field].trim() : (input[field] || '');
     });
     return out;
+  }
+
+  function pickEditable(input) {
+    return pick(EDITABLE_FIELDS, input);
+  }
+
+  /**
+   * Create sends one field more than update does: the employee number, which
+   * becomes the record's id and its DynamoDB partition key.
+   *
+   * The asymmetry is the point rather than an oversight. The id cannot be
+   * changed after the record exists - DynamoDB has no way to move an item to a
+   * different partition key - so it is settable exactly once, and keeping it out
+   * of the update body means a stray `employeeId` on the edit form can never
+   * even look like it might rename someone.
+   */
+  function pickCreatable(input) {
+    return pick(EDITABLE_FIELDS.concat('employeeId'), input);
   }
 
   function employeePath(id) {
@@ -131,16 +153,22 @@ window.App = window.App || {};
       });
     },
 
+    /**
+     * Rejects with a 409 when that employee number is already taken. The error
+     * carries `fields.employeeId`, so app.js paints it under the input like any
+     * validation message - see showSaveError.
+     */
     createEmployee: function (input) {
-      // The API assigns the id and embeds all eight checklist entries on the new
-      // record, so the response is already complete.
-      return request('POST', '/employees', pickEditable(input));
+      // The caller supplies the id; the API embeds all eight checklist entries on
+      // the new record, so the response is already complete.
+      return request('POST', '/employees', pickCreatable(input));
     },
 
     updateEmployee: function (id, input) {
       // A full replace of the nine editable fields. The checklist is an attribute
       // of the same item, and the server's whitelist never names it - so progress
-      // survives an edit.
+      // survives an edit. Note pickEditable, not pickCreatable: the employee
+      // number is not among those nine and cannot be changed here.
       return request('PUT', employeePath(id), pickEditable(input));
     },
 

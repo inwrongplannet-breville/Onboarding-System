@@ -25,7 +25,7 @@ only had to change the bodies of the functions in `js/store.js`.
 
 ```json
 {
-  "id": "7f3c1a2e-9b41-4d0e-8a55-c2e11d6b7a90",
+  "id": "E1024",
   "firstName": "Priya",
   "lastName": "Sharma",
   "email": "priya.sharma@breville.com",
@@ -59,15 +59,21 @@ timestamp of the archiving. Unlike `status`, these are **stored** — they recor
 made at a point in time, not a fact about the checklist as it stands. See
 [`DELETE /employees/{id}`](#delete-employeesid).
 
-`id`, `checklist` and the three archive fields are **never settable from a request body**. Send them
-and they're silently dropped, matching `pickEditable` in `js/store.js`.
+`id` is the **employee number**, supplied by the caller as `employeeId` when the employee is created
+and immutable afterwards. It is the DynamoDB partition key, which is what makes it unique and what
+makes it unchangeable — see [database-design.md](database-design.md#the-partition-key-is-the-employee-number).
+
+`checklist` and the three archive fields are **never settable from a request body**, and neither is
+`employeeId` on anything but `POST`. Send them and they're silently dropped, matching `pickEditable`
+in `js/store.js`.
 
 ### Field rules
 
 | Field | Required | Rule |
 |---|---|---|
+| `employeeId` | on `POST` only | `^[A-Z0-9][A-Z0-9-]{1,19}$` after trimming and upper-casing — 2–20 characters of letters, digits and hyphens. Unique; a duplicate is a `409`. Ignored on `PUT` |
 | `firstName`, `lastName`, `jobTitle` | yes | non-empty |
-| `email` | yes | `^[^\s@]+@[^\s@]+\.[^\s@]+$`, and unique across employees (case-insensitive) |
+| `email` | yes | `^[^\s@]+@[^\s@]+\.[^\s@]+$`. **Not** unique — see below |
 | `department` | yes | `Engineering` \| `HR` \| `Finance` \| `Operations` |
 | `employmentType` | yes | `Full-time` \| `Contract` \| `Intern` |
 | `startDate` | yes | `YYYY-MM-DD`, and a real calendar date — `2026-02-30` is a `400` |
@@ -90,7 +96,7 @@ no author to attribute a thread to.
 |---|---|
 | `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done`, non-text or over-long `comment`, or a PATCH body asking for nothing |
 | `404` `NotFound` | unknown employee id or checklist item id |
-| `409` `Conflict` | a `PUT` or `PATCH` against an **archived** employee; UUID collision on create |
+| `409` `Conflict` | a `POST` under an `employeeId` that is already taken (carries `fields.employeeId`); a `PUT` or `PATCH` against an **archived** employee |
 | `500` `InternalError` | anything unhandled — details are in CloudWatch, never in the response |
 
 ---
@@ -125,6 +131,7 @@ with the created employee and a `Location` header.
 curl -s -X POST "$BASE_URL/employees" \
   -H 'Content-Type: application/json' \
   -d '{
+    "employeeId": "E1024",
     "firstName": "Priya",
     "lastName": "Sharma",
     "email": "priya.sharma@breville.com",
@@ -137,10 +144,25 @@ curl -s -X POST "$BASE_URL/employees" \
   }'
 ```
 
-**Work emails are not unique.** Posting an address another employee already holds succeeds. There
-is nothing to reject it: DynamoDB can only enforce uniqueness on a partition key, the partition key
-here is a UUID, and the guard item that used to carry the constraint went when the table collapsed
-to one item per employee. Callers that care have to check for themselves.
+`employeeId` is **required and unique**. It is trimmed and upper-cased, then becomes the record's
+`id` and its partition key, so `e1024` and `E1024` are the same employee. Posting under a number
+that already exists — including one belonging to an **archived** employee, whose item is still in
+the table — returns `409` with `fields.employeeId` set:
+
+```json
+{ "error": { "code": "Conflict",
+             "message": "Employee ID E1024 is already taken.",
+             "fields": { "employeeId": "That employee ID is already in use." } } }
+```
+
+That guarantee comes from DynamoDB itself: the write is a conditional `PutItem` on
+`attribute_not_exists(employeeKey)`, so there is no read-then-write race to lose and no way for a duplicate
+to slip through under load.
+
+**Work emails, by contrast, are not unique.** Posting an address another employee already holds
+succeeds. DynamoDB can only enforce uniqueness on a partition key, that key is the employee number,
+and the guard item that used to carry the email constraint went when the table collapsed to one item
+per employee. Callers that care have to check for themselves.
 
 ### `GET /employees/{id}`
 
@@ -151,11 +173,19 @@ curl -s "$BASE_URL/employees/$EMPLOYEE_ID"
 One GetItem on the partition key returns the whole employee, checklist included — see
 [database-design.md](database-design.md). `404` if the id is unknown.
 
+The `{id}` in the path is the employee number, and it is trimmed and upper-cased before the lookup on
+every route that takes one — `GET`, `PUT`, `PATCH` and `DELETE` alike — so `/employees/e1024` finds
+`E1024`. People type employee numbers; they never typed UUIDs.
+
 ### `PUT /employees/{id}`
 
 Full replace of the editable fields. **Checklist progress is preserved** — the checklist is an
 attribute of the same item, and the `SET` clause is built from a whitelist that never names it.
 `409` if the employee is archived.
+
+**There is no rename.** `employeeId` is not on that whitelist, so sending one is silently dropped
+rather than honoured or rejected. DynamoDB cannot move an item between partition keys: a `PUT` that
+appeared to rename would have upserted a second employee and left the first one in place.
 
 ```bash
 curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
@@ -263,45 +293,61 @@ Valid `itemId` values: `offer-letter`, `id-proof`, `bank-details`, `laptop`, `em
 The sequence that proves Phase 2 is done. Every line should print the status code on the right.
 
 ```bash
-# 201 - capture the id
-EMPLOYEE_ID=$(curl -s -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' \
-  -d '{"firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","phone":"",
-       "department":"Engineering","jobTitle":"Engineer","manager":"",
-       "startDate":"2026-09-01","employmentType":"Full-time"}' | py -c 'import json,sys;print(json.load(sys.stdin)["id"])')
+# The id is ours to choose now, so there is nothing to capture from the response.
+EMPLOYEE_ID=E9001
+BODY='{"employeeId":"E9001","firstName":"Test","lastName":"Hire",
+       "email":"test.hire@breville.com","phone":"","department":"Engineering",
+       "jobTitle":"Engineer","manager":"","startDate":"2026-09-01",
+       "employmentType":"Full-time"}'
 
+curl -s -o /dev/null -w 'create                %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
 curl -s -o /dev/null -w 'list                  %{http_code}\n' "$BASE_URL/employees"
 curl -s -o /dev/null -w 'get                   %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s -o /dev/null -w 'get, wrong case       %{http_code}\n' "$BASE_URL/employees/e9001"
+curl -s -o /dev/null -w 'duplicate id          %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
+curl -s -o /dev/null -w 'malformed id          %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E 900 1","firstName":"Test","lastName":"Hire","email":"x@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
 curl -s -o /dev/null -w 'tick offer-letter     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" -H 'Content-Type: application/json' -d '{"done":true}'
 curl -s -o /dev/null -w 'tick unknown item     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/not-a-thing" -H 'Content-Type: application/json' -d '{"done":true}'
 curl -s -o /dev/null -w 'bad email             %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"email":"nope"}'
+curl -s -o /dev/null -w 'impossible date       %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E9002","firstName":"Test","lastName":"Hire","email":"y@breville.com","department":"HR","jobTitle":"X","startDate":"2026-02-30","employmentType":"Intern"}'
 curl -s -o /dev/null -w 'archive               %{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
 curl -s -o /dev/null -w 'get after archive     %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
 curl -s -o /dev/null -w 'update after archive  %{http_code}\n' -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"t@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
 curl -s -o /dev/null -w 'tick after archive    %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/id-proof" -H 'Content-Type: application/json' -d '{"done":true}'
-curl -s -o /dev/null -w 'email still reserved  %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'id still taken        %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
+curl -s -o /dev/null -w 're-hire on same email %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E9003","firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
 ```
 
 Expected:
 
 ```
+create                201
 list                  200
 get                   200
+get, wrong case       200   <- the id is folded before the lookup
+duplicate id          409   <- the guarantee the key change buys
+malformed id          400
 tick offer-letter     200
 tick unknown item     404
 bad email             400
 impossible date       400
-duplicate email       201   <- no longer rejected
 archive               200
 get after archive     200
 update after archive  409
 tick after archive    409
-re-hire on same email 201   <- no longer reserved
+id still taken        409   <- archiving does not free the number
+re-hire on same email 201   <- emails are still not reserved
 ```
+
+Note the last two lines together. The same employee number is refused and the same work email sails
+through, and that is the design rather than an inconsistency: the partition key enforces one
+constraint and cannot enforce the other.
 
 Three more checks that curl can't make for you:
 
 1. **Persistence** — run `GET /employees` from a fresh terminal minutes later. The employee is
-   still there. This is the thing Phase 1 could not do.
+   still there. This is the thing Phase 1 could not do. The item's `employeeKey` reads `EMP#E9001` in the
+   console, so the key names the person without a lookup.
 2. **Off the list, not gone** — after the archive, confirm the employee is absent from
    `GET /employees` and still present in the DynamoDB console: one item carrying `archivedAs`, with
    its 8-entry `checklist` list intact.

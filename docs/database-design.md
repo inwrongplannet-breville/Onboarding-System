@@ -21,7 +21,7 @@ One table. **One item per employee, and employees are the only kind of item in i
 
 | | |
 |---|---|
-| Partition key | `PK` (String) |
+| Partition key | `employeeKey` (String) |
 | Sort key | none |
 | Secondary indexes | none |
 | Billing | `PAY_PER_REQUEST` |
@@ -36,17 +36,51 @@ partition key would now fit SimpleTable. SimpleTable exposes only `PrimaryKey`,
 documentation.
 
 Key strings are built in exactly one place, `src/common/keys.py` — `pk()` and
-`employee_id_from_pk()`. Nothing else concatenates the `EMP#` prefix.
+`employee_id_from_pk()`, alongside `key()` and the `KEY_ATTRIBUTE` /
+`EXISTS` / `NOT_EXISTS` constants the handlers build their `Key=` arguments and condition
+expressions from. Nothing else names the attribute or concatenates the `EMP#` prefix.
+
+## The partition key is the employee number
+
+`EMP#E1024`, not `EMP#<uuid>`. The id is the employee number HR types on the create form, and that
+choice is what turns the create-time `NOT_EXISTS` condition from a formality into the only
+uniqueness constraint the table has.
+
+DynamoDB can enforce uniqueness on a partition key and on nothing else. While the key was a UUID
+there was nothing meaningful to enforce — the condition guarded against a collision no one would
+ever see. With the employee number in the key, a second `POST` under an existing number is refused
+by DynamoDB itself, in the same write, with no read-then-write race to lose.
+
+What it costs:
+
+- **The id is immutable.** DynamoDB cannot move an item between partition keys; an `UpdateItem`
+  naming a different key does not rename anything, it upserts a second employee and leaves the
+  first one sitting there. So `employeeId` is absent from `EDITABLE_FIELDS`, and correcting a
+  mistyped number means archiving that record and creating the right one.
+- **Case has to be normalised.** `e1024` and `E1024` are two different partition keys and therefore
+  two different employees, which is precisely the failure the key was chosen to prevent. Every id
+  is upper-cased on the way in — `clean_employee_id()` in `common/models.py` — both from the create
+  body and from the `{id}` path parameter, so a URL typed in the wrong case still resolves.
+- **The format is constrained.** `^[A-Z0-9][A-Z0-9-]{1,19}$`: 2–20 characters, letters, digits and
+  hyphens. Tighter than a key strictly needs, because this string is concatenated into the key —
+  `#` would let a caller forge a key in another namespace and whitespace would produce two ids that
+  are indistinguishable in the console.
+- **Archived numbers stay taken.** Archiving leaves the item in the table, so the key is still
+  occupied and re-hiring requires a new number. That is the honest outcome; reusing a number would
+  attach a second person's history to the first person's id.
+
+The seed fixtures use `E1001`–`E1006`, so a reseed lands the same people on the same ids and a
+hand-written link like `#/employees/E1003` survives a table reset.
 
 ## The item
 
 ```
-PK = EMP#<uuid>
+employeeKey = EMP#<employeeId>
 
 {
-  "PK":             "EMP#4d4494cd-589c-49b3-93ff-2708b1b26656",
+  "employeeKey":    "EMP#E1024",
   "entityType":     "Employee",
-  "employeeId":     "4d4494cd-589c-49b3-93ff-2708b1b26656",
+  "employeeId":     "E1024",
 
   "firstName":      "Priya",
   "lastName":       "Sharma",
@@ -115,7 +149,7 @@ there is no partition to query.
 |---|---|---|
 | `GET /employees/{id}` | `GetItem` | eventual |
 | `GET /employees` | `Scan`, paginated on `LastEvaluatedKey`, `FilterExpression` on `entityType` | eventual |
-| `POST /employees` | `PutItem` with `attribute_not_exists(PK)` | — |
+| `POST /employees` | `PutItem` with `attribute_not_exists(employeeKey)` | — |
 | `PUT /employees/{id}` | `UpdateItem` + consistent `GetItem` for the response | **strong** on the re-read |
 | `PATCH .../checklist/{itemId}` | `UpdateItem` on nested paths + consistent `GetItem` | **strong** on the re-read |
 | `DELETE /employees/{id}` | consistent `GetItem` → `UpdateItem` → consistent `GetItem` | **strong** |
@@ -180,7 +214,7 @@ UpdateExpression:     SET <entry>.#done = :done,
                           #updatedAt = :updatedAt
                       [REMOVE <entry>.#comment]
 
-ConditionExpression:  attribute_exists(PK)
+ConditionExpression:  attribute_exists(employeeKey)
                       AND attribute_not_exists(#archivedAs)
                       AND <entry>.#itemId = :itemId
 ```
@@ -239,10 +273,14 @@ placeholders throughout rather than selectively.
 
 **Work email uniqueness is not enforced. Two employees may hold the same address.**
 
-There used to be a second item, `PK = EMAIL#<lowercased address>`, written in the same transaction as
-the profile with `attribute_not_exists(PK)`. DynamoDB can only enforce uniqueness on a partition key,
-and the partition key here is a UUID — so a guard item was the only way to hold the constraint, and
-"one item per employee, nothing else" removes it by definition.
+There used to be a second item, `employeeKey = EMAIL#<lowercased address>`, written in the same
+transaction as the profile with `attribute_not_exists(employeeKey)`. DynamoDB can only enforce uniqueness on a partition key,
+and the partition key here is the employee number — so a guard item was the only way to hold the
+constraint, and "one item per employee, nothing else" removes it by definition.
+
+Putting a meaningful id in the key bought a real guarantee about **employee numbers** and none at all
+about **mailboxes**. The two are not substitutes, and it is worth being explicit that the key change
+did not quietly restore this one.
 
 Consequences, all deliberate:
 
@@ -271,8 +309,9 @@ Measured against the deployed dev table, not estimated:
 | 6 seeded employees | 54 items / 12,461 bytes | **6 items / ~7,214 bytes** |
 | Fraction of the 400 KB item limit | — | ~0.3%, or ~1.3% with all 8 comments at their 500-char cap |
 
-The 32%-per-employee saving is entirely overhead, not data: eight copies of `PK` (336 bytes), `SK`
-(129) and `entityType` (184) came to **649 bytes, 37% of every old partition**.
+The 32%-per-employee saving is entirely overhead, not data: eight copies of the partition key
+(336 bytes), `SK` (129) and `entityType` (184) came to **649 bytes, 37% of every old
+partition**.
 
 Read and write costs move in opposite directions, and both are noise at this scale:
 
@@ -289,6 +328,9 @@ the sparse GSI. The rule underneath: **`Query` when you know the partition key, 
 genuinely need every item.**
 
 ## Deploying a schema change
+
+This is not hypothetical — renaming the partition key attribute from `PK` to `employeeKey` was one,
+and it deployed as an ordinary `sam deploy` precisely because of what follows.
 
 **A key-schema change is a table replacement, and an explicit `TableName` makes it undeployable.**
 CloudFormation replaces a resource by creating the new one *before* deleting the old, which cannot
@@ -326,7 +368,7 @@ be destroyable over HTTP. Resetting a dev table is a deliberate act against the 
 `pytest` covers all six handlers against in-memory DynamoDB (moto) — 144 tests. moto emulates the
 API, not IAM, so the checks below were run against the deployed dev stack.
 
-**Schema.** `AttributeDefinitions` and `KeySchema` each contain `PK` alone. No `SK` attribute exists
+**Schema.** `AttributeDefinitions` and `KeySchema` each contain `employeeKey` alone. No `SK` attribute exists
 on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry `checklist` in
 `CHECKLIST_TEMPLATE` order.
 

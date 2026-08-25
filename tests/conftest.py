@@ -52,14 +52,19 @@ def handlers():
         boto3.client('dynamodb').create_table(
             TableName=TABLE_NAME,
             BillingMode='PAY_PER_REQUEST',
-            # PK only. One item per employee, so there is nothing to sort within
-            # a partition - and an AttributeDefinition no key refers to is a
-            # validation error, so SK has to leave both lists together.
+            # The partition key only. One item per employee, so there is nothing to
+            # sort within a partition - and an AttributeDefinition no key refers to
+            # is a validation error, so SK has to leave both lists together.
+            #
+            # Spelled out rather than imported from common.keys on purpose: this is
+            # the test's independent copy of the schema in template.yaml, and a
+            # shared constant would let the two rename themselves in lockstep
+            # without a single test noticing the deploy needed a table replacement.
             AttributeDefinitions=[
-                {'AttributeName': 'PK', 'AttributeType': 'S'},
+                {'AttributeName': 'employeeKey', 'AttributeType': 'S'},
             ],
             KeySchema=[
-                {'AttributeName': 'PK', 'KeyType': 'HASH'},
+                {'AttributeName': 'employeeKey', 'KeyType': 'HASH'},
             ],
         )
 

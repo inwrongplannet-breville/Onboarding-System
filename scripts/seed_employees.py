@@ -19,10 +19,11 @@ That asymmetry is the design working as intended, not a hole in it: the API has 
 hard delete because employee history should not be destroyable over HTTP. Resetting
 a dev table is a deliberate act against the table, and this is it.
 
-(Reseeding used to also 409 on every address, because an archived record kept its
-email uniqueness guard and the guard kept the address reserved. That guard is gone,
-so duplicates are now accepted rather than rejected - which is quieter and worse:
-without a wipe you would get two of everyone instead of an error.)
+(Seeding without a wipe now 409s on the first fixture rather than duplicating it.
+The employee number is the partition key, so a second POST under E1001 is refused
+by the conditional PutItem - which makes a forgotten --wipe a loud failure instead
+of the quiet double-seed it was when the key was a UUID. That is an improvement,
+and it is still not a reason to skip --wipe: the archived records stay.)
 
 The table calls go through the AWS CLI rather than boto3, which is not the obvious
 choice and is deliberate. `aws login` - the browser-based console login this project
@@ -57,9 +58,15 @@ REGION = 'eu-north-1'
 
 # (employee, [checklist item ids to tick]) - the varied progress from Phase 1, which
 # is what makes the list view's status filter and progress bars worth looking at.
+#
+# `employeeId` is now supplied rather than assigned: it is the partition key, so
+# these six numbers are the fixtures' identity. Keeping them stable and
+# contiguous means a reseed lands the same people on the same ids every time, and
+# a hand-written URL like #/employees/E1003 keeps working across resets.
 FIXTURES = [
     (
         {
+            'employeeId': 'E1001',
             'firstName': 'Priya', 'lastName': 'Sharma',
             'email': 'priya.sharma@breville.com', 'phone': '+61 412 883 016',
             'department': 'Engineering', 'jobTitle': 'Software Engineer',
@@ -71,6 +78,7 @@ FIXTURES = [
     ),
     (
         {
+            'employeeId': 'E1002',
             'firstName': 'Daniel', 'lastName': 'Okafor',
             'email': 'daniel.okafor@breville.com', 'phone': '+61 431 507 224',
             'department': 'Engineering', 'jobTitle': 'QA Engineer',
@@ -81,6 +89,7 @@ FIXTURES = [
     ),
     (
         {
+            'employeeId': 'E1003',
             'firstName': 'Mei Lin', 'lastName': 'Tan',
             'email': 'meilin.tan@breville.com', 'phone': '+61 402 119 763',
             'department': 'Finance', 'jobTitle': 'Financial Analyst',
@@ -91,6 +100,7 @@ FIXTURES = [
     ),
     (
         {
+            'employeeId': 'E1004',
             'firstName': 'Arjun', 'lastName': 'Nair',
             'email': 'arjun.nair@breville.com', 'phone': '+61 448 620 195',
             'department': 'Operations', 'jobTitle': 'Supply Chain Coordinator',
@@ -101,6 +111,7 @@ FIXTURES = [
     ),
     (
         {
+            'employeeId': 'E1005',
             'firstName': 'Sofia', 'lastName': 'Marchetti',
             'email': 'sofia.marchetti@breville.com', 'phone': '+61 423 774 508',
             'department': 'HR', 'jobTitle': 'HR Coordinator',
@@ -112,6 +123,7 @@ FIXTURES = [
     ),
     (
         {
+            'employeeId': 'E1006',
             'firstName': 'Liam', 'lastName': 'Byrne',
             'email': 'liam.byrne@breville.com', 'phone': '+61 437 285 941',
             'department': 'Engineering', 'jobTitle': 'Data Engineering Intern',
@@ -223,22 +235,26 @@ def scan_keys(table_name):
     """
     Every key in the table, following pagination.
 
-    PK only - the table has no sort key, and a DeleteRequest carrying an SK the
-    table does not have would fail the whole batch.
+    The partition key only - the table has no sort key, and a DeleteRequest
+    carrying an SK the table does not have would fail the whole batch.
+
+    The attribute is `employeeKey`, spelled out rather than imported from
+    common.keys: this script drives the AWS CLI rather than the handler package,
+    and is run from a checkout that need not have src/ importable.
     """
     keys = []
     start_key = None
 
     while True:
         args = ['dynamodb', 'scan', '--table-name', table_name,
-                '--region', REGION, '--projection-expression', 'PK',
+                '--region', REGION, '--projection-expression', 'employeeKey',
                 '--output', 'json']
         payloads = {}
         if start_key:
             payloads['--exclusive-start-key'] = start_key
 
         result = aws_json(args, payloads)
-        keys.extend({'PK': i['PK']} for i in result.get('Items', []))
+        keys.extend({'employeeKey': i['employeeKey']} for i in result.get('Items', []))
 
         start_key = result.get('LastEvaluatedKey')
         if not start_key:
@@ -259,7 +275,8 @@ def wipe(table_name, assume_yes):
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    employees = {k['PK']['S'] for k in keys if k['PK']['S'].startswith('EMP#')}
+    employees = {k['employeeKey']['S'] for k in keys
+                 if k['employeeKey']['S'].startswith('EMP#')}
     others = len(keys) - len(employees)
 
     print('\nAbout to hard-delete {} item(s) from {}:'.format(len(keys), table_name))

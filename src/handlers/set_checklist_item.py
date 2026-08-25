@@ -41,11 +41,12 @@ from common.db import table
 from common.handler import (
     BadRequest,
     api_handler,
+    employee_id_param,
     is_condition_failure,
     parse_body,
     path_param,
 )
-from common.keys import pk
+from common.keys import EXISTS, key
 from common.models import ARCHIVED_MESSAGE, COMMENT_MAX_LENGTH, clean_comment
 from common.repository import load_archive_state, load_employee
 
@@ -133,7 +134,7 @@ def _write_failure(employee_id, item_id):
 
 @api_handler
 def lambda_handler(event, context):
-    employee_id = path_param(event, 'id')
+    employee_id = employee_id_param(event)
     item_id = path_param(event, 'itemId')
     body = parse_body(event)
 
@@ -165,7 +166,7 @@ def lambda_handler(event, context):
 
     try:
         table.update_item(
-            Key={'PK': pk(employee_id)},
+            Key=key(employee_id),
             UpdateExpression=expression,
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
@@ -173,7 +174,7 @@ def lambda_handler(event, context):
             # '.' for nesting but does not parse '[i]', so it would emit a
             # placeholder for the literal name "checklist[3]".
             ConditionExpression=(
-                'attribute_exists(PK) '
+                EXISTS + ' '
                 'AND attribute_not_exists(#archivedAs) '
                 'AND ' + entry + '.#itemId = :itemId'
             ),

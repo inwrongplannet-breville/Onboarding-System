@@ -32,7 +32,7 @@ API Gateway  /dev
     +-- PATCH  /employees/{id}/checklist/{itemId}        SetChecklistItemFunction
                                 |
                                 v
-                    DynamoDB   one item per employee, keyed by PK
+                    DynamoDB   one item per employee, keyed by employeeKey
 ```
 
 ### Files
@@ -86,7 +86,7 @@ What the API returns and the UI renders:
 
 ```js
 {
-  id: "4d4494cd-589c-49b3-93ff-2708b1b26656",   // server-generated UUID
+  id: "E1024",       // the employee number HR typed; also the partition key
   firstName, lastName, email, phone,
   department,        // Engineering | HR | Finance | Operations
   jobTitle,
@@ -143,11 +143,11 @@ Plus `PATCH /employees/{id}/checklist/{itemId}`, which isn't in the brief's tabl
 
 ### The table
 
-One DynamoDB table, `PK` only, **one item per employee** — and employees are the only kind of item
+One DynamoDB table, `employeeKey` only, **one item per employee** — and employees are the only kind of item
 in it:
 
 ```
-PK = EMP#<uuid>
+employeeKey = EMP#<employeeId>
 {
   ...the nine editable profile fields, plus createdAt / updatedAt,
   plus archivedAs / archivedAt once archived,
@@ -169,8 +169,15 @@ Three things a reviewer will want to know straight away:
 - **Work email uniqueness is no longer enforced.** The guard item that held it needed a second item
   in the table, and there isn't one. Two employees may share an address, and `POST`/`PUT` no longer
   return `409` for a duplicate.
-- **The partition key is a UUID**, because email is editable and partition keys are immutable, and a
-  sequential counter is a serialised hot key bought purely for cosmetics.
+- **The partition key is the employee number** HR types on the create form — `EMP#E1024`. It used
+  to be a UUID. Moving a meaningful id into the key is what makes employee numbers unique:
+  DynamoDB can enforce uniqueness on a partition key and on nothing else, so the create-time
+  `attribute_not_exists(employeeKey)` went from guarding against a collision nobody would ever see to
+  being the constraint itself. The costs are real and accepted — the number can never be edited
+  (an `UpdateItem` cannot move an item between partitions), it has to be case-folded on the way
+  in or `e1024` and `E1024` become two people, and archiving keeps the number taken. A
+  sequential counter would have given readable ids too, but at the price of a serialised hot
+  key on every hire and with no HR-meaningful number in it.
 
 **Full detail — item shape, access patterns per route, the index invariants that must not be broken,
 cost measurements, and the deployment constraint on key-schema changes — is in
@@ -188,7 +195,7 @@ is a summary.
   rather than as a `ConditionCheck` on a sibling row. "An archived record is frozen" is still a
   property of the table rather than a check someone remembered to write.
 - **Condition expressions everywhere.** `UpdateItem` upserts by default, so without
-  `attribute_exists(PK)` a `PUT` to an unknown id would conjure a half-employee with no checklist
+  `attribute_exists(employeeKey)` a `PUT` to an unknown id would conjure a half-employee with no checklist
   behind it. Update, patch and delete all guard against it and return `404` instead.
 - **`status` is derived, never stored** — enforced in `common/models.py:derive_status`, and
   computed nowhere else. The list filter runs over the `status` the API returned.
@@ -426,12 +433,15 @@ including the ones easy to get wrong:
   204 branch in `request()` stays because that shape is still worth handling
 - `getEmployee` resolves `null` on a 404 while `updateEmployee` and `archiveEmployee` reject on one
 - a 400 arrives with a `fields` map whose keys match the form inputs exactly
-- `id` and `checklist` smuggled into a request body are stripped before sending
+- `id`, `employeeId` and `checklist` smuggled into an **update** body are stripped before sending;
+  `employeeId` is sent on create only, because that is the one moment it can be set
 - the client's `computeStatus` / `progress` agree with the server's on the same record
 
-Rendering was verified from the returned DOM: six rows with UUID ids, all three status badges,
-progress bars at 100/63/75/25/0/0%, and a deep-link straight to `#/employees/<uuid>/checklist`
-resolving correctly — proof the router handles UUIDs.
+Rendering was verified from the returned DOM: six rows with employee numbers `E1001`–`E1006`, all
+three status badges, progress bars at 100/63/75/25/0/0%, and a deep-link straight to
+`#/employees/E1003/checklist` resolving correctly. The ids are readable and typeable now, which
+is a smaller router test than the UUID one it replaces and a much better one for a person
+holding a payroll export.
 
 The failure path was forced by pointing the API hostname at a dead port. Result: the banner reads
 "Could not reach the server", `#app` reads "Could not load employees", and — the check that matters

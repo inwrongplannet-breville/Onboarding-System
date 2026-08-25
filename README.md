@@ -33,11 +33,15 @@ py scripts/seed_employees.py --wipe --seed
 
 Add `--yes` to skip the confirmation prompt. It drives the public API, not the table directly.
 
+The six fixtures take employee numbers `E1001`–`E1006`. Those numbers are the DynamoDB partition
+key, so `--seed` without `--wipe` now fails loudly with a `409` instead of quietly creating a second
+copy of everyone.
+
 ## Run the backend tests
 
 ```bash
 py -m pip install -r requirements-dev.txt
-py -m pytest                    # 125 tests, ~10 seconds
+py -m pytest                    # 194 tests, ~30 seconds
 ```
 
 No AWS account or credentials needed — the handler tests run against an in-memory DynamoDB.
@@ -90,6 +94,11 @@ AWS, the two connected, and the onboarding checklist tracked per employee end to
 its checklist stay in DynamoDB stamped `Onboarded` or `Onboarding Cancelled`, and stop accepting
 writes. That reverses decision 3 from the review; the reasoning is in
 [design.md](docs/design.md#number-3-reversed-archiving-instead-of-deleting).
+
+The partition key is the **employee number** HR types on the form (`EMP#E1024`), not a generated
+UUID. That is what makes the employee number unique — DynamoDB can enforce uniqueness on a partition
+key and on nothing else — and it is also why the number can never be edited afterwards. See
+[database-design.md](docs/database-design.md#the-partition-key-is-the-employee-number).
 
 Phase 5 (S3 document upload, SNS/SQS onboarding triggers) is not started.
 

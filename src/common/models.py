@@ -9,13 +9,20 @@ import re
 from datetime import date
 
 from common.checklist_template import CHECKLIST_TEMPLATE
-from common.keys import employee_id_from_pk
+from common.keys import KEY_ATTRIBUTE, employee_id_from_pk
 
 DEPARTMENTS = ('Engineering', 'HR', 'Finance', 'Operations')
 EMPLOYMENT_TYPES = ('Full-time', 'Contract', 'Intern')
 
-# Mirrors EDITABLE_FIELDS in js/store.js - id and checklist are ours, never
-# settable from a request body.
+# Mirrors EDITABLE_FIELDS in js/store.js - checklist is ours, never settable from
+# a request body, and neither is the employee id.
+#
+# The id is absent here for a stronger reason than the checklist is. It is the
+# partition key, and DynamoDB cannot move an item between partitions - an
+# UpdateItem naming a different PK does not rename anything, it upserts a second
+# employee and leaves the first one sitting there. So `employeeId` is set once by
+# create and is structurally unchangeable afterwards; correcting a typo means
+# archiving that record and creating the right one.
 EDITABLE_FIELDS = (
     'firstName', 'lastName', 'email', 'phone',
     'department', 'jobTitle', 'manager', 'startDate', 'employmentType',
@@ -36,6 +43,17 @@ REQUIRED_FIELDS = (
 # sending an email to it, not a regex.
 EMAIL_PATTERN = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+# The employee number HR types on the create form, and the thing the partition key
+# is built from. Letters, digits and hyphens; 2 to 20 characters; starts with a
+# letter or a digit.
+#
+# Tighter than it strictly needs to be, on purpose. This string is concatenated
+# into the PK, so anything that could collide with the key format is a problem
+# rather than a preference: '#' would let a caller forge a key in another
+# namespace, and whitespace would produce two ids that look identical in the
+# console and are not. The pattern refuses both by only allowing what it names.
+EMPLOYEE_ID_PATTERN = re.compile(r'^[A-Z0-9][A-Z0-9-]{1,19}$')
 
 # A checklist comment is a note, not an essay - "chased payroll twice, still no
 # bank details". The cap is here to keep one item well under the 400 KB DynamoDB
@@ -67,6 +85,33 @@ def pick_editable(body):
         value = body.get(field, '')
         picked[field] = value.strip() if isinstance(value, str) else ''
     return picked
+
+
+def clean_employee_id(value):
+    """
+    Trim, and upper-case.
+
+    The case fold is not cosmetic. This value becomes the partition key, and the
+    key is the only uniqueness guarantee in the table - so "e1024" and "E1024"
+    reaching DynamoDB as two different keys would mean one employee with two
+    records and no error to say so. Folding here makes the second one a 409.
+
+    Non-strings collapse to '' rather than raising, so a JSON body sending a
+    number is a validation error with a message under the input, not a 500.
+    """
+    if not isinstance(value, str):
+        return ''
+    return value.strip().upper()
+
+
+def validate_employee_id(employee_id):
+    """The message to show under the Employee ID input, or None if it is fine."""
+    if not employee_id:
+        return 'Employee ID is required.'
+    if not EMPLOYEE_ID_PATTERN.match(employee_id):
+        return ('Employee ID must be 2-20 characters, using letters, digits and '
+                'hyphens only.')
+    return None
 
 
 def clean_comment(value):
@@ -219,7 +264,7 @@ def to_api_employee(item):
 
     checklist = [to_api_checklist_item(entry) for entry in item.get('checklist', [])]
 
-    employee = {'id': employee_id_from_pk(item['PK'])}
+    employee = {'id': employee_id_from_pk(item[KEY_ATTRIBUTE])}
     for field in EDITABLE_FIELDS:
         employee[field] = item.get(field, '')
 

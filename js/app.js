@@ -241,7 +241,11 @@ window.App = window.App || {};
       if (filters.status && employee.status !== filters.status) return false;
       if (!term) return true;
 
-      var haystack = (ui.fullName(employee) + ' ' + employee.email).toLowerCase();
+      // The id is searchable now that it is something a person knows by heart -
+      // "E1024" is exactly what someone would paste in from a payroll export,
+      // and it used to be a UUID nobody could have typed.
+      var haystack = (employee.id + ' ' + ui.fullName(employee) + ' ' +
+        employee.email).toLowerCase();
       return haystack.indexOf(term) !== -1;
     });
   }
@@ -318,6 +322,7 @@ window.App = window.App || {};
   /* ------------------------------------------------------------- form view */
 
   var REQUIRED_FIELDS = [
+    { name: 'employeeId', label: 'Employee ID' },
     { name: 'firstName', label: 'First name' },
     { name: 'lastName', label: 'Last name' },
     { name: 'email', label: 'Work email' },
@@ -328,6 +333,14 @@ window.App = window.App || {};
   ];
 
   var EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  /*
+   * Mirrors EMPLOYEE_ID_PATTERN in common/models.py, with one deliberate
+   * difference: this accepts lower case where the server's does not. The server
+   * upper-cases before it matches, so "e1024" is a perfectly valid thing to
+   * type - rejecting it here would refuse input the API would have accepted.
+   */
+  var EMPLOYEE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{1,19}$/;
 
   function readForm(form) {
     var values = {};
@@ -367,6 +380,11 @@ window.App = window.App || {};
 
     if (values.email && !EMAIL_PATTERN.test(values.email)) {
       errors.email = 'Enter a valid email address.';
+    }
+
+    if (values.employeeId && !EMPLOYEE_ID_PATTERN.test(values.employeeId)) {
+      errors.employeeId =
+        'Employee ID must be 2-20 characters, using letters, digits and hyphens only.';
     }
 
     return errors;

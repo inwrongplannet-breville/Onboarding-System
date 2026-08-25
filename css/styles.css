@@ -216,6 +216,15 @@ tbody tr:hover { background: var(--bg-soft); }
 td.actions { white-space: nowrap; text-align: right; }
 td.actions > * + * { margin-left: 6px; }
 
+/* Fixed-width, because employee IDs are read down the column and compared to
+   one another far more often than they are read on their own. */
+.id-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
 .name-cell { font-weight: 600; }
 .name-cell small { display: block; font-weight: 400; color: var(--muted); }
 
@@ -268,6 +277,20 @@ td.actions > * + * { margin-left: 6px; }
   margin-bottom: 4px;
 }
 .field .req { color: var(--accent); }
+
+.field-hint {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A read-only field is still focusable and still readable - it just cannot be
+   typed into, and the grey says so before anyone tries. */
+.field.is-readonly input {
+  background: #f3f4f6;
+  color: var(--muted);
+  cursor: not-allowed;
+}
 
 .field input,
 .field select {
