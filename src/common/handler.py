@@ -11,6 +11,7 @@ import logging
 from botocore.exceptions import ClientError
 
 from common import responses
+from common.accounts import ROLE_EMPLOYEE, ROLE_OFFICIAL, ROLES
 from common.models import clean_employee_id
 
 logger = logging.getLogger()
@@ -26,6 +27,19 @@ class BadRequest(Exception):
         self.fields = fields
 
 
+class Forbidden(Exception):
+    """
+    Raised when the caller is authenticated but their role does not permit this.
+
+    Separate from BadRequest because it is not a problem with the request: the
+    body was fine, the employee exists, and the answer is still no.
+    """
+
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
 def api_handler(func):
     """
     Last line of defence. Anything that escapes a handler becomes a 500 with a
@@ -37,6 +51,8 @@ def api_handler(func):
             return func(event, context)
         except BadRequest as error:
             return responses.bad_request(error.message, error.fields)
+        except Forbidden as error:
+            return responses.forbidden(error.message)
         except ClientError:
             logger.exception('DynamoDB call failed')
             return responses.server_error()
@@ -87,3 +103,62 @@ def employee_id_param(event):
 
 def is_condition_failure(error):
     return error.response['Error']['Code'] == 'ConditionalCheckFailedException'
+
+
+def caller_role(event):
+    """
+    The role API Gateway's authorizer put on this request, or None.
+
+    None means "no identified caller": no authorizer context at all, or a role
+    string this build does not recognise. It used to mean ROLE_EMPLOYEE, and the
+    audit is what changed it. Defaulting to the least *privileged* role sounds
+    like failing closed and is not, because the employee role is not a closed
+    door - it reads the whole staff directory. So a stack that lost its Auth
+    block would have served every name, department, job title, start date and
+    onboarding status to anyone who asked, with every test still passing.
+
+    None is a closed door. require_role() below turns it into a 403, and both
+    reads and writes go through one of these two functions.
+
+    An unrecognised role string collapses to None for the same reason: renaming a
+    role in common/accounts.py must not leave old tokens falling through to
+    whatever the default happens to be.
+
+    Note this reads the authorizer's context, not the token. The token was
+    verified once, by handlers/authorizer.py, before this Lambda was invoked;
+    nothing in the request body or headers can reach this value.
+    """
+    context = ((event.get('requestContext') or {}).get('authorizer') or {})
+    role = context.get('role')
+    return role if role in ROLES else None
+
+
+def is_official(event):
+    return caller_role(event) == ROLE_OFFICIAL
+
+
+def require_role(event):
+    """
+    The caller's role, or 403. First line of the two reading endpoints.
+
+    The message is deliberately vague where require_official's is specific.
+    Reaching here means the request arrived with no usable identity at all, which
+    is a misconfiguration rather than something the caller can act on - and
+    naming the mechanism would be telling them about it.
+    """
+    role = caller_role(event)
+    if role is None:
+        raise Forbidden('This request carried no usable credentials.')
+    return role
+
+
+def require_official(event):
+    """
+    Gate for the four writing endpoints. First line of each handler.
+
+    The message says what the caller is rather than what they are missing -
+    "your account is read-only" is actionable, where "insufficient permissions"
+    invites a retry.
+    """
+    if not is_official(event):
+        raise Forbidden('Your account has read-only access to employee records.')

@@ -29,8 +29,9 @@ from boto3.dynamodb.conditions import Attr
 
 from common import responses
 from common.db import table
-from common.handler import api_handler
-from common.models import to_api_employee
+from common.accounts import ROLE_OFFICIAL
+from common.handler import api_handler, require_role
+from common.models import restrict_for_employee, to_api_employee
 
 
 def _scan_all():
@@ -58,6 +59,8 @@ def _scan_all():
 
 @api_handler
 def lambda_handler(event, context):
+    role = require_role(event)
+
     employees = []
     for item in _scan_all():
         employee = to_api_employee(item)
@@ -69,4 +72,12 @@ def lambda_handler(event, context):
         employees.append(employee)
 
     employees.sort(key=lambda employee: (employee['startDate'], employee['lastName']))
+
+    # Restricted last, after the archive filter above and the sort - both read
+    # fields the employee shape does not carry. Sorting the full objects and
+    # trimming afterwards keeps one ordering for both roles; trimming first would
+    # mean either two sort keys or two code paths.
+    if role != ROLE_OFFICIAL:
+        employees = [restrict_for_employee(employee) for employee in employees]
+
     return responses.ok({'employees': employees, 'count': len(employees)})

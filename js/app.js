@@ -2,10 +2,17 @@
  * Router, event wiring and form validation.
  *
  * Routes (hash-based, so views are linkable and the back button works):
- *   #/employees
+ *   #/login
+ *   #/directory                  employee role - read-only, everyone
+ *   #/employees                  officials role - the five routes below
  *   #/employees/new
  *   #/employees/:id/edit
  *   #/employees/:id/checklist
+ *
+ * Every route but #/login is behind guard(), which is a convenience and not a
+ * control. The control is server-side: an employee who edits their way past the
+ * guard reaches an officials screen whose every request comes back 403. See
+ * js/auth.js.
  */
 window.App = window.App || {};
 
@@ -17,6 +24,7 @@ window.App = window.App || {};
   var statusSlot = document.getElementById('app-status');
   var store = App.store;
   var ui = App.ui;
+  var auth = App.auth;
 
   var BASE_TITLE = 'Employee Management & Onboarding';
 
@@ -147,6 +155,80 @@ window.App = window.App || {};
     };
   }
 
+  /* ------------------------------------------------------------ session chip */
+
+  /*
+   * Who is signed in, and the way out. Lives in the page header rather than in
+   * #app because every render replaces #app wholesale, and a sign-out button
+   * that disappears for the duration of a fetch is a sign-out button people
+   * click twice.
+   */
+
+  var sessionSlot = document.getElementById('session-chip');
+  var brandLink = document.querySelector('.brand');
+
+  function paintSession() {
+    var session = auth.session();
+
+    if (!session) {
+      sessionSlot.innerHTML = '';
+      // The logo has to point somewhere the guard will not bounce, or clicking
+      // it from the login page flickers through a redirect back to itself.
+      if (brandLink) brandLink.setAttribute('href', '#/login');
+      return;
+    }
+
+    if (brandLink) brandLink.setAttribute('href', auth.home());
+
+    sessionSlot.innerHTML = '' +
+      '<span class="session-name">' + ui.escapeHtml(session.displayName) +
+        // Says which of the two views they are in, because the difference
+        // between them is mostly things that are absent - and an employee who
+        // cannot find the Add button should be able to see why.
+        (auth.isEmployee() ? ' <span class="session-role">employee view</span>' : '') +
+      '</span>' +
+      '<button class="btn-link" type="button" data-action="sign-out">Sign out</button>';
+  }
+
+  sessionSlot.addEventListener('click', function (event) {
+    if (!event.target.closest('[data-action="sign-out"]')) return;
+
+    auth.signOut();
+    paintSession();
+    announce('Signed out.');
+    navigate('#/login');
+  });
+
+  /*
+   * The message the login screen should open with, set by the handler below and
+   * consumed by renderLogin.
+   *
+   * It is a variable rather than a call to showError because of the ordering
+   * that made the original version invisible. showError writes to the banner,
+   * and the redirect that follows arrives as a hashchange - a task, not a
+   * microtask - so render() ran afterwards and its clearError() wiped the
+   * banner before anyone saw it. The only surviving copy was in the
+   * screen-reader live region, which is never cleared: assistive tech was told
+   * what happened and everybody else was dropped on a login page with no
+   * explanation at all.
+   *
+   * Handing the message to the view that renders last is what makes it stick.
+   */
+  var loginNotice = null;
+
+  /*
+   * The API rejected a token - it expired, or the signing key was rotated
+   * mid-session. store.js has already cleared the session by the time this
+   * runs; all that is left is to say so and get out of a view the user can no
+   * longer load.
+   */
+  auth.onExpired(function () {
+    paintSession();
+    loginNotice = 'Your session expired. Sign in again.';
+    announce(loginNotice);
+    navigate('#/login');
+  });
+
   /* ---------------------------------------------------------- request errors */
 
   /*
@@ -202,6 +284,12 @@ window.App = window.App || {};
     var raw = window.location.hash.replace(/^#\/?/, '');
     var segments = raw.split('/').filter(Boolean).map(decodeURIComponent);
 
+    // Both of these are matched before the fallthrough below, which sends
+    // everything it does not recognise to the officials list. A route added
+    // after that line is a route that never matches.
+    if (segments[0] === 'login') return { name: 'login' };
+    if (segments[0] === 'directory') return { name: 'directory' };
+
     if (segments[0] !== 'employees') return { name: 'list' };
     if (segments.length === 1) return { name: 'list' };
     if (segments[1] === 'new') return { name: 'new' };
@@ -211,11 +299,66 @@ window.App = window.App || {};
   }
 
   function navigate(hash) {
+    // Assigning the hash it already has fires no hashchange, so render() would
+    // never be called and the view would never paint. This comes up whenever
+    // the guard redirects to where the browser already is - a signed-out reload
+    // of #/login, most obviously.
+    if (window.location.hash === hash) {
+      render();
+      return;
+    }
     window.location.hash = hash;
+  }
+
+  /**
+   * Sends a caller to the only view their role can use, or returns false to
+   * mean "carry on".
+   *
+   * Four rules, in this order:
+   *   no session          -> the login page, whatever they asked for
+   *   session, on login   -> their home, so a reload does not re-ask
+   *   employee, elsewhere -> the directory
+   *   official, directory -> the employee list
+   *
+   * Worth being clear about what this is: a way of keeping people out of
+   * screens that would not work for them, not a security boundary. Nothing here
+   * is trusted by the API.
+   */
+  function guard(route) {
+    var session = auth.session();
+
+    if (!session) {
+      if (route.name === 'login') return false;
+      navigate('#/login');
+      return true;
+    }
+
+    if (route.name === 'login') {
+      navigate(auth.home());
+      return true;
+    }
+
+    if (auth.isEmployee() && route.name !== 'directory') {
+      navigate('#/directory');
+      return true;
+    }
+
+    if (auth.isOfficial() && route.name === 'directory') {
+      navigate('#/employees');
+      return true;
+    }
+
+    return false;
   }
 
   function render() {
     var route = parseHash();
+
+    // Before clearError, and before anything paints. A guard that redirects has
+    // nothing to say and no view to leave behind - and clearing the banner
+    // first would wipe the "your session expired" message on the way to the
+    // login screen that message is explaining.
+    if (guard(route)) return;
 
     // A banner belongs to the request that raised it, not to the next screen.
     clearError();
@@ -225,10 +368,109 @@ window.App = window.App || {};
     // the message before a screen reader ever reached it. Stale text is harmless:
     // a live region speaks when its contents change, not because they are there.
 
+    if (route.name === 'login') return renderLogin();
+    if (route.name === 'directory') return renderDirectory();
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
     if (route.name === 'edit') return renderForm(route.id);
     if (route.name === 'checklist') return renderChecklist(route.id);
+  }
+
+  /* ------------------------------------------------------------ login view */
+
+  function renderLogin() {
+    setTitle('Sign in');
+
+    // Consumed, not just read: an expiry notice belongs to the arrival that
+    // caused it, and would otherwise reappear on the next visit to this screen.
+    var notice = loginNotice;
+    loginNotice = null;
+
+    paint(ui.loginView(notice));
+    focusHeading();
+    wireLogin();
+  }
+
+  function wireLogin() {
+    var form = document.getElementById('login-form');
+    var submitting = false;
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      // The same guard the employee form uses: a second Enter while the first
+      // request is in flight would send a second login.
+      if (submitting) return;
+
+      var username = form.elements.username.value.trim();
+      var password = form.elements.password.value;
+
+      if (!username || !password) {
+        return failLogin('Enter your username and password.', username);
+      }
+
+      submitting = true;
+      document.getElementById('login-submit').disabled = true;
+
+      auth.signIn(username, password).then(function (session) {
+        submitting = false;
+        paintSession();
+        announce('Signed in as ' + session.displayName + '.');
+        navigate(auth.home());
+      }, function (error) {
+        submitting = false;
+        // Repaints rather than patching the DOM, so the password field is
+        // cleared - retyping it is the point of a failed login, and leaving a
+        // wrong one in place invites a second identical attempt.
+        failLogin(error.message, username);
+      });
+    });
+  }
+
+  function failLogin(message, username) {
+    paint(ui.loginView(message));
+
+    // Said out loud as well as shown. role="alert" on the message covers most
+    // screen readers, but focus has just been thrown back to a repainted form
+    // and announce() is the one channel that is not affected by that.
+    announce(message);
+
+    var form = document.getElementById('login-form');
+    form.elements.username.value = username || '';
+    // Focus the field they need to fix rather than the top of the page.
+    (username ? form.elements.password : form.elements.username).focus();
+
+    wireLogin();
+  }
+
+  /* -------------------------------------------------------- directory view */
+
+  /*
+   * The employee-role list. Same store call as renderList - the API decides
+   * what an employee token is shown, and this file does not filter anything.
+   * See EMPLOYEE_VISIBLE_FIELDS in common/models.py.
+   */
+  function renderDirectory() {
+    showLoading();
+
+    store.listEmployees().then(function (employees) {
+      setEmployees(employees);
+      setTitle('Employee Directory');
+      paint(ui.directoryView(employees, filters, facets));
+      refreshRows();
+      focusHeading();
+
+      document.getElementById('search').addEventListener('input', function (event) {
+        filters.search = event.target.value;
+        refreshRows();
+      });
+
+      document.getElementById('department-filter').addEventListener('change', function (event) {
+        filters.department = event.target.value;
+        refreshRows();
+      });
+
+      // No row handler. There is nothing on a directory row to click.
+    }, failLoad('Could not load the directory.'));
   }
 
   /* ------------------------------------------------------------- list view */
@@ -244,8 +486,12 @@ window.App = window.App || {};
       // The id is searchable now that it is something a person knows by heart -
       // "E1024" is exactly what someone would paste in from a payroll export,
       // and it used to be a UUID nobody could have typed.
+      // employee.email is absent for the employee role - the API does not send
+      // it - so it is coerced rather than concatenated raw. Without this the
+      // haystack reads "E1024 Priya Sharma undefined" and searching for "und"
+      // matches the entire directory.
       var haystack = (employee.id + ' ' + ui.fullName(employee) + ' ' +
-        employee.email).toLowerCase();
+        (employee.email || '')).toLowerCase();
       return haystack.indexOf(term) !== -1;
     });
   }
@@ -255,7 +501,11 @@ window.App = window.App || {};
     if (!tbody) return;
 
     var visible = applyFilters(loadedEmployees);
-    tbody.innerHTML = ui.employeeRows(visible);
+    // Which rows depends on who is signed in, and the two renderers differ in
+    // more than styling: directoryRows emits no actions cell and no data-id.
+    tbody.innerHTML = auth.isEmployee()
+      ? ui.directoryRows(visible)
+      : ui.employeeRows(visible);
     document.getElementById('record-count').textContent =
       ui.countLabel(visible.length, loadedEmployees.length);
   }
@@ -766,8 +1016,13 @@ window.App = window.App || {};
 
   window.addEventListener('hashchange', render);
 
+  paintSession();
+
   if (!window.location.hash) {
-    window.location.hash = '#/employees';
+    // Not '#/employees' any more. A signed-in official ends up there anyway,
+    // via the guard; a signed-out visitor would have landed on a view that
+    // immediately redirected, painting the list heading on the way past.
+    window.location.hash = auth.session() ? auth.home() : '#/login';
   } else {
     render();
   }

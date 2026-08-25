@@ -4,7 +4,15 @@
   "httpMethod": "POST",
   "pathParameters": null,
   "queryStringParameters": null,
-  "headers": { "Content-Type": "application/json" },
+  "headers": {
+    "Content-Type": "application/json"
+  },
   "body": "{\"firstName\":\"Priya\",\"lastName\":\"Sharma\",\"email\":\"priya.sharma@breville.com\",\"phone\":\"+61 412 883 016\",\"department\":\"Engineering\",\"jobTitle\":\"Software Engineer\",\"manager\":\"Santosh Kumar\",\"startDate\":\"2026-07-06\",\"employmentType\":\"Full-time\"}",
-  "isBase64Encoded": false
+  "isBase64Encoded": false,
+  "requestContext": {
+    "authorizer": {
+      "role": "official",
+      "username": "hr.admin"
+    }
+  }
 }

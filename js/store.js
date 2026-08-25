@@ -47,12 +47,20 @@ window.App = window.App || {};
    * happily on a 500, and response.json() rejects on an empty body - which is
    * exactly what a 204 from DELETE is.
    */
-  function request(method, path, body) {
+  function request(method, path, body, anonymous) {
     var options = { method: method, headers: {} };
 
     if (body !== undefined) {
       options.headers['Content-Type'] = 'application/json';
       options.body = JSON.stringify(body);
+    }
+
+    // Every route except POST /login is behind the authorizer, so the token goes
+    // on here rather than at each call site - this is the only fetch() in the
+    // app, which is what makes that a single line instead of eight.
+    if (!anonymous) {
+      var token = App.auth.token();
+      if (token) options.headers['Authorization'] = 'Bearer ' + token;
     }
 
     return fetch(App.API_BASE_URL + path, options).then(function (response) {
@@ -69,7 +77,20 @@ window.App = window.App || {};
           }
         }
 
-        if (!response.ok) throw apiError(response.status, payload);
+        if (!response.ok) {
+          // 401 is the one status that is about the session rather than about
+          // the request. It means the token expired, or the stack was
+          // redeployed with a new signing key while someone was logged in -
+          // either way retrying will not help and every other call is about to
+          // fail the same way. Handled once, here, rather than at seven call
+          // sites: clear the session and let app.js say so.
+          //
+          // 403 deliberately falls through to the caller. That is an employee
+          // touching a write endpoint - their session is fine, and signing them
+          // out for it would be a bug, not a safeguard.
+          if (response.status === 401 && !anonymous) App.auth.expire();
+          throw apiError(response.status, payload);
+        }
         return payload;
       });
     }, function (networkError) {
@@ -132,6 +153,22 @@ window.App = window.App || {};
   }
 
   App.store = {
+    /**
+     * Credentials in, signed token out. The only anonymous call in the app -
+     * it is where a token comes from, so it cannot carry one.
+     *
+     * Rejects with the usual apiError: 401 for bad credentials (message already
+     * worded for a human by src/handlers/login.py), 400 for a missing field.
+     * Note the `true` - without it the 401 handler above would fire on every
+     * failed login attempt and call expire() on a session that never existed.
+     */
+    login: function (username, password) {
+      return request('POST', '/login', {
+        username: username,
+        password: password
+      }, true);
+    },
+
     listEmployees: function () {
       // The { employees, count } envelope is an API detail; callers want the array.
       return request('GET', '/employees').then(function (payload) {

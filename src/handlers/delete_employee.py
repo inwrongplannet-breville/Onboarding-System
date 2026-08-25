@@ -30,7 +30,12 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
-from common.handler import api_handler, employee_id_param, is_condition_failure
+from common.handler import (
+    api_handler,
+    employee_id_param,
+    is_condition_failure,
+    require_official,
+)
 from common.keys import EXISTS, key
 from common.models import archive_state
 from common.repository import load_employee
@@ -38,6 +43,8 @@ from common.repository import load_employee
 
 @api_handler
 def lambda_handler(event, context):
+    require_official(event)
+
     employee_id = employee_id_param(event)
 
     # Consistent, because the stamp is computed from this read. An eventually

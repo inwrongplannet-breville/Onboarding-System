@@ -36,7 +36,13 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
-from common.handler import api_handler, employee_id_param, is_condition_failure, parse_body
+from common.handler import (
+    api_handler,
+    employee_id_param,
+    is_condition_failure,
+    parse_body,
+    require_official,
+)
 from common.keys import EXISTS, key
 from common.models import ARCHIVED_MESSAGE, EDITABLE_FIELDS, pick_editable, validate_employee
 from common.repository import load_archive_state, load_employee
@@ -90,6 +96,8 @@ def _profile_update(values, now):
 
 @api_handler
 def lambda_handler(event, context):
+    require_official(event)
+
     employee_id = employee_id_param(event)
     body = parse_body(event)
     values = pick_editable(body)

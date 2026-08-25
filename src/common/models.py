@@ -78,6 +78,42 @@ ARCHIVED_ONBOARDED = 'Onboarded'
 ARCHIVED_MESSAGE = 'This employee is archived. Their record is read-only.'
 
 
+# What the employee role is allowed to see of somebody else's record - the six
+# facts an internal staff directory carries.
+#
+# Everything absent from this list is absent for a reason. Contact details
+# (email, phone) and the reporting line (manager) are the parts that make a
+# directory feel like a leak; employmentType is contractual; and the checklist is
+# an HR working document - its comments are things like "chased payroll twice",
+# written by one official for another.
+#
+# `status` and `progress` are here and are not an oversight. Onboarding progress
+# is the one thing this app exists to show, and a directory that cannot say
+# whether someone has started yet is not worth signing in to.
+EMPLOYEE_VISIBLE_FIELDS = (
+    'id', 'firstName', 'lastName', 'department', 'jobTitle', 'startDate',
+    'status', 'progress',
+)
+
+
+def restrict_for_employee(employee):
+    """
+    The employee-role view of one API employee.
+
+    Built by naming what is included, never by deleting from the full object.
+    The difference matters the next time a field is added to the model: a
+    constructed dict leaves it invisible until somebody deliberately adds it
+    here, where a `del` list leaks it from the moment it exists until somebody
+    remembers. One of those fails safe.
+
+    Takes an already-built API employee rather than a raw item so that
+    list_employees can filter on `archived` first - see the note there.
+    """
+    if employee is None:
+        return None
+    return {field: employee[field] for field in EMPLOYEE_VISIBLE_FIELDS}
+
+
 def pick_editable(body):
     """Whitelist and trim. Anything not on the list is dropped, not rejected."""
     picked = {}

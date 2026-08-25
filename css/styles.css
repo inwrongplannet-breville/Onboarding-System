@@ -96,6 +96,37 @@ body {
   color: #aab2c0;
 }
 
+/*
+ * The header is a three-item flex row with space-between, so the chip sits at
+ * the right edge on its own and the env tag stays beside the brand. margin-left
+ * auto rather than a fourth spacer element.
+ */
+.session-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  font-size: 13px;
+  color: #aab2c0;
+}
+
+.session-chip:empty { display: none; }
+
+.session-name { color: #e6e9ef; }
+
+/* Not a badge - it names the view, and colouring it like a status would put it
+   in competition with the Pending/Onboarded badges in the table below. */
+.session-role {
+  color: #aab2c0;
+  font-size: 12px;
+}
+
+/* The header is dark, so the shared .btn-link accent red is unreadable on it. */
+.session-chip .btn-link {
+  color: #fff;
+  font-size: 13px;
+}
+
 /* ---- footer ---- */
 
 .app-footer {
@@ -487,4 +518,81 @@ input[type="checkbox"]:disabled + .item-label { opacity: 0.55; }
 .comment-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* ---- login ---- */
+
+/*
+ * The one view with no navigation, so it is centred rather than laid out
+ * against the left edge like every other page. Narrow on purpose: two inputs
+ * spanning 1040px read as a form that lost its other fields.
+ */
+.login-card {
+  max-width: 380px;
+  margin: 48px auto;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.login-card h1 { margin-bottom: 6px; }
+.login-card .subtitle { margin-bottom: 20px; }
+
+/* .form is max-width 640 and .form-grid is two columns; neither is right for a
+   single-column card, so the login form overrides both. */
+.login-card .form { max-width: none; }
+.login-card .field { margin-bottom: 14px; }
+
+.login-card .form-actions { margin-top: 18px; }
+.login-card .btn { width: 100%; }
+
+/*
+ * Above the fields rather than below the button. A message under a submit
+ * control is off-screen on a short viewport once the keyboard is up, and the
+ * whole point of it is being read before the second attempt.
+ */
+.login-error {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid #f0c4c4;
+  background: #fdecec;
+  color: #a01722;
+  font-size: 14px;
+}
+
+.login-hint {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.login-hint p { margin: 0 0 6px; }
+.login-hint p:last-child { margin-bottom: 0; }
+
+.login-hint code {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+/* ---- directory ---- */
+
+/*
+ * Says why the page is missing the controls someone may have been told about.
+ * Quiet rather than alarming - it is a statement of what this account is, not a
+ * warning that something went wrong.
+ */
+.view-note {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-size: 13px;
 }

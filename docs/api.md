@@ -15,8 +15,65 @@ export BASE_URL=$(aws cloudformation describe-stacks \
   --output text)
 ```
 
-All requests and responses are JSON. There is no authentication in Phase 2 — the API is public.
-Don't put real employee data in it.
+All requests and responses are JSON.
+
+## Authentication
+
+Every route except `POST /login` sits behind a Lambda authorizer and needs a bearer token:
+
+```bash
+export TOKEN=$(curl -s -X POST $BASE_URL/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"hr.admin","password":"onboard-2026"}' | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+
+curl -s $BASE_URL/employees -H "Authorization: Bearer $TOKEN"
+```
+
+`POST /login` takes `{username, password}` and returns:
+
+```json
+{ "token": "eyJhbGci...", "role": "official", "displayName": "HR Admin", "expiresIn": 28800 }
+```
+
+Wrong credentials are `401` with one generic message, whether the username exists or not.
+
+### Roles
+
+Two, carried as a claim inside the signed token — see `src/common/accounts.py`.
+
+| | `official` | `employee` |
+|---|---|---|
+| `GET /employees`, `GET /employees/{id}` | full employee object | restricted object, below |
+| `POST`, `PUT`, `PATCH`, `DELETE` | allowed | `403 Forbidden` |
+| Archived records | readable by id | `404`, same as the list already implies |
+
+The restricted object carries **only** `id`, `firstName`, `lastName`, `department`, `jobTitle`,
+`startDate`, `status` and `progress`. `email`, `phone`, `manager`, `employmentType` and the whole
+`checklist` are not sent — not blanked, not present. It is built by naming what goes in
+(`restrict_for_employee` in `src/common/models.py`), so a field added to the model later is private
+until somebody deliberately exposes it.
+
+### Status codes
+
+| | |
+|---|---|
+| `401 Unauthorized` | No token, a malformed one, a bad signature, an expired one, or one issued for another deployment. The session is over — sign in again. Emitted by API Gateway, not by a handler. |
+| `403 Forbidden` | A valid token whose role does not permit this. The session is fine; the action is not theirs. Also returned if a request somehow arrives with no authorizer context at all, which is a misconfiguration rather than a caller problem. |
+
+Tokens carry `iss` (`onboarding-system`) and `aud` (the stage name) and both are checked, so a token
+minted against `dev` is refused by `prod` even if the two stacks were deployed with the same key.
+
+`POST /login` is throttled at the gateway — 30 requests/second sustained, burst 10. That is a
+stage-wide ceiling rather than per-IP: it caps the bill and the guessing rate, it does not identify
+a caller.
+
+Only the origin in the stack's `AllowedOrigin` parameter may call this API from a browser
+(`http://localhost:8000` by default).
+
+The distinction is load-bearing for the frontend: `js/store.js` signs the user out on a 401 and
+passes a 403 through to the caller. Don't collapse them.
+
+Don't put real employee data in this stack — the credentials above are in a public repo.
 
 ## Employee object
 
@@ -81,8 +138,9 @@ in `js/store.js`.
 
 `comment` on a checklist item is HR's free-text note about that one step — "chased payroll twice,
 still no bank details". Always a string, `""` when nobody has written anything, capped at **500
-characters**. There is one note per item, not a thread: the API has no authentication, so there is
-no author to attribute a thread to.
+characters**. There is one note per item, not a thread — see
+[design.md](design.md#comments-on-checklist-items) for why. Employees never see comments at all;
+they are not in the restricted response.
 
 ## Errors
 

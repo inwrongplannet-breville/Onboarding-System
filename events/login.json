@@ -1,0 +1,12 @@
+{
+  "resource": "/login",
+  "path": "/login",
+  "httpMethod": "POST",
+  "pathParameters": null,
+  "queryStringParameters": null,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"username\": \"hr.admin\", \"password\": \"onboard-2026\"}",
+  "isBase64Encoded": false
+}

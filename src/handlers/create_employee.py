@@ -27,7 +27,7 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
-from common.handler import api_handler, is_condition_failure, parse_body
+from common.handler import api_handler, is_condition_failure, parse_body, require_official
 from common.keys import KEY_ATTRIBUTE, NOT_EXISTS, pk
 from common.models import (
     clean_employee_id,
@@ -41,6 +41,10 @@ from common.models import (
 
 @api_handler
 def lambda_handler(event, context):
+    # Before parse_body, so a read-only caller gets 403 about their role rather
+    # than 400 about a body that was never going to be written.
+    require_official(event)
+
     body = parse_body(event)
     values = pick_editable(body)
 

@@ -13,6 +13,10 @@ py -m http.server 8000
 Open `http://localhost:8000` with devtools on the **Network** tab, **Disable cache** and
 **Preserve log** both ticked.
 
+You land on the login page. Sign in as `hr.admin` / `onboard-2026` for everything from
+"Happy path" onwards — those sections are the officials console, unchanged. The role
+section below covers the other account.
+
 ## Prove the mock is gone
 
 This is the point of the phase, so check it first.
@@ -29,6 +33,58 @@ employee *records*. The enums, the status names and the progress arithmetic all 
 
 Now set Network to **Offline** and reload. The list must be **empty with an error banner**. If six
 people appear, something is still reading from local state and the phase isn't done.
+
+## Roles and the guard
+
+The split is enforced by the API, so the checks worth doing are the ones that prove the
+browser is not the thing enforcing it.
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Load `/` signed out | The login card. Not a flash of the employee list on the way past |
+| 2 | Type `#/employees`, `#/employees/new`, `#/employees/E1001/edit`, `#/employees/E1001/checklist` into the address bar, signed out | Every one lands on `#/login` |
+| 3 | Sign in with a wrong password | Inline message above the fields, password cleared, focus in the password box, and the message is announced |
+| 4 | Sign in as `employee` / `welcome-2026` | The directory: six columns, no Add button, no Edit/Checklist/Delete, no actions column at all |
+| 5 | As the employee, expand a row in the Network response for `GET /employees` | **No `email`, `phone`, `manager`, `employmentType` or `checklist` keys.** Absent, not empty — this is the check that matters, because the UI not drawing a field proves nothing |
+| 6 | As the employee, type the four officials hashes from step 2 | Every one lands on `#/directory` |
+| 7 | As the employee, search for `und` | No matches. (`applyFilters` builds its haystack from a field the employee response omits; without the coercion in `app.js` this matches every row) |
+| 8 | Sign in as `hr.admin` and check any request header | `Authorization: Bearer …`, and the preflight `OPTIONS` returns 200. A failed preflight shows up here as a CORS error rather than as a 401 |
+| 9 | Reload mid-session | Still signed in |
+| 10 | Sign out, then press Back | The login page, not the app |
+| 11 | Open a second tab | Signed out. `sessionStorage` is per tab, deliberately |
+
+### Prove the guard is not the control
+
+Signed in as `employee`, in the console:
+
+```js
+var s = JSON.parse(sessionStorage['onboarding.session']);
+s.role = 'official';                       // there is no such field any more
+sessionStorage['onboarding.session'] = JSON.stringify(s);
+location.hash = '#/employees';
+```
+
+**Nothing happens** — you stay in the directory. The role is read from the token's own payload,
+so there is no stored copy to edit. Adding one changes nothing.
+
+Now tamper with the token itself:
+
+```js
+var s = JSON.parse(sessionStorage['onboarding.session']);
+var p = s.token.split('.');
+p[1] = btoa(JSON.stringify(Object.assign(
+  JSON.parse(atob(p[1].replace(/-/g,'+').replace(/_/g,'/'))), { role: 'official' })))
+  .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+s.token = p.join('.');
+sessionStorage['onboarding.session'] = JSON.stringify(s);
+location.hash = '#/employees';
+```
+
+The officials shell renders for an instant, the first request comes back **401**, and you land
+back on the login page with **"Your session expired. Sign in again." shown on the form**. That
+message being visible is the point — it used to exist only in the screen-reader live region.
+
+That is the design: the browser picks the screen, the signature decides what the API does.
 
 ## Happy path
 
@@ -116,7 +172,26 @@ user.
 ## Cross-check
 
 ```bash
-curl https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev/employees
+export BASE_URL=https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev
+
+# No token: 401, before any handler runs.
+curl -s -o /dev/null -w '%{http_code}\n' $BASE_URL/employees
+
+export TOKEN=$(curl -s -X POST $BASE_URL/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"hr.admin","password":"onboard-2026"}' \
+  | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+
+curl -s $BASE_URL/employees -H "Authorization: Bearer $TOKEN"
 ```
 
 The browser and the API should agree. If they don't, the browser is caching — hard-refresh.
+
+One more worth running by hand, because it is the claim the whole feature rests on: take an
+employee token, base64-decode the middle segment, change `"role":"employee"` to
+`"official"`, re-encode it and send it. **401.** The signature does not cover the payload
+you just wrote.
+
+And the revocation check, since it is the only one there is. Note a working token, rotate the
+signing key (the one-liner in [README](../README.md#signing-in)), wait a minute for the authorizer
+cache to turn over, and send the same token again. **401.**

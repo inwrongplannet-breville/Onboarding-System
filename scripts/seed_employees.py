@@ -33,9 +33,21 @@ next to it works fine. The CLI is already a hard dependency here for reading the
 stack outputs, so leaning on it costs nothing and removes a dependency that is easy
 to not have.
 
+Seeding now signs in first. Every write route is behind the authorizer, so a
+script driving the public API needs a token like any other client - it posts the
+officials credentials to /login and carries the bearer token from there on. That
+follows from seeding through the API rather than around it, and it is worth
+keeping: if the login route or the authorizer breaks, the seed fails loudly
+instead of the browser being the first thing to find out.
+
+Credentials resolution, in order: --username/--password, then $ONBOARDING_USERNAME
+and $ONBOARDING_PASSWORD, then the demo officials account. --wipe needs no
+credentials at all - it goes at the table, not the API.
+
 Usage:
     py scripts/seed_employees.py --wipe --seed --yes
     py scripts/seed_employees.py --seed --base-url https://... /dev
+    py scripts/seed_employees.py --seed --username hr.admin --password ...
 
 Base URL resolution, in order: --base-url, $API_BASE_URL, then the ApiBaseUrl output
 of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolves
@@ -55,6 +67,12 @@ import urllib.request
 
 STACK_NAME = 'onboarding-system-dev'
 REGION = 'eu-north-1'
+
+# The demo officials account, matching src/common/accounts.py. Only a default -
+# --username/--password or the environment override it, which is what a stack
+# with real accounts would use.
+DEFAULT_USERNAME = 'hr.admin'
+DEFAULT_PASSWORD = 'onboard-2026'
 
 # (employee, [checklist item ids to tick]) - the varied progress from Phase 1, which
 # is what makes the list view's status filter and progress bars worth looking at.
@@ -139,10 +157,12 @@ class ApiError(Exception):
     pass
 
 
-def call(base_url, method, path, body=None):
+def call(base_url, method, path, body=None, token=None):
     """One request. Raises ApiError on any non-2xx so a failed seed is loud."""
     data = json.dumps(body).encode('utf-8') if body is not None else None
     headers = {'Content-Type': 'application/json'} if data else {}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
     request = urllib.request.Request(base_url + path, data=data, headers=headers, method=method)
 
     try:
@@ -154,6 +174,47 @@ def call(base_url, method, path, body=None):
         raise ApiError('{} {} -> {} {}'.format(method, path, error.code, detail)) from None
     except urllib.error.URLError as error:
         raise ApiError('Could not reach {}: {}'.format(base_url, error.reason)) from None
+
+
+def log_in(base_url, username, password):
+    """
+    An officials token, or a clear failure.
+
+    The 401 case is called out separately because it is the one a person is most
+    likely to hit and the least likely to diagnose from a status code: the stack
+    was deployed with different accounts, or the demo passwords were changed.
+    """
+    print('Signing in as {}...'.format(username))
+    try:
+        result = call(base_url, 'POST', '/login',
+                      {'username': username, 'password': password})
+    except ApiError as error:
+        if ' 401 ' in str(error):
+            raise ApiError(
+                'Login was refused for {}. Pass --username/--password, or set '
+                '$ONBOARDING_USERNAME and $ONBOARDING_PASSWORD.'.format(username)
+            ) from None
+        if ' 403 ' in str(error):
+            raise ApiError(
+                'POST /login was forbidden, which usually means the deployed stack '
+                'predates the login route. Deploy first: sam deploy.'
+            ) from None
+        raise
+
+    if result.get('role') != 'official':
+        raise ApiError(
+            'Signed in as {}, whose role is "{}". Seeding writes employees, which '
+            'needs an officials account.'.format(username, result.get('role'))
+        )
+
+    return result['token']
+
+
+def resolve_credentials(username, password):
+    return (
+        username or os.environ.get('ONBOARDING_USERNAME') or DEFAULT_USERNAME,
+        password or os.environ.get('ONBOARDING_PASSWORD') or DEFAULT_PASSWORD,
+    )
 
 
 def resolve_base_url(explicit):
@@ -316,18 +377,18 @@ def wipe(table_name, assume_yes):
     print('Wiped {} item(s).'.format(deleted))
 
 
-def seed(base_url):
+def seed(base_url, token):
     print('\nSeeding {} employees...'.format(len(FIXTURES)))
 
     for profile, done_items in FIXTURES:
-        created = call(base_url, 'POST', '/employees', profile)
+        created = call(base_url, 'POST', '/employees', profile, token=token)
         employee_id = created['id']
 
         for item_id in done_items:
             created = call(
                 base_url, 'PATCH',
                 '/employees/{}/checklist/{}'.format(employee_id, item_id),
-                {'done': True},
+                {'done': True}, token=token,
             )
 
         print('  {}  {:<18} {:<12} {}/{} {}'.format(
@@ -338,7 +399,7 @@ def seed(base_url):
             created['status'],
         ))
 
-    total = call(base_url, 'GET', '/employees')['count']
+    total = call(base_url, 'GET', '/employees', token=token)['count']
     print('\nDone. Table now holds {} employee(s).'.format(total))
 
 
@@ -351,6 +412,8 @@ def main():
     parser.add_argument('--yes', action='store_true', help='skip the wipe confirmation prompt')
     parser.add_argument('--base-url', help='API base URL, e.g. https://xxxx.execute-api.../dev')
     parser.add_argument('--table', help='DynamoDB table name, for --wipe')
+    parser.add_argument('--username', help='officials username for --seed')
+    parser.add_argument('--password', help='password for --username')
     args = parser.parse_args()
 
     if not args.wipe and not args.seed:
@@ -365,7 +428,9 @@ def main():
         if args.seed:
             base_url = resolve_base_url(args.base_url)
             print('API: {}'.format(base_url))
-            seed(base_url)
+
+            username, password = resolve_credentials(args.username, args.password)
+            seed(base_url, log_in(base_url, username, password))
     except ApiError as error:
         raise SystemExit('\nFAILED: {}'.format(error))
 

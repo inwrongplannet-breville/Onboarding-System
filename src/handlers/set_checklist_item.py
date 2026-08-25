@@ -45,6 +45,7 @@ from common.handler import (
     is_condition_failure,
     parse_body,
     path_param,
+    require_official,
 )
 from common.keys import EXISTS, key
 from common.models import ARCHIVED_MESSAGE, COMMENT_MAX_LENGTH, clean_comment
@@ -134,6 +135,8 @@ def _write_failure(employee_id, item_id):
 
 @api_handler
 def lambda_handler(event, context):
+    require_official(event)
+
     employee_id = employee_id_param(event)
     item_id = path_param(event, 'itemId')
     body = parse_body(event)

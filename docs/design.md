@@ -264,9 +264,11 @@ item, editable and clearable, capped at 500 characters.
 - **No new endpoint.** `PATCH /employees/{id}/checklist/{itemId}` already existed for the tick, and
   PATCH means *change the keys I sent*. `{"done": true}` leaves the comment alone, `{"comment": "…"}`
   leaves the tick alone, both together work, and `{}` is a `400` rather than a silent no-op.
-- **One note, not a thread.** A thread needs an author, and there is no authentication in this stack
-  to supply one. A list of anonymous comments is worse than a single note that whoever is looking
-  after this hire keeps current.
+- **One note, not a thread.** A thread needs an author, and when this was built there was no
+  authentication to supply one. There is now — the authorizer puts a username on every request —
+  but the decision stands on its own: a list of comments is a conversation, and what HR needs on
+  "chase the bank details" is one current answer, not a history of who chased. Only officials see
+  these at all; the employee response omits the checklist entirely.
 - **Cleared means removed.** An empty comment `REMOVE`s the attribute rather than storing `""`, so
   the two states in the table are "has a note" and "has no attribute" rather than three.
 - **The draft survives a repaint.** Every tick re-renders the whole checklist from the server's
@@ -454,14 +456,117 @@ version.
 
 ---
 
+## Auth: two roles, enforced server-side
+
+Two accounts, two views. Officials get the console that was already here; the `employee` role gets a
+read-only directory. What matters is where that split is enforced.
+
+**The browser is not trusted with it.** `POST /login` verifies a password against a PBKDF2 hash and
+returns an HS256 JWT carrying the role as a claim; a REQUEST authorizer verifies the signature on
+every other route and passes the role down in `requestContext.authorizer`. The signing key is only
+ever in two Lambdas' environments. So the role in `sessionStorage` decides which screen is drawn,
+and the signature decides what the API does — an employee who edits `"role":"employee"` into
+`"official"` reaches an officials screen where every request comes back 401 or 403. That is why the
+route guard in `js/app.js` is allowed to be twenty lines with no cryptography in it.
+
+Three decisions inside that worth recording:
+
+**The JWT is hand-written, not PyJWT** (`src/common/tokens.py`). `src/requirements.txt` is empty
+because boto3 ships in the Lambda runtime — no install step, no lockfile. One HMAC and two base64
+calls are not worth ending that. The trade is that PyJWT is audited and this is not, so the verify
+path is deliberately narrow: one algorithm, no `kid`, no JWK fetch, and `alg: none` rejected
+explicitly. Every one of those is a feature this system does not need and a hole if it is wrong.
+
+**The authorizer allows the whole API; the role check is in Python.** API Gateway will happily take
+a method-scoped policy — "allow GET, deny POST" — which sounds tighter. It puts authorization in an
+IAM document pytest cannot see, and authorizer results are cached against the token, so the cached
+policy is reused for a request to a different method. So `require_official()` is one line at the top
+of each writing handler instead, and `tests/test_roles.py` covers all four.
+
+**Restricting a read constructs a new object rather than deleting keys.** `restrict_for_employee`
+names the eight fields an employee may see. A `del` list would leak every field added to the model
+from the moment it exists until somebody remembers; this way a new field is private until somebody
+deliberately exposes it, and `tests/test_roles.py` asserts each hidden field individually so a
+leak names itself.
+
+**Two traps this hit, both worth knowing.** API Gateway generates the 401 itself when the authorizer
+rejects a token, and a gateway-generated response does not inherit the CORS headers the Lambdas set
+— so without the `GatewayResponses` block in `template.yaml`, a browser sees an opaque CORS error
+instead of the 401 and an expired session looks like an outage. And the CORS preflight must stay
+anonymous (`AddDefaultAuthorizerToCorsPreflight: false`): an `OPTIONS` request carries no
+`Authorization` header by definition, so authorizing it 401s every preflight.
+
+`caller_role()` returns `None` for a request with no identified caller, and `require_role()` turns
+that into a 403. It used to default to the employee role, which *sounded* like failing closed and
+was not: the employee role is not a closed door, it reads the whole staff directory. So a stack that
+lost its `Auth` block would have served every name, department, job title, start date and onboarding
+status to anyone who asked, with all tests still passing. That came out of the endpoint audit below,
+and it is the one finding that was a real hole rather than a weakness.
+
+### What the audit found
+
+Thirty-five forged tokens got nowhere — rewritten role and `sub` claims, stripped and swapped
+signatures, `alg: none`, duplicate JSON keys, missing `exp`. No bypass. What it did find was six
+things around the edges, all now fixed:
+
+| Finding | Fix |
+|---|---|
+| `caller_role` defaulted to a role that can read everything | Returns `None`; both readers call `require_role` |
+| Signing key was a plaintext Lambda env var, readable via `lambda:GetFunctionConfiguration` | Generated into Secrets Manager, fetched per cold start, `GetSecretValue` granted to two functions |
+| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; origin is now the `AllowedOrigin` parameter |
+| No revocation path | Rotating the secret invalidates everything within the 60s authorizer cache |
+| `api_arn()` returned `Resource: '*'` on an unparseable ARN | Raises; the request is refused |
+| No `iss`/`aud`, so a dev token worked against prod on a shared key | Both claims minted and checked |
+
+Two client-side ones came out of it too. The role is now read from the token's own payload rather
+than a separate `role` field in `sessionStorage`, so editing that field does nothing — tampering
+means tampering with the token, which the API answers with a 401. And the "your session expired"
+message now arrives as an inline error on the login form: it used to be written to the error banner,
+which the redirect's own `render()` then cleared, leaving the message alive only in the
+screen-reader live region. Assistive tech was told what happened and nobody else was.
+
+Two more came out of load-probing the deployed stack, and both are about the fact that Lambda
+concurrency is an **account-wide pool** — this account's ceiling is 10 executions:
+
+- **`/login` could starve the rest of the API.** It is the one route needing no credentials, so a
+  burst against it consumed the whole pool and left the authenticated endpoints returning 500 for
+  want of an execution slot — an unauthenticated denial of service against everything else, through
+  the one door that has to stay unlocked. `LoginFunction` now reserves 2 of the 10, which caps it
+  and guarantees it in the same move. The gateway throttle was also dropped to 5/s, so the API
+  sheds load as a clean 429 instead of letting through more than Lambda will run.
+- **Gateway 5XX responses carried no CORS headers.** Exactly the trap the 401 had: a throttled
+  burst reached the browser as an opaque CORS failure rather than a 500. `DEFAULT_5XX` now carries
+  them too.
+
+**Still open, and known.** The throttle is stage-wide rather than per-IP (WAF is a cost decision).
+Revocation is all-or-nothing — there is no per-user sign-out, because there are no per-user records.
+`employee` remains an account rather than a person. And 10 concurrent executions is low enough that
+ordinary use can hit it; the fix for that is a service-quota increase, not code.
+
+---
+
 ## Not built yet
 
 - **Document upload** (offer letter, ID proof) — a visible stub sits on the checklist page marking
   where it goes; the storage itself is S3 in a later phase.
-- **Who wrote a comment, and when** — the item stores `updatedAt`, but with no authentication there
-  is no author to record and the API does not return either. Revisit alongside auth.
-- **Auth** — no login, no roles, and the API is public. The `owner` field on checklist items is
-  display-only. Don't put real employee data in the dev stack.
+- **Who wrote a comment, and when** — the item stores `updatedAt`, and there is now an authenticated
+  username to record against it (`requestContext.authorizer.username`), but neither handler writes
+  it and the API does not return either. Cheap to add now that the caller has a name.
+- **Per-employee scoping** — the `employee` role sees the whole directory, not just their own
+  record. There is no link between a login and an employee number: `employee` is an account, not a
+  person. Giving each hire their own view means real user records, which is Cognito, not two
+  hard-coded accounts.
+- **Real credential storage** — the signing key now lives in Secrets Manager, but the two accounts
+  are still PBKDF2 hashes in `src/common/accounts.py` and the demo passwords are in a public README.
+  A Cognito user pool is where this goes. Don't put real employee data in the dev stack.
+- **Per-IP login rate limiting** — `POST /login` is throttled stage-wide at the gateway, which caps
+  the bill and the guessing rate but cannot tell one caller from another. Per-IP is a WAF rate-based
+  rule, which is a cost decision rather than a code one.
+- **Per-user session revocation** — rotating the signing key invalidates every session at once.
+  Revoking one person's needs per-user records, which is the Cognito item above.
+- **Per-item permissions** — the `owner` field on checklist items is still display-only. Officials
+  can tick IT's items, which is decision 2 below and unchanged; the role split is between officials
+  and employees, not within officials.
 - **Automated onboarding triggers** — notifications, IT setup request, HR alert. SNS/SQS, Phase 4.
 - **Pagination on `GET /employees`** — the Scan follows `LastEvaluatedKey` internally and returns
   everything in one response. Fine at this scale; revisit alongside the GSI if it ever isn't.

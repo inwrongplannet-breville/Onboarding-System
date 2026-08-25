@@ -1,10 +1,8 @@
 {
-  "resource": "/employees/{id}",
-  "path": "/employees/REPLACE-WITH-A-REAL-ID",
+  "resource": "/employees",
+  "path": "/employees",
   "httpMethod": "GET",
-  "pathParameters": {
-    "id": "REPLACE-WITH-A-REAL-ID"
-  },
+  "pathParameters": null,
   "queryStringParameters": null,
   "headers": {
     "Content-Type": "application/json"
@@ -13,8 +11,8 @@
   "isBase64Encoded": false,
   "requestContext": {
     "authorizer": {
-      "role": "official",
-      "username": "hr.admin"
+      "role": "employee",
+      "username": "employee"
     }
   }
 }

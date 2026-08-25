@@ -218,6 +218,9 @@ window.App = window.App || {};
         // navigation and is not read out, so the one field that explains why it
         // cannot be edited would be the one field nobody hears about.
         (config.readonly ? ' readonly' : '') +
+        // Only the login fields set this. A password manager cannot offer to
+        // fill or save a credential it has no way to identify.
+        (config.autocomplete ? ' autocomplete="' + config.autocomplete + '"' : '') +
         (config.placeholder ? ' placeholder="' + escapeHtml(config.placeholder) + '"' : '') +
         '>';
     }
@@ -246,6 +249,132 @@ window.App = window.App || {};
     escapeHtml: escapeHtml,
     fullName: fullName,
     formatDate: formatDate,
+
+    /**
+     * The sign-in screen. `error` is the message from a rejected attempt, or
+     * null on first paint.
+     *
+     * Uses field() like the employee form so the label wiring, the hint and the
+     * error slot behave identically - a login page that invents its own markup
+     * is a login page whose error message is the one thing nobody hears.
+     */
+    loginView: function (error) {
+      return '' +
+        '<div class="login-card">' +
+          '<h1 tabindex="-1">Sign in</h1>' +
+          '<p class="subtitle">Employee onboarding at Breville.</p>' +
+
+          // role="alert" so the message is announced when it appears. It sits
+          // inside the card rather than in the page-level banner because it
+          // belongs to these two inputs - and the banner is cleared on every
+          // render, which is exactly when a failed login repaints.
+          (error
+            ? '<p class="login-error" role="alert">' + escapeHtml(error) + '</p>'
+            : '') +
+
+          '<form class="form" id="login-form" novalidate>' +
+            field({
+              name: 'username',
+              label: 'Username',
+              required: true,
+              // Tells a password manager which field is which. Without it, the
+              // browser cannot offer to fill or save either one.
+              autocomplete: 'username'
+            }) +
+            field({
+              name: 'password',
+              label: 'Password',
+              type: 'password',
+              required: true,
+              autocomplete: 'current-password'
+            }) +
+            '<div class="form-actions">' +
+              '<button class="btn btn-primary" type="submit" id="login-submit">Sign in</button>' +
+            '</div>' +
+          '</form>' +
+
+          // There is no sign-up and no password reset, so the accounts have to
+          // be discoverable from the page itself. See src/common/accounts.py.
+          '<div class="login-hint">' +
+            '<p><strong>Demo accounts</strong></p>' +
+            '<p>Officials &mdash; <code>hr.admin</code> / <code>onboard-2026</code><br>' +
+            'Employee &mdash; <code>employee</code> / <code>welcome-2026</code></p>' +
+          '</div>' +
+        '</div>';
+    },
+
+    /** Directory rows - the employee-role counterpart of employeeRows. */
+    directoryRows: function (employees) {
+      if (!employees.length) {
+        return '<tr><td class="empty-state" colspan="6">' +
+          'No employees match this view.</td></tr>';
+      }
+
+      return employees.map(function (employee) {
+        // No data-id and no actions cell. There is nothing on this row to act
+        // on, so there is nothing for a handler to read an id from.
+        return '' +
+          '<tr>' +
+            '<td class="id-cell">' + escapeHtml(employee.id) + '</td>' +
+            '<td class="name-cell">' + escapeHtml(fullName(employee)) + '</td>' +
+            '<td>' + escapeHtml(employee.department) + '</td>' +
+            '<td>' + escapeHtml(employee.jobTitle) + '</td>' +
+            '<td>' + escapeHtml(formatDate(employee.startDate)) + '</td>' +
+            '<td>' + progressCell(employee) + ' ' + statusBadge(employee) + '</td>' +
+          '</tr>';
+      }).join('');
+    },
+
+    /**
+     * The employee-role view: everyone, read-only.
+     *
+     * A separate function rather than a `readOnly` flag on listView. listView
+     * carries the Add button, an actions column and a delete control on every
+     * row, and threading a flag through all of that leaves this view one
+     * forgotten conditional away from rendering an Edit link. Two functions
+     * cannot make that mistake - the markup for editing an employee does not
+     * exist in this one.
+     *
+     * The columns are the fields the API sends this role. It does not send
+     * email, phone, manager, employment type or the checklist at all - see
+     * EMPLOYEE_VISIBLE_FIELDS in common/models.py - so nothing is being hidden
+     * here, and nothing would leak if this file were wrong.
+     */
+    directoryView: function (employees, filters, facets) {
+      return '' +
+        '<div class="page-head">' +
+          '<div>' +
+            '<h1 tabindex="-1">Employee Directory</h1>' +
+            '<p class="subtitle" id="record-count" aria-live="polite"></p>' +
+          '</div>' +
+        '</div>' +
+
+        '<p class="view-note">You are signed in with employee access. This ' +
+          'directory is read-only.</p>' +
+
+        '<div class="filters">' +
+          // No status filter. Sorting the whole company by who is behind on
+          // their paperwork is HR's view of this data, not this one's; the
+          // badge on the row is the fact, and a filter would make it a list.
+          '<input id="search" type="search" placeholder="Search by ID or name"' +
+            ' aria-label="Search the directory by employee ID or name"' +
+            ' value="' + escapeHtml(filters.search || '') + '">' +
+          '<select id="department-filter" aria-label="Filter by department">' +
+            '<option value="">All departments</option>' +
+            options(facets.departments, filters.department) +
+          '</select>' +
+        '</div>' +
+
+        '<table>' +
+          '<thead><tr>' +
+            '<th scope="col">Employee ID</th>' +
+            '<th scope="col">Name</th><th scope="col">Department</th>' +
+            '<th scope="col">Job title</th><th scope="col">Start date</th>' +
+            '<th scope="col">Onboarding</th>' +
+          '</tr></thead>' +
+          '<tbody id="employee-rows"></tbody>' +
+        '</table>';
+    },
 
     /** Table rows only - re-rendered on its own when filters change. */
     employeeRows: function (employees) {

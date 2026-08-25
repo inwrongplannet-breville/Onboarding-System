@@ -1,6 +1,6 @@
 {
   "info": {
-    "name": "Employee Onboarding - Phase 2",
+    "name": "Employee Onboarding - Phase 4 (two roles)",
     "description": "CRUD backend on AWS. Set the collection variable `baseUrl` to the ApiBaseUrl stack output. Run the folder top to bottom: Create mints a fresh employee number into `runEmployeeId`, captures the created id into `employeeId`, and every later request reuses it. The employee number is the DynamoDB partition key, so a rerun cannot reuse the last run's number.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
@@ -24,9 +24,75 @@
     {
       "key": "lowerEmployeeId",
       "value": ""
+    },
+    {
+      "key": "username",
+      "value": "hr.admin",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "onboard-2026",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "employeeToken",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
+    {
+      "name": "Sign in - run this first (stores {{token}})",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', function () { pm.response.to.have.status(200); });",
+              "var body = pm.response.json();",
+              "pm.test('role is official', function () {",
+              "  pm.expect(body.role).to.eql('official');",
+              "});",
+              "// Every other request in this collection inherits it as bearer auth.",
+              "pm.collectionVariables.set('token', body.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "login"
+          ]
+        },
+        "description": "Exchanges the demo officials credentials for a signed JWT and stores it as {{token}}. Every request below inherits it as bearer auth, so this one has to run first - on its own, or as the first request of a collection run.\n\nA 403 here means the deployed stack predates the login route. A 401 means the stack is not using the demo accounts; change {{username}} and {{password}}."
+      }
+    },
     {
       "name": "Create employee",
       "event": [
@@ -795,6 +861,207 @@
           "raw": "{\n  \"firstName\": \"Ghost\",\n  \"lastName\": \"Record\",\n  \"email\": \"ghost@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Should not exist\",\n  \"startDate\": \"2026-09-01\",\n  \"employmentType\": \"Intern\"\n}"
         }
       }
+    },
+    {
+      "name": "Employee role - read-only",
+      "description": "Signs in as the employee account and shows both halves of the role split: a trimmed read and a refused write. Run in order.",
+      "item": [
+        {
+          "name": "Sign in as employee (stores {{employeeToken}})",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var body = pm.response.json();",
+                  "pm.test('role is employee', function () {",
+                  "  pm.expect(body.role).to.eql('employee');",
+                  "});",
+                  "pm.collectionVariables.set('employeeToken', body.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"employee\",\n  \"password\": \"welcome-2026\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "login"
+              ]
+            }
+          }
+        },
+        {
+          "name": "List as employee - no email, phone, manager or checklist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var employees = pm.response.json().employees;",
+                  "pm.test('there is something to check', function () {",
+                  "  pm.expect(employees.length).to.be.above(0);",
+                  "});",
+                  "// Absent, not blank. See restrict_for_employee in common/models.py.",
+                  "['email', 'phone', 'manager', 'employmentType', 'checklist',",
+                  " 'archived', 'archivedAs', 'archivedAt'].forEach(function (field) {",
+                  "  pm.test('does not send ' + field, function () {",
+                  "    employees.forEach(function (employee) {",
+                  "      pm.expect(employee).to.not.have.property(field);",
+                  "    });",
+                  "  });",
+                  "});",
+                  "pm.test('still sends onboarding progress', function () {",
+                  "  pm.expect(employees[0]).to.have.property('progress');",
+                  "  pm.expect(employees[0]).to.have.property('status');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create as employee - 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403, not 401 - the session is fine, the action is not theirs',",
+                  "  function () { pm.response.to.have.status(403); });",
+                  "pm.test('names the reason', function () {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('Forbidden');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"employeeId\": \"E9999\",\n  \"firstName\": \"Should\",\n  \"lastName\": \"NotExist\",\n  \"email\": \"should.not@breville.com\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Engineer\",\n  \"startDate\": \"2026-09-01\",\n  \"employmentType\": \"Full-time\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees"
+              ]
+            }
+          }
+        },
+        {
+          "name": "No token at all - 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 from the gateway, before any handler runs',",
+                  "  function () { pm.response.to.have.status(401); });",
+                  "// The GatewayResponses block in template.yaml is what puts CORS",
+                  "// headers on this. Without it the browser reports a CORS error",
+                  "// instead of the 401 - see docs/design.md.",
+                  "pm.test('carries CORS headers', function () {",
+                  "  pm.response.to.have.header('Access-Control-Allow-Origin');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees"
+              ]
+            }
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  }
 }

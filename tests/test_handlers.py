@@ -25,35 +25,56 @@ VALID = {
 }
 
 
+# Every request below is made as an officials account, because that is what these
+# tests were written to exercise: the CRUD behaviour of the six routes. The
+# authorizer is what puts this on a real request, and it is not in the loop here -
+# these call the handlers directly, which is the same seam `sam local invoke`
+# uses.
+#
+# It is a constant rather than a fixture because nothing mutates it: handlers only
+# ever read requestContext. Role *enforcement* is tested separately, at the bottom
+# of this file, where the point is the employee context rather than the CRUD.
+OFFICIAL = {'requestContext': {'authorizer': {'role': 'official', 'username': 'hr.admin'}}}
+EMPLOYEE = {'requestContext': {'authorizer': {'role': 'employee', 'username': 'employee'}}}
+
+
+def signed_in(event, context=None):
+    """One request event, carrying an authorizer context. Officials by default."""
+    return dict(event, **(context or OFFICIAL))
+
+
 def body(response):
     return json.loads(response['body'])
 
 
-def post(handlers, payload):
-    return handlers['create_employee']({'body': json.dumps(payload)}, None)
+def post(handlers, payload, context=None):
+    return handlers['create_employee'](
+        signed_in({'body': json.dumps(payload)}, context), None)
 
 
-def get(handlers, employee_id):
-    return handlers['get_employee']({'pathParameters': {'id': employee_id}}, None)
+def get(handlers, employee_id, context=None):
+    return handlers['get_employee'](
+        signed_in({'pathParameters': {'id': employee_id}}, context), None)
 
 
-def put(handlers, employee_id, payload):
-    return handlers['update_employee'](
-        {'pathParameters': {'id': employee_id}, 'body': json.dumps(payload)}, None)
+def put(handlers, employee_id, payload, context=None):
+    return handlers['update_employee'](signed_in(
+        {'pathParameters': {'id': employee_id}, 'body': json.dumps(payload)}, context), None)
 
 
-def delete(handlers, employee_id):
-    return handlers['delete_employee']({'pathParameters': {'id': employee_id}}, None)
+def delete(handlers, employee_id, context=None):
+    return handlers['delete_employee'](
+        signed_in({'pathParameters': {'id': employee_id}}, context), None)
 
 
-def patch(handlers, employee_id, item_id, done):
-    return patch_raw(handlers, employee_id, item_id, {'done': done})
+def patch(handlers, employee_id, item_id, done, context=None):
+    return patch_raw(handlers, employee_id, item_id, {'done': done}, context)
 
 
-def patch_raw(handlers, employee_id, item_id, payload):
-    return handlers['set_checklist_item'](
+def patch_raw(handlers, employee_id, item_id, payload, context=None):
+    return handlers['set_checklist_item'](signed_in(
         {'pathParameters': {'id': employee_id, 'itemId': item_id},
-         'body': json.dumps(payload)}, None)
+         'body': json.dumps(payload)}, context), None)
 
 
 def item_of(employee, item_id):
@@ -72,8 +93,12 @@ def tick_everything(handlers, employee_id):
         assert patch(handlers, employee_id, item['id'], True)['statusCode'] == 200
 
 
-def listed_ids(handlers):
-    return [e['id'] for e in body(handlers['list_employees']({}, None))['employees']]
+def listed_ids(handlers, context=None):
+    return [e['id'] for e in body(listing(handlers, context))['employees']]
+
+
+def listing(handlers, context=None):
+    return handlers['list_employees'](signed_in({}, context), None)
 
 
 # The employee id is the partition key now, so two creates in one test collide
@@ -116,7 +141,7 @@ def test_create_rejects_invalid_input_before_writing_anything(handlers):
     response = post(handlers, {'email': 'nope'})
     assert response['statusCode'] == 400
     assert 'email' in body(response)['error']['fields']
-    assert body(handlers['list_employees']({}, None))['count'] == 0
+    assert body(listing(handlers))['count'] == 0
 
 
 def test_create_rejects_a_department_outside_the_enum(handlers):
@@ -133,7 +158,7 @@ def test_create_ignores_a_checklist_supplied_by_the_caller(handlers):
 
 
 def test_create_rejects_a_body_that_is_not_json(handlers):
-    response = handlers['create_employee']({'body': 'not json'}, None)
+    response = handlers['create_employee'](signed_in({'body': 'not json'}), None)
     assert response['statusCode'] == 400
 
 
@@ -162,7 +187,7 @@ def test_create_requires_an_employee_id(handlers):
     response = post(handlers, {k: v for k, v in VALID.items() if k != 'employeeId'})
     assert response['statusCode'] == 400
     assert 'employeeId' in body(response)['error']['fields']
-    assert body(handlers['list_employees']({}, None))['count'] == 0
+    assert body(listing(handlers))['count'] == 0
 
 
 @pytest.mark.parametrize('bad', [
@@ -178,7 +203,7 @@ def test_create_rejects_a_malformed_employee_id(handlers, bad):
     response = post(handlers, dict(VALID, employeeId=bad))
     assert response['statusCode'] == 400
     assert 'employeeId' in body(response)['error']['fields']
-    assert body(handlers['list_employees']({}, None))['count'] == 0
+    assert body(listing(handlers))['count'] == 0
 
 
 @pytest.mark.parametrize('bad', [1024, None, ['E1024'], {'id': 'E1024'}])
@@ -273,7 +298,7 @@ def test_two_employees_may_now_share_a_work_email(handlers):
                                  firstName='Someone', lastName='Else'))
 
     assert second['statusCode'] == 201
-    assert body(handlers['list_employees']({}, None))['count'] == 2
+    assert body(listing(handlers))['count'] == 2
 
 
 def test_an_employee_can_be_edited_onto_an_email_another_one_holds(handlers):
@@ -305,7 +330,7 @@ def test_get_leaks_no_internal_attributes(handlers):
 # ------------------------------------------------------------------------ list
 
 def test_list_is_empty_before_anything_is_created(handlers):
-    result = body(handlers['list_employees']({}, None))
+    result = body(listing(handlers))
     assert result == {'employees': [], 'count': 0}
 
 
@@ -313,7 +338,7 @@ def test_list_returns_every_employee_with_their_checklist(handlers):
     create(handlers, email='a@breville.com', startDate='2026-07-06')
     create(handlers, email='b@breville.com', startDate='2026-08-10')
 
-    result = body(handlers['list_employees']({}, None))
+    result = body(listing(handlers))
     assert result['count'] == 2
     assert all(len(employee['checklist']) == 8 for employee in result['employees'])
 
@@ -322,7 +347,7 @@ def test_list_is_sorted_by_start_date(handlers):
     create(handlers, lastName='Later', email='later@breville.com', startDate='2026-09-01')
     create(handlers, lastName='Earlier', email='earlier@breville.com', startDate='2026-07-06')
 
-    names = [e['lastName'] for e in body(handlers['list_employees']({}, None))['employees']]
+    names = [e['lastName'] for e in body(listing(handlers))['employees']]
     assert names == ['Earlier', 'Later']
 
 
@@ -355,7 +380,7 @@ def test_update_of_an_unknown_id_is_404_and_creates_no_ghost_record(handlers):
     # Without the condition expression, UpdateItem would upsert a half-employee
     # with no checklist attribute behind it.
     assert put(handlers, 'does-not-exist', VALID)['statusCode'] == 404
-    assert body(handlers['list_employees']({}, None))['count'] == 0
+    assert body(listing(handlers))['count'] == 0
 
 
 def test_update_rejects_an_impossible_date_before_writing(handlers):
@@ -675,7 +700,7 @@ def test_the_list_count_matches_the_employees_it_returns(handlers):
     create(handlers, email='keep@breville.com')
     archive(handlers, create(handlers, email='gone@breville.com')['id'])
 
-    result = body(handlers['list_employees']({}, None))
+    result = body(listing(handlers))
     assert result['count'] == len(result['employees']) == 1
 
 
@@ -771,7 +796,7 @@ def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
 def test_the_full_lifecycle_from_docs_api_md(handlers):
     employee_id = create(handlers)['id']
 
-    assert handlers['list_employees']({}, None)['statusCode'] == 200
+    assert listing(handlers)['statusCode'] == 200
     assert get(handlers, employee_id)['statusCode'] == 200
     assert patch(handlers, employee_id, 'offer-letter', True)['statusCode'] == 200
     assert patch(handlers, employee_id, 'not-a-thing', True)['statusCode'] == 404
@@ -790,7 +815,7 @@ def test_every_response_carries_cors_headers(handlers):
     # The Phase 3 trap: a browser refuses the response without these.
     employee_id = create(handlers)['id']
     for response in (get(handlers, employee_id),
-                     handlers['list_employees']({}, None),
+                     listing(handlers),
                      delete(handlers, employee_id),
                      get(handlers, employee_id)):
         assert response['headers']['Access-Control-Allow-Origin'] == '*'

@@ -26,6 +26,21 @@ os.environ.setdefault('AWS_SECRET_ACCESS_KEY', 'testing')
 os.environ.setdefault('AWS_SECURITY_TOKEN', 'testing')
 os.environ.setdefault('AWS_SESSION_TOKEN', 'testing')
 
+# The login route and the authorizer read this at call time. A fixed value rather
+# than a random one so a token minted in one test is verifiable in another, and
+# obviously not a real key so nobody is tempted to reuse it.
+os.environ.setdefault('JWT_SECRET', 'test-signing-key-not-for-any-deployment')
+
+# The `aud` claim tokens are minted for and checked against. Set here because
+# common/tokens.py refuses to guess it - a default is what lets two deployments
+# share an audience, which is the thing `aud` exists to stop.
+os.environ.setdefault('STAGE', 'dev')
+
+# Read by common/responses.py for the CORS header. '*' keeps the existing
+# assertions honest about what the tests are checking, which is presence rather
+# than policy - the deployed value comes from the AllowedOrigin parameter.
+os.environ.setdefault('ALLOWED_ORIGIN', '*')
+
 HANDLER_MODULES = (
     'handlers.create_employee',
     'handlers.get_employee',
@@ -33,6 +48,12 @@ HANDLER_MODULES = (
     'handlers.update_employee',
     'handlers.delete_employee',
     'handlers.set_checklist_item',
+    # Neither of these touches DynamoDB, so neither needs the table this fixture
+    # builds. They are here so that every route is reachable through one
+    # `handlers` dict - a test that logs in and then calls an endpoint reads as
+    # one flow rather than importing half of it a different way.
+    'handlers.login',
+    'handlers.authorizer',
 )
 
 
