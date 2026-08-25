@@ -531,9 +531,16 @@ concurrency is an **account-wide pool** — this account's ceiling is 10 executi
 - **`/login` could starve the rest of the API.** It is the one route needing no credentials, so a
   burst against it consumed the whole pool and left the authenticated endpoints returning 500 for
   want of an execution slot — an unauthenticated denial of service against everything else, through
-  the one door that has to stay unlocked. `LoginFunction` now reserves 2 of the 10, which caps it
-  and guarantees it in the same move. The gateway throttle was also dropped to 5/s, so the API
-  sheds load as a clean 429 instead of letting through more than Lambda will run.
+  the one door that has to stay unlocked.
+
+  The obvious fix — reserved concurrency on `LoginFunction` — **cannot be applied on this account**.
+  Lambda rejects any reservation that would drop unreserved concurrency below 10, and the account's
+  total limit *is* 10, so reserving even 1 fails the deploy (it did; the stack rolled back). What
+  fixes it instead is the gateway throttle, dropped to 5/s: at ~300ms per login that caps the
+  function at roughly 1.5 concurrent executions, so it cannot drain the pool no matter what is
+  aimed at it, and the excess is shed as 429s before Lambda is asked. The direction still missing is
+  the guarantee — nothing reserves login a slot when the authenticated endpoints are busy — and that
+  needs the quota raised to at least 11.
 - **Gateway 5XX responses carried no CORS headers.** Exactly the trap the 401 had: a throttled
   burst reached the browser as an opaque CORS failure rather than a 500. `DEFAULT_5XX` now carries
   them too.

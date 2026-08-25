@@ -231,18 +231,29 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: handlers.login.lambda_handler
-      # Two of this account's ten concurrent executions, reserved.
+      # No ReservedConcurrentExecutions, and the reason is a hard constraint
+      # rather than a preference.
       #
-      # This is the fix for something the load probe turned up. Concurrency is an
-      # account-wide pool shared by every function, and /login is the one route
-      # that needs no credentials - so a burst against it could consume the whole
-      # pool and leave the authenticated endpoints returning 500 for lack of an
-      # execution slot. An unauthenticated denial of service against everything
-      # else, from the one door that has to stay unlocked.
+      # The problem it would solve is real: concurrency is an account-wide pool,
+      # /login is the one route needing no credentials, and a burst against it
+      # can consume every slot and leave the authenticated endpoints failing for
+      # want of an execution - an unauthenticated denial of service against
+      # everything else, through the one door that has to stay unlocked.
       #
-      # Reserving cuts both ways on purpose: login can never take more than two,
-      # and the other eight are never taken from it.
-      ReservedConcurrentExecutions: 2
+      # Reserving is how you fence that off, and it cannot be done here. Lambda
+      # refuses any reservation that would take unreserved concurrency below 10,
+      # and this account's *total* limit is 10 - so reserving even 1 is rejected:
+      #
+      #   Specified ReservedConcurrentExecutions for function decreases
+      #   account's UnreservedConcurrentExecution below its minimum value of [10]
+      #
+      # Reserving N needs an account limit of N + 10. Until that quota is raised,
+      # the ThrottlingRateLimit of 5/s on POST /login above is the mitigation and
+      # it is a decent one: at ~300ms per login that caps this function at about
+      # 1.5 concurrent executions, so it cannot drain the pool whatever load is
+      # aimed at it. The gateway sheds the excess as 429s before Lambda is ever
+      # asked. What is lost is the other direction - nothing *guarantees* login a
+      # slot when the authenticated endpoints are busy.
       Environment:
         Variables:
           JWT_SECRET_ARN: !Ref JwtSecret
