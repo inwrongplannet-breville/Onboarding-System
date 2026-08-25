@@ -30,15 +30,15 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
-from common.handler import api_handler, is_condition_failure, path_param
-from common.keys import pk
+from common.handler import api_handler, employee_id_param, is_condition_failure
+from common.keys import EXISTS, key
 from common.models import archive_state
 from common.repository import load_employee
 
 
 @api_handler
 def lambda_handler(event, context):
-    employee_id = path_param(event, 'id')
+    employee_id = employee_id_param(event)
 
     # Consistent, because the stamp is computed from this read. An eventually
     # consistent Query can hand back a checklist one tick behind, and that tick
@@ -66,7 +66,7 @@ def _stamp(employee_id, state):
 
     try:
         table.update_item(
-            Key={'PK': pk(employee_id)},
+            Key=key(employee_id),
             UpdateExpression=('SET #archivedAs = :archivedAs, #archivedAt = :archivedAt, '
                               '#updatedAt = :updatedAt'),
             ExpressionAttributeNames={
@@ -79,7 +79,7 @@ def _stamp(employee_id, state):
                 ':archivedAt': now,
                 ':updatedAt': now,
             },
-            # attribute_exists(PK) for the same reason PUT carries it - UpdateItem
+            # EXISTS for the same reason PUT carries it - UpdateItem
             # upserts, and an archive of a missing id would otherwise conjure an
             # employee out of nothing but a stamp.
             #
@@ -88,7 +88,7 @@ def _stamp(employee_id, state):
             # thing and whose history says another. The loser fails here and the
             # caller still gets a 200, because from its side the employee is
             # archived either way.
-            ConditionExpression='attribute_exists(PK) AND attribute_not_exists(#archivedAs)',
+            ConditionExpression=EXISTS + ' AND attribute_not_exists(#archivedAs)',
         )
     except ClientError as error:
         if not is_condition_failure(error):

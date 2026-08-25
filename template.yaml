@@ -27,9 +27,10 @@ Resources:
 
   # ---------------------------------------------------------------- data store
   #
-  # One item per employee, keyed by PK alone. The checklist is a list attribute on
-  # that item, so there is nothing to sort within a partition and no second kind of
-  # item to tell apart - the sort key this table used to carry is gone.
+  # One item per employee, keyed by employeeKey alone. The checklist is a list
+  # attribute on that item, so there is nothing to sort within a partition and no
+  # second kind of item to tell apart - the sort key this table used to carry is
+  # gone.
   #
   # Still AWS::DynamoDB::Table rather than AWS::Serverless::SimpleTable, which
   # would now fit the key schema. SimpleTable exposes only PrimaryKey,
@@ -50,11 +51,15 @@ Resources:
     UpdateReplacePolicy: Delete
     Properties:
       BillingMode: PAY_PER_REQUEST
+      # Must match KEY_ATTRIBUTE in src/common/keys.py. Renaming it is a key-schema
+      # change, which CloudFormation can only do by replacing the table - which is
+      # why this resource deliberately has no TableName. See
+      # docs/database-design.md#deploying-a-schema-change.
       AttributeDefinitions:
-        - AttributeName: PK
+        - AttributeName: employeeKey
           AttributeType: S
       KeySchema:
-        - AttributeName: PK
+        - AttributeName: employeeKey
           KeyType: HASH
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false

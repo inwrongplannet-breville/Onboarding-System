@@ -12,13 +12,13 @@ the list endpoint hides them: "removed" means off the list, and a record nobody
 can read is not an archive, it is a slower delete.
 """
 from common import responses
-from common.handler import api_handler, path_param
+from common.handler import api_handler, employee_id_param
 from common.repository import load_employee
 
 
 @api_handler
 def lambda_handler(event, context):
-    employee_id = path_param(event, 'id')
+    employee_id = employee_id_param(event)
     employee = load_employee(employee_id)
 
     if employee is None:

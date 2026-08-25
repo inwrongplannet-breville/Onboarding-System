@@ -12,12 +12,18 @@ _profile_update.
 
 The condition expression is load-bearing too: UpdateItem *upserts* by default, so
 a PUT to an unknown id would happily create a half-employee with no checklist
-behind it.
+behind it. That is what the EXISTS half of PROFILE_GUARD is for.
 
 An archived employee is refused with a 409 - see handlers/delete_employee for why
 the record freezes. The check happens once, as a condition on the write itself, so
 an archive landing mid-request cannot be overwritten; _guard_failure then reads
 back to say which half of the condition fired.
+
+There is no rename here, and there cannot be. `employeeId` is the partition key,
+and an UpdateItem naming a different Key does not move an item - it upserts a new
+one and leaves the original in place. So the id is absent from EDITABLE_FIELDS
+like the checklist is, and for a harder reason: the whitelist protects the
+checklist from being flattened, and it protects the table from being forked.
 
 This used to have a second, transactional write path for when the email changed,
 moving a uniqueness guard item in step with the profile. Both are gone: there is
@@ -30,14 +36,14 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
-from common.handler import api_handler, is_condition_failure, parse_body, path_param
-from common.keys import pk
+from common.handler import api_handler, employee_id_param, is_condition_failure, parse_body
+from common.keys import EXISTS, key
 from common.models import ARCHIVED_MESSAGE, EDITABLE_FIELDS, pick_editable, validate_employee
 from common.repository import load_archive_state, load_employee
 
 
 # The employee has to exist and must not be archived.
-PROFILE_GUARD = 'attribute_exists(PK) AND attribute_not_exists(#archivedAs)'
+PROFILE_GUARD = EXISTS + ' AND attribute_not_exists(#archivedAs)'
 
 
 def _guard_failure(employee_id):
@@ -84,7 +90,7 @@ def _profile_update(values, now):
 
 @api_handler
 def lambda_handler(event, context):
-    employee_id = path_param(event, 'id')
+    employee_id = employee_id_param(event)
     body = parse_body(event)
     values = pick_editable(body)
 
@@ -97,7 +103,7 @@ def lambda_handler(event, context):
 
     try:
         table.update_item(
-            Key={'PK': pk(employee_id)},
+            Key=key(employee_id),
             UpdateExpression=expression,
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values_map,

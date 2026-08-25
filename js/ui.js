@@ -189,7 +189,9 @@ window.App = window.App || {};
     // empty description is ignored; attaching it only once a message appears is
     // how that message ends up never announced.
     var errorId = 'error-' + config.name;
-    var shared = ' aria-describedby="' + errorId + '" aria-invalid="false"' +
+    var hintId = 'hint-' + config.name;
+    var shared = ' aria-describedby="' + errorId +
+      (config.hint ? ' ' + hintId : '') + '" aria-invalid="false"' +
       (config.required ? ' aria-required="true"' : '');
     var control;
 
@@ -212,14 +214,29 @@ window.App = window.App || {};
       control = '<input id="' + config.name + '" name="' + config.name + '"' +
         ' type="' + (config.type || 'text') + '"' +
         ' value="' + escapeHtml(config.value || '') + '"' + shared +
+        // readonly, never disabled. A disabled input is skipped by keyboard
+        // navigation and is not read out, so the one field that explains why it
+        // cannot be edited would be the one field nobody hears about.
+        (config.readonly ? ' readonly' : '') +
         (config.placeholder ? ' placeholder="' + escapeHtml(config.placeholder) + '"' : '') +
         '>';
     }
 
+    // Sits between the control and the error line, and is wired into
+    // aria-describedby above so it is read with the field rather than passed
+    // over. Static guidance - the error text is a separate element that starts
+    // empty.
+    var hint = config.hint
+      ? '<p class="field-hint" id="' + hintId + '">' + escapeHtml(config.hint) + '</p>'
+      : '';
+
     return '' +
-      '<div class="field' + (config.full ? ' full' : '') + '" data-field="' + config.name + '">' +
+      '<div class="field' + (config.full ? ' full' : '') +
+        (config.readonly ? ' is-readonly' : '') +
+        '" data-field="' + config.name + '">' +
         '<label for="' + config.name + '">' + escapeHtml(config.label) + required + '</label>' +
         control +
+        hint +
         '<p class="error-text" id="' + errorId +
           '" data-error-for="' + config.name + '"></p>' +
       '</div>';
@@ -233,7 +250,7 @@ window.App = window.App || {};
     /** Table rows only - re-rendered on its own when filters change. */
     employeeRows: function (employees) {
       if (!employees.length) {
-        return '<tr><td class="empty-state" colspan="6">' +
+        return '<tr><td class="empty-state" colspan="7">' +
           'No employees match this view.</td></tr>';
       }
 
@@ -245,6 +262,7 @@ window.App = window.App || {};
 
         return '' +
           '<tr data-id="' + escapeHtml(employee.id) + '">' +
+            '<td class="id-cell">' + escapeHtml(employee.id) + '</td>' +
             '<td class="name-cell">' + escapeHtml(fullName(employee)) +
               '<small>' + escapeHtml(employee.email) + '</small></td>' +
             '<td>' + escapeHtml(employee.department) + '</td>' +
@@ -287,8 +305,8 @@ window.App = window.App || {};
         '</div>' +
 
         '<div class="filters">' +
-          '<input id="search" type="search" placeholder="Search by name or email"' +
-            ' aria-label="Search employees by name or email"' +
+          '<input id="search" type="search" placeholder="Search by ID, name or email"' +
+            ' aria-label="Search employees by employee ID, name or email"' +
             ' value="' + escapeHtml(filters.search || '') + '">' +
           '<select id="department-filter" aria-label="Filter by department">' +
             '<option value="">All departments</option>' +
@@ -302,6 +320,7 @@ window.App = window.App || {};
 
         '<table>' +
           '<thead><tr>' +
+            '<th scope="col">Employee ID</th>' +
             '<th scope="col">Name</th><th scope="col">Department</th>' +
             '<th scope="col">Job title</th><th scope="col">Start date</th>' +
             '<th scope="col">Onboarding</th>' +
@@ -327,6 +346,24 @@ window.App = window.App || {};
 
         '<form class="form" id="employee-form" novalidate>' +
           '<div class="form-grid">' +
+            // First, because it is the record's identity and the thing that has
+            // to be right before anything else matters. Read-only when editing:
+            // it is the DynamoDB partition key, and the API has no way to change
+            // it - offering an editable box would promise a rename that cannot
+            // happen. Still submitted (readonly, not disabled), but
+            // store.updateEmployee drops it.
+            field({
+              name: 'employeeId',
+              label: 'Employee ID',
+              value: isEdit ? data.id : '',
+              required: true,
+              full: true,
+              readonly: isEdit,
+              placeholder: 'e.g. E1024',
+              hint: isEdit
+                ? 'An employee ID cannot be changed once the record exists.'
+                : 'Letters, digits and hyphens. This becomes the permanent id for this record.'
+            }) +
             field({ name: 'firstName', label: 'First name', value: data.firstName, required: true }) +
             field({ name: 'lastName', label: 'Last name', value: data.lastName, required: true }) +
             field({ name: 'email', label: 'Work email', type: 'email', value: data.email, required: true, placeholder: 'name@breville.com' }) +
@@ -413,6 +450,7 @@ window.App = window.App || {};
             '<div class="progress-bar" id="progress-bar" style="width:' + p.percent + '%"></div>' +
           '</div>' +
           '<dl class="summary-grid">' +
+            '<div><dt>Employee ID</dt><dd>' + escapeHtml(employee.id) + '</dd></div>' +
             '<div><dt>Start date</dt><dd>' + escapeHtml(formatDate(employee.startDate)) + '</dd></div>' +
             '<div><dt>Manager</dt><dd>' + escapeHtml(employee.manager || '-') + '</dd></div>' +
             '<div><dt>Employment type</dt><dd>' + escapeHtml(employee.employmentType || '-') + '</dd></div>' +

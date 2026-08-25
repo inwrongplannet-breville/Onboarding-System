@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Employee Onboarding - Phase 2",
-    "description": "CRUD backend on AWS. Set the collection variable `baseUrl` to the ApiBaseUrl stack output. Run the folder top to bottom: Create captures `employeeId` into a collection variable, and every later request reuses it.",
+    "description": "CRUD backend on AWS. Set the collection variable `baseUrl` to the ApiBaseUrl stack output. Run the folder top to bottom: Create mints a fresh employee number into `runEmployeeId`, captures the created id into `employeeId`, and every later request reuses it. The employee number is the DynamoDB partition key, so a rerun cannot reuse the last run's number.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -16,6 +16,14 @@
     {
       "key": "runEmail",
       "value": ""
+    },
+    {
+      "key": "runEmployeeId",
+      "value": ""
+    },
+    {
+      "key": "lowerEmployeeId",
+      "value": ""
     }
   ],
   "item": [
@@ -27,7 +35,10 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "// Work emails are unique now, so the run needs an address nobody holds.",
+              "// The employee number is the partition key, so a rerun would 409 on the number",
+              "// the last run took. Mint a fresh one, inside the 20-character limit.",
+              "pm.collectionVariables.set('runEmployeeId', 'PM' + String(Date.now()).slice(-8));",
+              "// Work emails are not unique, but a fresh address keeps the run readable.",
               "pm.collectionVariables.set('runEmail', 'postman.run+' + Date.now() + '@breville.com');"
             ]
           }
@@ -39,7 +50,7 @@
             "exec": [
               "pm.test('201 Created', () => pm.response.to.have.status(201));",
               "const body = pm.response.json();",
-              "pm.test('has a server-generated id', () => pm.expect(body.id).to.be.a('string').and.not.empty);",
+              "pm.test('the id is the employee number we sent', () => pm.expect(body.id).to.eql(pm.collectionVariables.get('runEmployeeId')));",
               "pm.test('starts with 8 unticked checklist items', () => {",
               "  pm.expect(body.checklist).to.have.lengthOf(8);",
               "  pm.expect(body.checklist.every(i => i.done === false)).to.be.true;",
@@ -69,7 +80,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 412 883 016\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"employeeId\": \"{{runEmployeeId}}\",\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 412 883 016\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
         }
       }
     },
@@ -118,7 +129,7 @@
               "    .forEach(k => pm.expect(body).to.have.property(k));",
               "});",
               "pm.test('leaks no internal attributes', () => {",
-              "  ['PK','SK','employeeId','entityType'].forEach(k => pm.expect(body).to.not.have.property(k));",
+              "  ['employeeKey','PK','SK','employeeId','entityType'].forEach(k => pm.expect(body).to.not.have.property(k));",
               "});"
             ]
           }
@@ -360,6 +371,7 @@
               "pm.test('200 OK', () => pm.response.to.have.status(200));",
               "const body = pm.response.json();",
               "pm.test('id was not overwritten', () => pm.expect(body.id).to.eql(pm.collectionVariables.get('employeeId')));",
+              "pm.test('employeeId in the body did not rename the record', () => pm.expect(body.id).to.not.eql('RENAMED'));",
               "pm.test('checklist in the body was ignored', () => pm.expect(body.checklist).to.have.lengthOf(8));"
             ]
           }
@@ -385,7 +397,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"id\": \"hacked\",\n  \"checklist\": [],\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"id\": \"hacked\",\n  \"employeeId\": \"RENAMED\",\n  \"checklist\": [],\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Sharma\",\n  \"email\": \"{{runEmail}}\",\n  \"phone\": \"+61 400 000 000\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Senior Software Engineer\",\n  \"manager\": \"Santosh Kumar\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
         }
       }
     },
@@ -466,7 +478,95 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Twin\",\n  \"email\": \"{{runEmail}}\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+          "raw": "{\n  \"employeeId\": \"{{runEmployeeId}}T\",\n  \"firstName\": \"Priya\",\n  \"lastName\": \"Twin\",\n  \"email\": \"{{runEmail}}\",\n  \"department\": \"Engineering\",\n  \"jobTitle\": \"Software Engineer\",\n  \"startDate\": \"2026-07-06\",\n  \"employmentType\": \"Full-time\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Duplicate employee ID - 409 (the guarantee the key change buys)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "const body = pm.response.json();",
+              "pm.test('names the field so the form can paint it', () => {",
+              "  pm.expect(body.error.code).to.eql('Conflict');",
+              "  pm.expect(body.error.fields).to.have.property('employeeId');",
+              "});",
+              "// The point of the condition expression: PutItem overwrites by default, so",
+              "// without it this call would have replaced a real person and their history.",
+              "pm.sendRequest(pm.variables.replaceIn('{{baseUrl}}/employees/{{employeeId}}'), (err, res) => {",
+              "  pm.test('the original employee is untouched', () => {",
+              "    pm.expect(res.json().firstName).to.eql('Priya');",
+              "  });",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/employees",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employeeId\": \"{{runEmployeeId}}\",\n  \"firstName\": \"Someone\",\n  \"lastName\": \"Else\",\n  \"email\": \"someone.else@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Coordinator\",\n  \"startDate\": \"2026-09-01\",\n  \"employmentType\": \"Intern\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Get by id in the wrong case - 200 (ids are folded before the lookup)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('lowerEmployeeId', pm.collectionVariables.get('employeeId').toLowerCase());"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "// People type employee numbers; they never typed UUIDs. A correct id in the",
+              "// wrong case must not 404 against a record that plainly exists.",
+              "pm.test('resolves to the same employee', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('employeeId')));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/employees/{{lowerEmployeeId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "employees",
+            "{{lowerEmployeeId}}"
+          ]
         }
       }
     },
@@ -504,7 +604,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Never\",\n  \"lastName\": \"Started\",\n  \"email\": \"never.started@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Coordinator\",\n  \"startDate\": \"2026-02-30\",\n  \"employmentType\": \"Intern\"\n}"
+          "raw": "{\n  \"employeeId\": \"{{runEmployeeId}}D\",\n  \"firstName\": \"Never\",\n  \"lastName\": \"Started\",\n  \"email\": \"never.started@breville.com\",\n  \"department\": \"HR\",\n  \"jobTitle\": \"Coordinator\",\n  \"startDate\": \"2026-02-30\",\n  \"employmentType\": \"Intern\"\n}"
         }
       }
     },

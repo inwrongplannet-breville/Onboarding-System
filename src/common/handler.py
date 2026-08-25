@@ -11,6 +11,7 @@ import logging
 from botocore.exceptions import ClientError
 
 from common import responses
+from common.models import clean_employee_id
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -64,6 +65,24 @@ def path_param(event, name):
     if not value:
         raise BadRequest('Missing path parameter: ' + name + '.')
     return value
+
+
+def employee_id_param(event):
+    """
+    The {id} path parameter, normalised the same way the create form normalises
+    it.
+
+    This exists because the id in the URL is now the employee number rather than
+    a UUID, and people type employee numbers. The stored key is upper-cased at
+    creation, so without the same fold here a perfectly correct
+    /employees/e1024 would 404 against a record that plainly exists - and it
+    would do it on GET, PUT, PATCH and DELETE alike.
+
+    Note this only folds case and trims; it does not validate the shape. An id
+    that could never exist simply misses, and "no employee with id ..." is the
+    honest answer to a lookup for one.
+    """
+    return clean_employee_id(path_param(event, 'id'))
 
 
 def is_condition_failure(error):

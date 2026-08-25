@@ -12,14 +12,14 @@ written a millisecond earlier by the same caller, and consistent reads cost twic
 as much.
 """
 from common.db import table
-from common.keys import pk
+from common.keys import key
 from common.models import to_api_employee
 
 
 def load_employee(employee_id, consistent=False):
     """The full API employee, or None if there is none."""
     result = table.get_item(
-        Key={'PK': pk(employee_id)},
+        Key=key(employee_id),
         ConsistentRead=consistent,
     )
     return to_api_employee(result.get('Item'))
@@ -44,7 +44,7 @@ def load_archive_state(employee_id):
     stale read of that lets an edit land on an archived record.
     """
     result = table.get_item(
-        Key={'PK': pk(employee_id)},
+        Key=key(employee_id),
         ProjectionExpression='employeeId, #archivedAs',
         ExpressionAttributeNames={'#archivedAs': 'archivedAs'},
         ConsistentRead=True,

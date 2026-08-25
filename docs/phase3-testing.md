@@ -55,8 +55,15 @@ Each step feeds the next, so run them in order.
 | 8a | Open the archived employee's URL directly (`#/employees/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
 | 8b | Open the archived employee's edit URL (`#/employees/<id>/edit`) | the read-only archived page, not the form |
 | 8c | Re-add someone on the archived employee's work email | `201` — nothing reserves the address any more. You now have two records on one mailbox, which is the accepted cost of dropping the guard item |
+| 8d | Re-add someone on the archived employee's **employee number** | `409`. The item is still in the table, so the number is still taken — the opposite of 8c, and the difference is exactly what the partition key can and cannot enforce |
 | 9 | Hand-type `#/employees/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
-| 10 | Deep-link `#/employees/<uuid>/checklist` in a fresh tab | loads directly; proves the router handles UUIDs |
+| 10 | Deep-link `#/employees/E1003/checklist` in a fresh tab | loads directly. Employee numbers are typeable, so this is now a link someone can write by hand |
+| 11 | Add someone using an employee number that already exists | `409`, and the message lands **under the Employee ID input**, not in the page banner. Nothing is created, and the existing record keeps its checklist |
+| 11a | Add someone with `e1024` while `E1024` exists | also `409` — ids are upper-cased before the write, so case cannot smuggle in a second record for one person |
+| 11b | Add someone with `E 1024` or a 30-character id | `400` under the same input, before anything is written |
+| 11c | Open an existing employee's edit form | the Employee ID box is filled, greyed and read-only, with "An employee ID cannot be changed once the record exists." under it. Saving leaves the id alone |
+| 11d | Hand-type `#/employees/e1001/checklist` in the wrong case | loads. The path id is folded before the lookup, on every route |
+| 11e | Search the list for `E1003` | the row appears. The id column is searchable alongside name and email |
 
 ## Failure drills
 

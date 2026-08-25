@@ -5,26 +5,37 @@ Writes one item: the profile fields plus the eight checklist entries embedded as
 list attribute. One employee is one item, so there is nothing to keep atomic
 across items and nothing to transact - a single conditional PutItem does it.
 
-This used to be a ten-item TransactWriteItems: a profile row, eight CHK# rows and
-an email uniqueness guard in its own partition. The guard is gone, and with it the
-only thing enforcing one employee per work email - DynamoDB can enforce uniqueness
-on a partition key and nothing else, and the partition key here is a UUID. A
-duplicate work email is now possible and will not be rejected.
+The id comes from the caller now. HR types the employee number on the form and it
+becomes the partition key, where it used to be a UUID minted here. That turns the
+`NOT_EXISTS` condition below from a formality into the feature: it
+was guarding against a UUID collision nobody would ever see, and it now enforces
+one record per employee number - the only uniqueness DynamoDB can actually give
+you, since it can only be had on a partition key.
+
+So a duplicate employee number is a 409 that names the field, and the form paints
+it under the input. The trade is that the id is fixed at creation and cannot be
+edited afterwards; see EDITABLE_FIELDS in common/models.py.
+
+Note what this still does *not* guarantee. The old ten-item TransactWriteItems
+carried an email uniqueness guard in its own partition; that item is gone and the
+key change does not bring it back. One employee per number, yes. One employee per
+work email, no - two records may still share a mailbox.
 """
 from datetime import datetime, timezone
-from uuid import uuid4
 
 from botocore.exceptions import ClientError
 
 from common import responses
 from common.db import table
 from common.handler import api_handler, is_condition_failure, parse_body
-from common.keys import pk
+from common.keys import KEY_ATTRIBUTE, NOT_EXISTS, pk
 from common.models import (
+    clean_employee_id,
     new_checklist_items,
     pick_editable,
     to_api_employee,
     validate_employee,
+    validate_employee_id,
 )
 
 
@@ -33,16 +44,22 @@ def lambda_handler(event, context):
     body = parse_body(event)
     values = pick_editable(body)
 
+    # Not part of pick_editable, and deliberately not: that whitelist is what PUT
+    # uses too, and the id must never be reachable from an update body.
+    employee_id = clean_employee_id(body.get('employeeId'))
+
     errors = validate_employee(values)
+    id_error = validate_employee_id(employee_id)
+    if id_error:
+        errors['employeeId'] = id_error
     if errors:
         return responses.bad_request('Employee details are not valid.', errors)
 
-    employee_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
     item = dict(values)
     item.update({
-        'PK': pk(employee_id),
+        KEY_ATTRIBUTE: pk(employee_id),
         'entityType': 'Employee',
         'employeeId': employee_id,
         'createdAt': now,
@@ -56,15 +73,21 @@ def lambda_handler(event, context):
     try:
         table.put_item(
             Item=item,
-            # Guards against a UUID collision. Astronomically unlikely, but the
-            # alternative is a silent overwrite of a real person - and PutItem
-            # overwrites by default, so leaving this off is not a smaller risk,
-            # it is a different one.
-            ConditionExpression='attribute_not_exists(PK)',
+            # The uniqueness guarantee, and the reason the id belongs in the key.
+            # PutItem overwrites by default, so without this a second hire typed
+            # in under an existing employee number would silently replace a real
+            # person and their entire onboarding history.
+            ConditionExpression=NOT_EXISTS,
         )
     except ClientError as error:
         if is_condition_failure(error):
-            return responses.conflict('That employee id already exists.')
+            # `fields` so the message lands under the Employee ID input rather
+            # than in the page-level banner - it is a problem with one thing the
+            # user typed, and they need to know which.
+            return responses.conflict(
+                'Employee ID ' + employee_id + ' is already taken.',
+                {'employeeId': 'That employee ID is already in use.'},
+            )
         raise
 
     employee = to_api_employee(item)
