@@ -92,12 +92,17 @@ employeeKey = EMP#<employeeId>
   "startDate":      "2026-07-06",
   "employmentType": "Full-time",        // Full-time | Contract | Intern
 
+  "personalEmail":  "priya@example.com", // the employee's own; absent until they fill it in
+  "address":        "12 Smith Street",   // the employee's own; absent until they fill it in
+
   "createdAt":      "2026-08-24T14:12:07Z",
   "updatedAt":      "2026-08-24T14:12:09Z",
 
   "archivedAs":     "Onboarding Cancelled",   // absent while active
   "archivedAt":     "2026-08-24T14:20:00Z",   // absent while active
 
+  // Note what is NOT here: documents. There is no `documents` attribute, and that
+  // is deliberate rather than pending - see the section below.
   "checklist": [                              // 8 entries, in CHECKLIST_TEMPLATE order
     {
       "itemId":    "offer-letter",
@@ -152,6 +157,9 @@ there is no partition to query.
 | `POST /employees` | `PutItem` with `attribute_not_exists(employeeKey)` | — |
 | `PUT /employees/{id}` | `UpdateItem` + consistent `GetItem` for the response | **strong** on the re-read |
 | `PATCH .../checklist/{itemId}` | `UpdateItem` on nested paths + consistent `GetItem` | **strong** on the re-read |
+| `PATCH /employees/{id}/contact` | `UpdateItem` (`SET`/`REMOVE` on up to 3 attributes) + consistent `GetItem` | **strong** on the re-read |
+| `GET /employees/{id}/documents` | **nothing** — S3 only | — |
+| `POST /employees/{id}/documents/{slot}` | consistent `GetItem` (exists? archived?) | **strong** |
 | `DELETE /employees/{id}` | consistent `GetItem` → `UpdateItem` → consistent `GetItem` | **strong** |
 
 **Why `PUT` and `PATCH` read consistently and `GET` does not.** Reads are eventually consistent by
@@ -192,6 +200,9 @@ grants no read actions at all, which would push the delete handler to full CRUD.
 | `UpdateEmployeeFunction` | `UpdateItem`, `GetItem` |
 | `DeleteEmployeeFunction` | `GetItem`, `UpdateItem` — **no `DeleteItem`** |
 | `SetChecklistItemFunction` | `UpdateItem`, `GetItem` |
+| `UpdateOwnContactFunction` | `UpdateItem`, `GetItem` |
+| `GetDocumentsFunction` | none — S3 only |
+| `RequestDocumentUploadFunction` | `GetItem` |
 
 `DeleteEmployeeFunction` having no `DeleteItem` is the point, and it matters more now than it did:
 one stray `DeleteItem` would take an employee's checklist and every note on it in a single call.
@@ -384,6 +395,9 @@ on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry
 | `POST` a duplicate work email | **`201`** — was `409` before this design |
 | `PATCH` an archived employee | `409` |
 | `PUT` an archived employee | `409` |
+| `PATCH .../contact` an archived employee | `409` |
+| `PATCH .../contact` naming HR-owned fields | those keys dropped; the record unchanged apart from the three it owns |
+| `PATCH .../contact` on an unknown id | `404`, and **no item created** — `UpdateItem` upserts, so the condition expression is what prevents a half-employee |
 | Second `DELETE` | `200`, keeps the first stamp |
 
 **IAM.** Seeding issues one `POST` and 21 `PATCH`es through the narrowed per-function roles with no
@@ -392,3 +406,37 @@ on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry
 One closing note for reviewers: `describe-table` now says almost nothing about this design. The
 embedded `checklist` is invisible to it, where previously the shape could at least be inferred from
 `SK` being a range key. This file is where the layout lives.
+
+---
+
+## Documents are not in this table
+
+Uploaded documents live in S3 at `employees/<employeeId>/<slot>`, and **nothing about them is stored
+here** — no filename, no size, no "has a resume" flag. `GET /employees/{id}/documents` reads S3
+directly, three `HeadObject` calls, and `GET /employees/{id}` does not mention documents at all.
+
+The reason is not storage cost, it is that **there would be no trustworthy writer for the copy.**
+Only two things could maintain a `documents` map:
+
+1. **The browser, confirming after its upload.** That endpoint would also let an employee *assert* a
+   document exists that does not — and a document's presence is precisely the evidence that the
+   employee supplied it. That is a security regression, not a consistency one.
+2. **An S3 event notification into another Lambda.** Correct, and asynchronous: HR could still load
+   the page inside the window between the object landing and the notification being handled, and see
+   stale state anyway. A whole new function, role and log group to remove three `HeadObject` calls.
+
+So S3 is the only thing that knows, and any copy here would be a cache with no correct invalidation.
+Three in-region `HeadObject`s are cheaper than the strongly-consistent `GetItem` that
+`PATCH /employees/{id}/contact` already pays for its response.
+
+Two consequences worth knowing:
+
+- **Archiving needs no document step.** `DELETE /employees/{id}` touches nothing in S3, and the
+  objects survive with the record they belong to — which is the point of archiving rather than
+  deleting. Nothing has to be kept in sync, so nothing can be forgotten. The flip side is that
+  archived documents are never cleaned up; there is no lifecycle rule that could express "N days
+  after this record was archived", and that is a stated non-goal.
+- **A documents column on the employee list would force a rethink.** That would be three `HeadObject`
+  calls per employee inside the `Scan` that builds `GET /employees`. If that is ever wanted, it is
+  the point at which a denormalised flag on the item starts to earn its keep — and the same point at
+  which the `doneCount` denormalisation in the Scan note above starts to.

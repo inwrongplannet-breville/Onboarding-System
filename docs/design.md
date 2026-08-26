@@ -11,6 +11,7 @@ Everything about how this thing is built and why. For getting it running, see th
 - [Phase 3 — integration](#phase-3--integration)
 - [Design decisions worth knowing](#design-decisions-worth-knowing)
 - [Status of testing](#status-of-testing)
+- [Documents: S3, presigned, employee-owned](#documents-s3-presigned-employee-owned)
 - [Not built yet](#not-built-yet)
 - [Data-model decisions from the review](#data-model-decisions-from-the-review)
 
@@ -42,11 +43,12 @@ index.html          page shell, #app mount point, #app-error banner slot
 css/styles.css      structure only, no visual polish
 js/
   config.js         API_BASE_URL - the one value that changes per environment
-  store.js          six fetch() calls to API Gateway  <-- the only data source
+  auth.js           the signed-in session: the token, and the claims read out of it
+  store.js          every fetch() to API Gateway  <-- the only data source
   ui.js             pure render functions (state in, HTML string out)
   app.js            hash router, event wiring, validation, error handling
 
-template.yaml       SAM: DynamoDB table, six Lambdas, API Gateway
+template.yaml       SAM: DynamoDB table, nine Lambdas, API Gateway
 samconfig.toml       committed, so `sam deploy` needs no arguments
 src/
   common/           keys, db clients, validation, reads, response helpers, checklist template
@@ -72,11 +74,17 @@ comes last.
 Routes are linkable and the back button works:
 
 ```
-#/employees                      employee list
+#/login                          sign in
+#/me                             employee role - their own record, and only theirs
+#/employees                      officials - employee list
 #/employees/new                  add form
 #/employees/:id/edit             edit form
 #/employees/:id/checklist        onboarding checklist
 ```
+
+An employee reaches exactly one of those and is redirected out of the rest; an official is
+redirected out of `#/me`. The guard doing it is a convenience - see
+[Auth](#auth-two-roles-enforced-server-side).
 
 ---
 
@@ -458,8 +466,8 @@ version.
 
 ## Auth: two roles, enforced server-side
 
-Two accounts, two views. Officials get the console that was already here; the `employee` role gets a
-read-only directory. What matters is where that split is enforced.
+Two roles, two views. Officials get the console that was already here; an employee gets their own
+record and nothing else. What matters is where that split is enforced.
 
 **The browser is not trusted with it.** `POST /login` verifies a password against a PBKDF2 hash and
 returns an HS256 JWT carrying the role as a claim; a REQUEST authorizer verifies the signature on
@@ -483,11 +491,14 @@ IAM document pytest cannot see, and authorizer results are cached against the to
 policy is reused for a request to a different method. So `require_official()` is one line at the top
 of each writing handler instead, and `tests/test_roles.py` covers all four.
 
-**Restricting a read constructs a new object rather than deleting keys.** `restrict_for_employee`
-names the eight fields an employee may see. A `del` list would leak every field added to the model
-from the moment it exists until somebody remembers; this way a new field is private until somebody
-deliberately exposes it, and `tests/test_roles.py` asserts each hidden field individually so a
-leak names itself.
+**Restricting a read constructs a new object rather than deleting keys.** `own_profile_view` names
+the fields an employee may see of their own record. A `del` list would leak every field added to the
+model from the moment it exists until somebody remembers; this way a new field is private until
+somebody deliberately exposes it, and `tests/test_own_profile.py` asserts that property directly.
+
+The same function serves the read *and* the write, and that is the point rather than tidiness: the
+`PATCH` handler re-reads the whole item to build its response, so a write path that skipped this trim
+would hand back every checklist comment on the record with a 200 that looked entirely correct.
 
 **Two traps this hit, both worth knowing.** API Gateway generates the 401 itself when the authorizer
 rejects a token, and a gateway-generated response does not inherit the CORS headers the Lambdas set
@@ -498,10 +509,48 @@ anonymous (`AddDefaultAuthorizerToCorsPreflight: false`): an `OPTIONS` request c
 
 `caller_role()` returns `None` for a request with no identified caller, and `require_role()` turns
 that into a 403. It used to default to the employee role, which *sounded* like failing closed and
-was not: the employee role is not a closed door, it reads the whole staff directory. So a stack that
+was not: at the time, the employee role was not a closed door — it read the whole staff directory. So a stack that
 lost its `Auth` block would have served every name, department, job title, start date and onboarding
 status to anyone who asked, with all tests still passing. That came out of the endpoint audit below,
 and it is the one finding that was a real hole rather than a weakness.
+
+### Per-employee scoping: the number is the identity
+
+This started as a *Not built yet* bullet, and the shape it landed in is worth recording because two
+of the decisions are load-bearing and one is a limit rather than a feature.
+
+**An employee's username is their employee number.** There is no `employee` account any more, and no
+per-employee credential record either. `E1001` verifies against one shared password, the number
+becomes the token's `sub`, and `require_self()` in `common/handler.py` compares that claim against the
+`{id}` in the path. The alternative — a real user record per hire — is a Cognito user pool, and the
+brief has no user-management screen, no invite flow and nothing that creates an account.
+
+**Named accounts are resolved before the number shape, and the order matters.** `hr.admin` is safe
+from `EMPLOYEE_ID_PATTERN` today only because the pattern rejects the dot. A future officials
+username like `admin2` would be employee-number-shaped, and would have signed in silently as an
+employee. Checking the named accounts first makes that a non-question rather than a coincidence.
+
+**`POST /login` still cannot read the employee table, and that is deliberate.** Its IAM policy grants
+Secrets Manager and nothing else, on the reasoning that a login route which *could* read the employee
+table is one that would if it were ever wrong. The cost is that a number with no record behind it
+signs in successfully and finds out on its first read — `E9999` gets a token and a 404. The gain is
+that the one unauthenticated route in the system has no path to the data. A test asserts that
+`handlers.login` does not so much as import `common/db.py`, so the boundary is checked rather than
+remembered.
+
+**An employee sees their whole record, minus checklist comments.** The old directory hid contact
+details and the reporting line because they were somebody else's; on your own record they are simply
+yours. Comments are the exception: `"chased payroll twice, still no bank details"` is an HR working
+note written by one official for another. Ticks are facts about the hire, notes are not.
+
+**403 before the read, not after.** `require_self()` runs before the `GetItem`, so an employee asking
+about a colleague and an employee asking about a number that does not exist get byte-identical
+refusals. Otherwise the endpoint answers "which employee numbers are real?" one guess at a time.
+
+**And the limit, stated plainly.** This scopes the **product**, not confidentiality. The employee
+password is shared and employee numbers are sequential and printed on payslips, so one leaked
+password reads any record — one number at a time, in full. Per-employee credentials are the Cognito
+item below and are not a small edit. Don't put real employee data in this stack.
 
 ### What the audit found
 
@@ -547,25 +596,104 @@ concurrency is an **account-wide pool** — this account's ceiling is 10 executi
 
 **Still open, and known.** The throttle is stage-wide rather than per-IP (WAF is a cost decision).
 Revocation is all-or-nothing — there is no per-user sign-out, because there are no per-user records.
-`employee` remains an account rather than a person. And 10 concurrent executions is low enough that
+An employee token now names a person, but the password behind it is still shared, so the token
+identifies without authenticating that individual. And 10 concurrent executions is low enough that
 ordinary use can hit it; the fix for that is a service-quota increase, not code.
+
+---
+
+## Documents: S3, presigned, employee-owned
+
+Three slots per employee — resume, ID document, signed offer letter — one S3 object each, at
+`employees/<employeeId>/<slot>`. The employee uploads; HR reads. Six decisions worth recording.
+
+**The bytes never pass through Lambda.** `POST /employees/{id}/documents/{slot}` returns a presigned
+POST and the browser sends the file straight to S3. The alternative — proxying the upload through API
+Gateway — caps a request at 10 MB and a Lambda payload at 6 MB, and base64-ing a binary through a
+JSON API inflates it by a third on the way. So the API authorises uploads and never carries one.
+
+**Presigned POST, not presigned PUT, and the reason is the size limit.** A `PUT` URL cannot express a
+maximum: S3 would accept a 5 GB upload against one and bill for the storage. A POST policy carries
+`content-length-range`, so S3 itself refuses anything over 10 MB. The browser checks the size too, but
+that check is a courtesy to the user — the policy is the control, and it is the one a devtools user
+cannot step past.
+
+**The key is built server-side and contains no filename.** `document_key()` takes a slot already
+checked against `DOCUMENT_SLOTS` and an employee id from the caller's token, so nothing a client sends
+reaches the key. That is what makes the usual presigned-POST traversal attack a non-event — there is
+no `${filename}` in the key to escape from. The original filename rides along as
+`x-amz-meta-filename` instead, and is sanitised on the way in *and* on the way out, because it lands
+in a `Content-Disposition` header where a stray `"` or CRLF would matter and the stored value could
+have been written by something other than this app.
+
+**HR cannot upload, and that is enforced by IAM as well as by a role check.**
+`RequestDocumentUploadFunction` is the only function with `s3:PutObject`, and it refuses any caller
+who is not the employee themselves. Nothing in the stack has `s3:DeleteObject` at all. So "a document
+is here because the employee put it here" is a property of the permissions rather than of the UI —
+and HR's read function has no `PutObject` to accidentally grow into an upload path.
+
+**`GetDocumentsFunction` needs `s3:ListBucket`, and this is the trap worth writing down.** S3 answers
+a `HeadObject` for a *missing* key with **403, not 404**, unless the caller may list the bucket — it
+will not confirm non-existence to someone with no business enumerating. Without that permission every
+empty slot raises 403, and a brand-new employee's documents page is a 500. `describe_slots` catches
+`'404'` specifically and re-raises everything else on purpose, so a missing permission is a loud 500
+rather than a silent, permanent "nothing uploaded yet". moto does not emulate IAM, so no test can
+catch this — only the deployed stack can.
+
+**One race is accepted rather than closed.** A ticket is valid for five minutes and S3 knows nothing
+about archive state, so an employee archived inside that window can still land an object on a frozen
+record. Closing it would mean proxying uploads through Lambda, which is the thing presigned POST
+exists to avoid. The short TTL is the mitigation, and the failure is benign: a document attached to a
+record nobody can edit.
+
+Why no document metadata is stored in DynamoDB is in
+[database-design.md](database-design.md#documents-are-not-in-this-table) — briefly, there is no
+trustworthy writer for the copy, and a browser that confirms its own upload could assert a document
+that does not exist.
 
 ---
 
 ## Not built yet
 
-- **Document upload** (offer letter, ID proof) — a visible stub sits on the checklist page marking
-  where it goes; the storage itself is S3 in a later phase.
+- **Automatic cleanup of an archived employee's documents** — archiving touches nothing in S3, which
+  is the point, but it means the objects outlive any interest in them. No lifecycle rule can express
+  "N days after this record was archived", so removing them is a manual job. Stated as a non-goal
+  rather than left looking like an oversight.
+- **Verifying that an upload is what it claims to be** — `contentType` is asserted by the browser and
+  pinned into the upload policy, so the stored object cannot disagree with the declaration; nothing
+  checks the declaration against the bytes. Magic-byte sniffing needs a Lambda triggered after the
+  upload, which is the same machinery the SNS/SQS item below needs.
 - **Who wrote a comment, and when** — the item stores `updatedAt`, and there is now an authenticated
   username to record against it (`requestContext.authorizer.username`), but neither handler writes
   it and the API does not return either. Cheap to add now that the caller has a name.
-- **Per-employee scoping** — the `employee` role sees the whole directory, not just their own
-  record. There is no link between a login and an employee number: `employee` is an account, not a
-  person. Giving each hire their own view means real user records, which is Cognito, not two
-  hard-coded accounts.
-- **Real credential storage** — the signing key now lives in Secrets Manager, but the two accounts
-  are still PBKDF2 hashes in `src/common/accounts.py` and the demo passwords are in a public README.
-  A Cognito user pool is where this goes. Don't put real employee data in the dev stack.
+- **Per-employee *confidentiality*** — the scoping itself is built (see above), and it is a product
+  boundary rather than a security one. Every employee shares one password and employee numbers are
+  sequential, so a leaked password reads any record one number at a time. What is missing is
+  per-employee credentials, which is the Cognito item below.
+- **An employee ticking their own checklist items** — the `owner` field already says which items are
+  theirs, and `PATCH …/checklist/{itemId}` is still officials-only. Letting a hire tick their own
+  would move who owns onboarding truth, which is a decision rather than an edit.
+- **Live updates on the employee profile** — `#/me` shows the checklist **as it was when the page
+  loaded**, and nothing tells it otherwise. `render()` runs on page load and on `hashchange`
+  (`js/app.js`), and there is no polling, no SSE and no WebSocket. So HR ticking an item is visible
+  in DynamoDB at once and invisible to that employee's open tab until it re-renders.
+
+  What does re-render it: a reload (every render is a fresh `GET` — nothing is cached client side, and
+  `common/responses.py` sets no `Cache-Control`, so a reload always shows current truth), or saving
+  their contact details, because the `PATCH` response is the whole record and `paintProfile` repaints
+  from it. Note what does *not*: clicking a link to `#/me` while already on `#/me`, since assigning
+  the hash it already has fires no `hashchange`.
+
+  Deliberately left alone rather than papered over with a Refresh button. The employee cannot act on
+  the checklist — it is information, not a control they might click against stale state — so the cost
+  of being behind is low. Polling is the obvious fix and is the wrong trade at this size: every
+  request costs *two* Lambda executions (the authorizer is its own invocation) against an account
+  ceiling of 10, so a handful of idle tabs polling would spend the capacity real use needs. Push is
+  API Gateway WebSockets or DynamoDB Streams, which is real infrastructure and well past this stack.
+- **Real credential storage** — the signing key and the two accounts' PBKDF2 hashes both now live in
+  Secrets Manager, but it's still one shared password per role rather than per-employee credentials,
+  and the demo passwords are in a public README. A Cognito user pool is where per-employee
+  credentials go. Don't put real employee data in the dev stack.
 - **Per-IP login rate limiting** — `POST /login` is throttled stage-wide at the gateway, which caps
   the bill and the guessing rate but cannot tell one caller from another. Per-IP is a WAF rate-based
   rule, which is a cost decision rather than a code one.
@@ -596,6 +724,27 @@ table holds real records — if any of them is revisited later, this is the list
 
 Number 5 is the one to watch. Reversing it turns `status` from a derived value into a stored field
 that can drift out of sync with the checklist — which the current design makes impossible.
+
+### Number 1's consequence: each record keeps its own copy of the wording
+
+The checklist is fixed for everyone, and yet every employee item stores its own `label`, `owner` and
+`order` for all eight entries — about 360 of an item's ~1.1 KB is a verbatim copy of
+`CHECKLIST_TEMPLATE`. `to_api_checklist_item` returns that stored copy, not the template.
+
+That is deliberate, and the reason is audit rather than storage. A record keeps the checklist as it
+stood when *that person* was onboarded, so rewording an item later cannot retroactively change what
+an old record says was asked of them.
+
+**The consequence, stated so it is not discovered by accident: editing `CHECKLIST_TEMPLATE` reaches
+new hires only.** Existing employees keep the old wording until something rewrites their items. If a
+reword ever needs to be retrospective, that is a one-off migration over the table, not a code change
+— and if this trade is ever revisited, the alternative is to drop `label`/`owner` from the stored
+entry and look them up by `itemId` at read time, which makes the template the single source and
+shrinks every item by roughly a fifth.
+
+`order` is a third copy of the same static data and is dead weight by comparison: nothing reads it,
+and it stays only so a raw item is legible in the console. `tests/test_models.py` pins it to the list
+position so it cannot drift into a lie.
 
 ### Number 3, reversed: archiving instead of deleting
 

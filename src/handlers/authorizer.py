@@ -1,5 +1,5 @@
 """
-The API Gateway REQUEST authorizer - the gate in front of the other six routes.
+The API Gateway REQUEST authorizer - the gate in front of the other seven routes.
 
 Runs before any handler Lambda is invoked. It verifies the bearer token's
 signature and hands the caller's identity down in `context`, where

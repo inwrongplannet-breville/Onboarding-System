@@ -17,7 +17,10 @@ from common.tokens import sign
 # The demo passwords. Written here because a login test cannot avoid knowing
 # them; common/accounts.py holds only the hashes.
 OFFICIAL_LOGIN = {'username': 'hr.admin', 'password': 'onboard-2026'}
-EMPLOYEE_LOGIN = {'username': 'employee', 'password': 'welcome-2026'}
+
+# An employee's username is their employee number, so there is no one employee
+# login - there is one per person, all sharing a password. See common/accounts.py.
+EMPLOYEE_LOGIN = {'username': 'E1001', 'password': 'welcome-2026'}
 
 METHOD_ARN = 'arn:aws:execute-api:eu-north-1:123456789012:abc123/dev/GET/employees'
 
@@ -39,6 +42,14 @@ def token_for(role, username='someone'):
     return sign({'sub': username, 'role': role}, os.environ['JWT_SECRET'])
 
 
+def claims_of(token):
+    """The payload of a token this suite just minted. Not a verification - these
+    tests already know the token is genuine, they want to read what is in it."""
+    from common.tokens import verify
+
+    return verify(token, os.environ['JWT_SECRET'])
+
+
 # ------------------------------------------------------------------- login
 
 def test_an_official_can_sign_in_and_gets_an_official_token(handlers):
@@ -52,9 +63,86 @@ def test_an_official_can_sign_in_and_gets_an_official_token(handlers):
     assert result['token']
 
 
-def test_an_employee_can_sign_in_and_gets_an_employee_token(handlers):
+def test_an_employee_signs_in_with_their_employee_number(handlers):
     result = body(login(handlers, EMPLOYEE_LOGIN))
+
     assert result['role'] == ROLE_EMPLOYEE
+    # The number is the only display name available - login cannot read the table
+    # to find a name. The frontend replaces it once the profile loads.
+    assert result['displayName'] == 'E1001'
+    assert claims_of(result['token'])['sub'] == 'E1001'
+
+
+def test_an_employee_number_is_upper_cased_into_the_token(handlers):
+    """
+    `sub` has to match the partition key fold or require_self compares two
+    spellings of the same person and refuses them.
+    """
+    result = body(login(handlers, dict(EMPLOYEE_LOGIN, username='e1001')))
+    assert claims_of(result['token'])['sub'] == 'E1001'
+
+
+def test_the_old_shared_employee_account_is_gone(handlers):
+    """
+    `employee` was a username. It is not one any more - and because it happens to
+    be a well-formed employee number, what it now buys is a token for a record
+    that does not exist rather than a session with any reach.
+    """
+    result = body(login(handlers, {'username': 'employee',
+                                   'password': 'welcome-2026'}))
+    assert claims_of(result['token'])['sub'] == 'EMPLOYEE'
+
+
+@pytest.mark.parametrize('username', ['E', 'bad id', 'EMP#1001', 'e' * 21, '-E1001'])
+def test_a_username_that_is_neither_an_account_nor_a_number_is_401(handlers, username):
+    response = login(handlers, {'username': username, 'password': 'welcome-2026'})
+    assert response['statusCode'] == 401
+
+
+def test_an_officials_username_wins_over_the_employee_number_shape(handlers):
+    """
+    ACCOUNTS is consulted first, and the order is load-bearing. `hr.admin` is safe
+    from the number pattern today only because the pattern rejects the dot; a
+    future officials username like `admin2` would be number-shaped, and resolving
+    accounts first makes that a non-question rather than a coincidence.
+    """
+    result = body(login(handlers, OFFICIAL_LOGIN))
+    assert result['role'] == ROLE_OFFICIAL
+    assert claims_of(result['token'])['sub'] == 'hr.admin'
+
+
+def test_a_number_with_no_employee_behind_it_still_signs_in(handlers):
+    """
+    Pinning a deliberate behaviour so nobody "fixes" it.
+
+    LoginFunction has no DynamoDB permission at all - see its policy in
+    template.yaml - so this route cannot check that a record exists, and a
+    plausible-looking number gets a session that 404s on its first read. Adding a
+    GetItem here would buy an earlier error message and cost the one IAM boundary
+    the login design rests on.
+    """
+    response = login(handlers, dict(EMPLOYEE_LOGIN, username='E9999'))
+    assert response['statusCode'] == 200
+    assert claims_of(body(response)['token'])['sub'] == 'E9999'
+
+
+def test_the_login_lambda_never_imports_the_table(handlers):
+    """
+    The IAM rule above, expressed as a test rather than a comment.
+
+    common/db.py builds its boto3 table at import time, so a login handler that
+    reached it - directly or through a helper somebody added to common/ - would
+    hold a DynamoDB resource on every cold start. IAM would still deny the call;
+    the point is that the import graph should not go there at all.
+    """
+    import importlib
+    import sys
+
+    for name in ('common.db', 'handlers.login'):
+        sys.modules.pop(name, None)
+    importlib.import_module('handlers.login')
+
+    assert 'common.db' not in sys.modules
 
 
 def test_the_token_a_login_returns_is_accepted_by_the_authorizer(handlers):

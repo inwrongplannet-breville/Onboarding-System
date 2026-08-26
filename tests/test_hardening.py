@@ -12,7 +12,14 @@ import os
 import pytest
 
 from common.accounts import ROLE_EMPLOYEE, ROLE_OFFICIAL
-from common.handler import Forbidden, caller_role, require_role
+from common.handler import (
+    Forbidden,
+    caller_employee_id,
+    caller_role,
+    caller_username,
+    require_role,
+    require_self,
+)
 from common.tokens import ISSUER, InvalidToken, sign, verify
 from test_handlers import EMPLOYEE, OFFICIAL, VALID, body, create, get, listing
 
@@ -68,11 +75,18 @@ def test_no_employee_data_escapes_in_a_refused_read(handlers):
         assert leak not in raw
 
 
-def test_both_roles_still_read_normally(handlers):
-    """The gate must not close on the callers it exists to admit."""
+def test_the_directory_admits_officials_and_refuses_employees(handlers):
+    """
+    The gate must not close on the caller it exists to admit - and the employee
+    role is no longer that caller.
+
+    This test used to assert 200 for both. The directory is officials-only now: an
+    employee has exactly one record they may read and they reach it by id, so
+    there is no trimmed list left to serve them.
+    """
     create(handlers)
     assert listing(handlers, OFFICIAL)['statusCode'] == 200
-    assert listing(handlers, EMPLOYEE)['statusCode'] == 200
+    assert listing(handlers, EMPLOYEE)['statusCode'] == 403
 
 
 # ---------------------------------- finding: no iss/aud, so a token from one
@@ -255,3 +269,71 @@ def test_authorization_stays_an_allowed_request_header(handlers):
     """Tightening the origin must not drop the header every request carries."""
     headers = handlers['login']({'body': '{}'}, None)['headers']
     assert 'Authorization' in headers['Access-Control-Allow-Headers']
+
+
+# ------------------------------------------ finding: an own-record check must
+#                                            fail closed on a missing identity
+
+@pytest.mark.parametrize('event', [
+    {},
+    {'requestContext': {}},
+    {'requestContext': {'authorizer': {}}},
+    {'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE}}},
+    {'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE, 'username': None}}},
+    {'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE, 'username': ''}}},
+    {'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE, 'username': 12}}},
+])
+def test_a_request_with_no_identified_caller_has_no_employee_id(event):
+    """
+    The same parametrisation as the role case above, asked of the identity. '' is
+    the only safe answer to "whose record is this?" when nobody said.
+    """
+    assert caller_username(event) == ''
+    assert caller_employee_id(event) == ''
+
+
+@pytest.mark.parametrize('employee_id', ['E1001', '', None])
+def test_require_self_refuses_a_caller_with_no_identity(employee_id):
+    """
+    Fails closed, including against itself.
+
+    caller_employee_id is '' for an event with no username, and employee_id_param
+    cannot return '' today because path_param raises on a falsy value. Without the
+    emptiness check in require_self, that pairing would be one refactor away from
+    letting an unauthenticated request match a record - so the check does not rely
+    on a guarantee made in another file.
+    """
+    with pytest.raises(Forbidden):
+        require_self({'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE}}},
+                     employee_id)
+
+
+def test_require_self_reads_the_authorizer_context_and_nothing_else():
+    """
+    Not the body, not the headers, not a path parameter. The authorizer verified
+    this value before the handler was invoked; anything the caller could set
+    instead would make the whole check decorative.
+    """
+    forged = {
+        'headers': {'X-Username': 'E1002'},
+        'body': '{"username": "E1002"}',
+        'pathParameters': {'id': 'E1002'},
+        'requestContext': {'authorizer': {'role': ROLE_EMPLOYEE, 'username': 'E1001'}},
+    }
+
+    require_self(forged, 'E1001')            # the authorizer's value
+    with pytest.raises(Forbidden):
+        require_self(forged, 'E1002')        # the one the caller supplied
+
+
+def test_an_officials_username_matches_no_employee_record():
+    """
+    Why require_self needs no officials special case: 'hr.admin' folds to
+    'HR.ADMIN', which EMPLOYEE_ID_PATTERN would never have accepted as a number,
+    so it cannot collide with a real id.
+    """
+    event = {'requestContext': {'authorizer': {'role': ROLE_OFFICIAL,
+                                               'username': 'hr.admin'}}}
+    assert caller_employee_id(event) == 'HR.ADMIN'
+    with pytest.raises(Forbidden):
+        require_self(event, 'E1001')

@@ -9,20 +9,31 @@ import pytest
 from common.checklist_template import CHECKLIST_INDEX, CHECKLIST_TEMPLATE, VALID_ITEM_IDS
 from common.keys import employee_id_from_pk, key, pk
 from common.models import (
+    ADDRESS_MAX_LENGTH,
     ARCHIVED_CANCELLED,
     ARCHIVED_ONBOARDED,
+    EDITABLE_FIELDS,
+    OWN_PROFILE_FIELDS,
+    PHONE_MAX_LENGTH,
+    PROFILE_FIELDS,
+    REQUIRED_FIELDS,
+    SELF_EDITABLE_FIELDS,
     archive_state,
     clean_comment,
     clean_employee_id,
     derive_status,
     is_archived,
     new_checklist_items,
+    own_checklist_item,
+    own_profile_view,
     pick_editable,
+    pick_self,
     progress,
     to_api_checklist_item,
     to_api_employee,
     validate_employee,
     validate_employee_id,
+    validate_self_fields,
 )
 
 VALID = {
@@ -386,3 +397,147 @@ def test_the_stored_order_field_agrees_with_the_list_position():
     # legible in the console. This stops it drifting into a lie.
     for index, entry in enumerate(new_checklist_items()):
         assert entry['order'] == index + 1
+
+
+# ------------------------------------------------------- who owns which field
+
+def test_the_three_field_lists_are_what_the_frontend_mirrors():
+    """
+    Pinned literally, because no pytest can see js/store.js. A change to any of
+    these is a deliberate two-file edit, and this is the test that says so.
+    """
+    assert EDITABLE_FIELDS == (
+        'firstName', 'lastName', 'email', 'phone',
+        'department', 'jobTitle', 'manager', 'startDate', 'employmentType',
+    )
+    assert SELF_EDITABLE_FIELDS == ('phone', 'personalEmail', 'address')
+    assert PROFILE_FIELDS == EDITABLE_FIELDS + ('personalEmail', 'address')
+
+
+def test_hr_cannot_set_the_two_self_service_fields():
+    """
+    The mechanism, not a policy. personalEmail and address are absent from
+    EDITABLE_FIELDS, so no expression HR's PUT builds can ever name them - which
+    is also why a full replace cannot blank them.
+    """
+    for field in ('personalEmail', 'address'):
+        assert field not in EDITABLE_FIELDS
+        assert field not in [name for name, _ in REQUIRED_FIELDS]
+
+    picked = pick_editable({'personalEmail': 'x@example.com', 'address': 'somewhere'})
+    assert 'personalEmail' not in picked
+    assert 'address' not in picked
+
+
+# ------------------------------------------------------------------ pick_self
+
+def test_pick_self_keeps_only_the_keys_the_body_named():
+    """
+    PATCH semantics need the difference between absent and empty: absent is left
+    alone, empty is cleared.
+    """
+    assert pick_self({'phone': ' +61 400 '}) == {'phone': '+61 400'}
+    assert pick_self({'address': ''}) == {'address': ''}
+    assert pick_self({}) == {}
+
+
+def test_pick_self_drops_every_field_it_does_not_own():
+    assert pick_self({'firstName': 'Nope', 'department': 'HR', 'checklist': []}) == {}
+
+
+def test_pick_self_treats_null_as_cleared():
+    assert pick_self({'personalEmail': None}) == {'personalEmail': ''}
+
+
+def test_pick_self_raises_on_a_non_string_rather_than_coercing():
+    """
+    pick_editable coerces to '' because a form always sends all nine fields. The
+    same coercion here would turn a malformed request into a deletion.
+    """
+    with pytest.raises(ValueError) as raised:
+        pick_self({'phone': 5, 'address': ['a']})
+
+    assert set(raised.value.args[0]) == {'phone', 'address'}
+
+
+# --------------------------------------------------------- validate_self_fields
+
+def test_every_self_field_is_optional():
+    assert validate_self_fields({}) == {}
+    assert validate_self_fields({'phone': '', 'personalEmail': '', 'address': ''}) == {}
+
+
+def test_a_personal_email_must_look_like_one():
+    assert 'personalEmail' in validate_self_fields({'personalEmail': 'nope'})
+    assert validate_self_fields({'personalEmail': 'priya@example.com'}) == {}
+
+
+@pytest.mark.parametrize('field,cap', [
+    ('address', ADDRESS_MAX_LENGTH),
+    ('phone', PHONE_MAX_LENGTH),
+])
+def test_a_self_field_over_its_cap_is_reported(field, cap):
+    assert validate_self_fields({field: 'x' * cap}) == {}
+    assert field in validate_self_fields({field: 'x' * (cap + 1)})
+
+
+# --------------------------------------------------------- the own-profile view
+
+def _api_employee():
+    """One API employee carrying both self-service fields and an HR comment."""
+    item = dict(_item(done_ids={'offer-letter'}),
+                personalEmail='priya@example.com',
+                address='12 Smith St')
+    item['checklist'][0]['comment'] = 'chased payroll twice'
+    return to_api_employee(item)
+
+
+def test_the_own_profile_view_carries_every_named_field():
+    view = own_profile_view(_api_employee())
+    assert sorted(view) == sorted(OWN_PROFILE_FIELDS + ('checklist',))
+
+
+def test_the_own_profile_view_is_built_by_naming_not_deleting():
+    """
+    The fail-safe property. A field added to the model is invisible to the
+    employee until somebody names it in OWN_PROFILE_FIELDS - where a `del` list
+    would leak it from the moment it existed.
+    """
+    employee = _api_employee()
+    employee['secretNewField'] = 'should not travel'
+
+    assert 'secretNewField' not in own_profile_view(employee)
+
+
+def test_the_own_profile_view_drops_the_checklist_comments():
+    view = own_profile_view(_api_employee())
+
+    assert view['checklist'][0]['done'] is True
+    assert 'chased payroll twice' not in str(view)
+    for item in view['checklist']:
+        assert sorted(item) == ['done', 'id', 'label', 'owner']
+
+
+def test_the_own_profile_view_of_nothing_is_nothing():
+    """The None contract to_api_employee already keeps - five callers branch on it."""
+    assert own_profile_view(None) is None
+
+
+def test_own_checklist_item_builds_a_fresh_dict():
+    entry = to_api_checklist_item(dict(new_checklist_items()[0], comment='note'))
+    trimmed = own_checklist_item(entry)
+
+    assert 'comment' not in trimmed
+    # Not a filtered view of the original - mutating one must not reach the other.
+    trimmed['done'] = True
+    assert entry['done'] is False
+
+
+def test_the_self_fields_round_trip_as_empty_when_absent():
+    """
+    Absent and empty mean the same thing to a reader - the same rule the file
+    already applies to archivedAs and to a checklist comment.
+    """
+    employee = to_api_employee(_item())
+    assert employee['personalEmail'] == ''
+    assert employee['address'] == ''

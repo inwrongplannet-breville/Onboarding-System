@@ -1,6 +1,11 @@
 /**
  * Data access layer - the seam between the UI and where employees actually live.
  *
+ * Two functions here touch fetch(), not one. `request()` handles every call to
+ * our own API; `uploadToS3()` is the exception, and it exists because a presigned
+ * S3 URL cannot go through request() at all - see the comment on it. Nothing else
+ * may grow a third.
+ *
  * That is now DynamoDB, reached through API Gateway. Every function here is a
  * fetch(); there is no local copy of anything. If the API is unreachable the UI
  * shows an error, because there is nothing else it could honestly show.
@@ -41,7 +46,8 @@ window.App = window.App || {};
   }
 
   /**
-   * The only place in the app that touches fetch().
+   * Every call to our own API goes through here. (Uploads to S3 do not, and
+   * cannot - uploadToS3 below says why.)
    *
    * Two things fetch gets wrong for our purposes, both handled here: it resolves
    * happily on a 500, and response.json() rejects on an empty body - which is
@@ -114,6 +120,17 @@ window.App = window.App || {};
     'department', 'jobTitle', 'manager', 'startDate', 'employmentType'
   ];
 
+  /**
+   * The three an employee may change on their own record. Mirrors
+   * SELF_EDITABLE_FIELDS in common/models.py.
+   *
+   * Read this beside EDITABLE_FIELDS above, because the overlap is the
+   * interesting part: `phone` is on both lists and therefore has two writers,
+   * while `personalEmail` and `address` are on this one only - the officials form
+   * has no control for them and the API's PUT whitelist cannot name them.
+   */
+  var SELF_FIELDS = ['phone', 'personalEmail', 'address'];
+
   function pick(fields, input) {
     var out = {};
     fields.forEach(function (field) {
@@ -138,6 +155,10 @@ window.App = window.App || {};
    */
   function pickCreatable(input) {
     return pick(EDITABLE_FIELDS.concat('employeeId'), input);
+  }
+
+  function pickSelf(input) {
+    return pick(SELF_FIELDS, input);
   }
 
   function employeePath(id) {
@@ -223,6 +244,140 @@ window.App = window.App || {};
      */
     archiveEmployee: function (id) {
       return request('DELETE', employeePath(id));
+    },
+
+    /**
+     * The signed-in employee's own record, whole - or null if there is no such
+     * record.
+     *
+     * The id comes from the token rather than from a caller, which is what makes
+     * this "own": app.js cannot ask for somebody else's profile by passing a
+     * different argument, because there is no argument.
+     *
+     * null on 404 for the same reason getEmployee does it, and it is not a
+     * hypothetical here. POST /login does not check that an employee number
+     * exists - it has no table access, by design - so a typo'd number gets a
+     * perfectly good session and discovers the problem right here. The router
+     * paints profileMissingView for it.
+     */
+    getOwnProfile: function () {
+      var id = App.auth.employeeId();
+      if (!id) return Promise.reject(apiError(0, null));
+
+      return request('GET', employeePath(id)).catch(function (error) {
+        if (error.status === 404) return null;
+        throw error;
+      });
+    },
+
+    /**
+     * The three fields an employee fills in themselves.
+     *
+     * PATCH, and a different route from updateEmployee's PUT: this sends only the
+     * keys the form holds, and the server leaves everything it does not name
+     * alone. Resolves the employee's own view of the whole record, already
+     * trimmed the same way getOwnProfile's response is, so the caller can repaint
+     * from it without a follow-up read.
+     */
+    updateOwnContact: function (values) {
+      var id = App.auth.employeeId();
+      if (!id) return Promise.reject(apiError(0, null));
+
+      return request('PATCH', employeePath(id) + '/contact', pickSelf(values));
+    },
+
+    /**
+     * The three document slots for one employee, uploaded or not.
+     *
+     * Always three, and an empty one carries no `downloadUrl` - so the caller
+     * renders an empty drop zone from `uploaded: false` rather than from a gap in
+     * the array. See src/common/documents.py.
+     */
+    getDocuments: function (id) {
+      return request('GET', employeePath(id) + '/documents').then(function (payload) {
+        return payload.documents;
+      });
+    },
+
+    /** The signed-in employee's own documents. Mirrors getOwnProfile. */
+    getOwnDocuments: function () {
+      var id = App.auth.employeeId();
+      if (!id) return Promise.reject(apiError(0, null));
+      return App.store.getDocuments(id);
+    },
+
+    /**
+     * Ask the API for permission to upload one file, and get back a ticket.
+     *
+     * The file is not sent here - this is a small JSON call that returns a
+     * presigned POST for uploadToS3 to send the bytes to. Rejects 403 for
+     * somebody else's slot, 404 for an employee who does not exist, 409 for an
+     * archived one and 400 for a file the server will not take.
+     */
+    requestUpload: function (employeeId, slot, file) {
+      return request('POST',
+        employeePath(employeeId) + '/documents/' + encodeURIComponent(slot),
+        { filename: file.name, contentType: file.type });
+    },
+
+    /**
+     * The file itself, straight to S3. The one fetch() in this file that is not
+     * request().
+     *
+     * It cannot be request(), for three independent reasons: request() prefixes
+     * every path with App.API_BASE_URL and has no absolute-URL escape hatch; it
+     * JSON-stringifies the body, which would destroy a File; and it attaches
+     * `Authorization`, which a presigned URL rejects outright because the
+     * signature covers an exact set of headers.
+     *
+     * Three things about the FormData are load-bearing, and each is a 403 from S3
+     * if you get it wrong:
+     *
+     *   - Every field the ticket carries goes in, verbatim and unmodified. They
+     *     are signed; editing one invalidates the policy.
+     *   - The file goes in LAST. S3 ignores every field that appears after the
+     *     file part, so a file-first body arrives looking like it has no policy.
+     *   - Nothing else goes in at all. An extra field - an `acl`, a
+     *     `success_action_status` - is "Invalid according to Policy: Extra input
+     *     fields".
+     *
+     * No Content-Type header is set by hand either: the browser has to set it, so
+     * that it can put the multipart boundary in it.
+     *
+     * Success is a 204 with an empty body, so this checks `ok` and never parses.
+     */
+    uploadToS3: function (ticket, file) {
+      var form = new FormData();
+
+      Object.keys(ticket.fields).forEach(function (name) {
+        form.append(name, ticket.fields[name]);
+      });
+      form.append('file', file);
+
+      return fetch(ticket.url, { method: 'POST', body: form }).then(function (response) {
+        if (response.ok) return null;
+
+        // S3 answers with XML, not our error envelope, so there is no message
+        // worth showing. 403 is overwhelmingly one of two things: the five-minute
+        // ticket expired while the user was choosing a file, or the file broke a
+        // policy condition - and both are fixed by trying again.
+        throw apiError(response.status, {
+          error: {
+            code: 'UploadFailed',
+            message: response.status === 403
+              ? 'That upload window expired. Try the file again.'
+              : 'The upload was refused. Check the file and try again.'
+          }
+        });
+      }, function (networkError) {
+        // Second argument to .then, not a trailing .catch, so the apiError above
+        // is not wrapped twice - same reasoning as request().
+        //
+        // Note the most likely cause here is not the network: it is the bucket
+        // missing its CORS rule, which a browser reports as an opaque TypeError
+        // with no status at all.
+        throw apiError(0, null, networkError);
+      });
     },
 
     setChecklistItem: function (employeeId, itemId, done) {

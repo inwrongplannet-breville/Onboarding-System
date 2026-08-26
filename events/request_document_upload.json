@@ -1,0 +1,21 @@
+{
+  "resource": "/employees/{id}/documents/{slot}",
+  "path": "/employees/E1001/documents/resume",
+  "httpMethod": "POST",
+  "pathParameters": {
+    "id": "E1001",
+    "slot": "resume"
+  },
+  "queryStringParameters": null,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"filename\": \"Priya Sharma CV.pdf\", \"contentType\": \"application/pdf\"}",
+  "isBase64Encoded": false,
+  "requestContext": {
+    "authorizer": {
+      "role": "employee",
+      "username": "E1001"
+    }
+  }
+}

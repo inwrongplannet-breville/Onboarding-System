@@ -28,6 +28,27 @@ EDITABLE_FIELDS = (
     'department', 'jobTitle', 'manager', 'startDate', 'employmentType',
 )
 
+# What an employee may change on their own record. Mirrors SELF_FIELDS in
+# js/store.js.
+#
+# Deliberately three fields and not four. Everything else on the record is a fact
+# HR asserts about the employment - the name on the contract, the department, the
+# start date - and an employee editing those is not self-service, it is an
+# unaudited amendment. These three are the ones only the employee knows.
+#
+# `phone` is on this list and on EDITABLE_FIELDS, so it has two writers and the
+# last one wins. That is accepted rather than overlooked: removing it from HR's
+# whitelist would leave nobody able to correct the number for a hire who has
+# never signed in. See handlers/update_own_contact.py.
+SELF_EDITABLE_FIELDS = ('phone', 'personalEmail', 'address')
+
+# Every profile attribute to_api_employee puts on the wire.
+#
+# `personalEmail` and `address` are here and in SELF_EDITABLE_FIELDS but *not* in
+# EDITABLE_FIELDS, which is what stops HR's full-replace PUT from setting them.
+# The employee owns those two outright; the officials form never sees them.
+PROFILE_FIELDS = EDITABLE_FIELDS + ('personalEmail', 'address')
+
 # Mirrors REQUIRED_FIELDS in js/app.js. phone and manager stay optional.
 REQUIRED_FIELDS = (
     ('firstName', 'First name'),
@@ -60,6 +81,16 @@ EMPLOYEE_ID_PATTERN = re.compile(r'^[A-Z0-9][A-Z0-9-]{1,19}$')
 # limit and to stop a paste of an entire email thread from becoming the record.
 COMMENT_MAX_LENGTH = 500
 
+# Same reasoning as COMMENT_MAX_LENGTH, applied to the two fields an employee
+# fills in themselves. Mirrored as `maxlength` on the controls in js/ui.js, so the
+# browser stops a paste before the request rather than after it.
+ADDRESS_MAX_LENGTH = 300
+
+# Long enough for '+61 (0)4 1234 5678 ext 221'. There is no format check on a
+# phone number anywhere in this system and there should not be: an international
+# numbering regex's failure mode is rejecting somebody's real number.
+PHONE_MAX_LENGTH = 40
+
 # Archiving replaced hard deletion. DELETE /employees/{id} stamps one of these on
 # the employee's item instead of removing it, and which one depends on whether
 # onboarding had finished: someone who completed the checklist and then left is a
@@ -78,40 +109,52 @@ ARCHIVED_ONBOARDED = 'Onboarded'
 ARCHIVED_MESSAGE = 'This employee is archived. Their record is read-only.'
 
 
-# What the employee role is allowed to see of somebody else's record - the six
-# facts an internal staff directory carries.
+# What an employee sees of their OWN record - everything on it, with one
+# exception.
 #
-# Everything absent from this list is absent for a reason. Contact details
-# (email, phone) and the reporting line (manager) are the parts that make a
-# directory feel like a leak; employmentType is contractual; and the checklist is
-# an HR working document - its comments are things like "chased payroll twice",
-# written by one official for another.
+# The exception is the checklist comments. Ticks are facts about the hire and
+# belong to them; a comment is an HR working note written by one official for
+# another - the example in this codebase's own docstrings is "chased payroll
+# twice, still no bank details". Showing the employee the tick and not the note is
+# the whole distinction.
 #
-# `status` and `progress` are here and are not an oversight. Onboarding progress
-# is the one thing this app exists to show, and a directory that cannot say
-# whether someone has started yet is not worth signing in to.
-EMPLOYEE_VISIBLE_FIELDS = (
-    'id', 'firstName', 'lastName', 'department', 'jobTitle', 'startDate',
-    'status', 'progress',
+# Built by naming what is included, never by deleting from the full object. The
+# difference matters the next time a field is added to the model: a constructed
+# dict leaves it invisible until somebody deliberately adds it here, where a `del`
+# list leaks it from the moment it exists until somebody remembers. One of those
+# fails safe.
+OWN_PROFILE_FIELDS = ('id',) + PROFILE_FIELDS + (
+    'status', 'progress', 'archived', 'archivedAs', 'archivedAt',
 )
 
 
-def restrict_for_employee(employee):
+def own_checklist_item(item):
+    """One checklist item as its subject sees it: everything but the comment."""
+    return {
+        'id': item['id'],
+        'label': item['label'],
+        'owner': item['owner'],
+        'done': item['done'],
+    }
+
+
+def own_profile_view(employee):
     """
-    The employee-role view of one API employee.
+    The employee-role view of the employee's own record.
 
-    Built by naming what is included, never by deleting from the full object.
-    The difference matters the next time a field is added to the model: a
-    constructed dict leaves it invisible until somebody deliberately adds it
-    here, where a `del` list leaks it from the moment it exists until somebody
-    remembers. One of those fails safe.
+    Takes an already-built API employee, like the directory view it replaces, so
+    `status` and `progress` are computed from the *whole* checklist before
+    anything here trims it - the numbers cannot disagree with the list HR sees.
 
-    Takes an already-built API employee rather than a raw item so that
-    list_employees can filter on `archived` first - see the note there.
+    Both the read and the write path go through this. handlers/get_employee is the
+    obvious one; handlers/update_own_contact is the one that would hand back every
+    comment on the record if it returned its own re-read instead.
     """
     if employee is None:
         return None
-    return {field: employee[field] for field in EMPLOYEE_VISIBLE_FIELDS}
+    view = {field: employee[field] for field in OWN_PROFILE_FIELDS}
+    view['checklist'] = [own_checklist_item(item) for item in employee['checklist']]
+    return view
 
 
 def pick_editable(body):
@@ -120,6 +163,40 @@ def pick_editable(body):
     for field in EDITABLE_FIELDS:
         value = body.get(field, '')
         picked[field] = value.strip() if isinstance(value, str) else ''
+    return picked
+
+
+def pick_self(body):
+    """
+    Whichever of SELF_EDITABLE_FIELDS this body actually named, trimmed.
+
+    Returns {field: value} holding only the keys that were present, because PATCH
+    semantics need the difference: an absent field is left alone, and a field sent
+    empty is cleared.
+
+    Raises ValueError carrying a {field: message} map rather than coercing, which
+    is the one place this disagrees with pick_editable. There, a non-string
+    collapsing to '' is a sensible default for a form that always sends all nine
+    fields. Here the same coercion would turn a malformed request into a deletion.
+    """
+    picked = {}
+    errors = {}
+
+    for field in SELF_EDITABLE_FIELDS:
+        if field not in body:
+            continue
+        value = body[field]
+        # None is how JSON says "clear this", and it is the one non-string that
+        # means something. Anything else is a client bug, not an intention.
+        if value is None:
+            picked[field] = ''
+        elif isinstance(value, str):
+            picked[field] = value.strip()
+        else:
+            errors[field] = 'This field must be text.'
+
+    if errors:
+        raise ValueError(errors)
     return picked
 
 
@@ -197,6 +274,35 @@ def validate_employee(values):
                 date.fromisoformat(start_date)
             except ValueError:
                 errors['startDate'] = 'Start date is not a real calendar date.'
+
+    return errors
+
+
+def validate_self_fields(values):
+    """
+    Returns {field: message} for the fields this body named. Empty dict means valid.
+
+    Every one of the three is optional - an employee who has not filled in their
+    address yet is not an invalid record, they are a new starter. So there is no
+    required-field loop here, which is why this cannot just be validate_employee:
+    that one demands the seven facts HR asserts and the employee never sends.
+    """
+    errors = {}
+
+    personal_email = values.get('personalEmail')
+    if personal_email and not EMAIL_PATTERN.match(personal_email):
+        # Same wording as validate_employee's, so js/app.js needs no second copy.
+        errors['personalEmail'] = 'Enter a valid email address.'
+
+    address = values.get('address')
+    if address and len(address) > ADDRESS_MAX_LENGTH:
+        errors['address'] = ('Keep the address under ' + str(ADDRESS_MAX_LENGTH) +
+                             ' characters.')
+
+    phone = values.get('phone')
+    if phone and len(phone) > PHONE_MAX_LENGTH:
+        errors['phone'] = ('Keep the phone number under ' + str(PHONE_MAX_LENGTH) +
+                           ' characters.')
 
     return errors
 
@@ -301,7 +407,10 @@ def to_api_employee(item):
     checklist = [to_api_checklist_item(entry) for entry in item.get('checklist', [])]
 
     employee = {'id': employee_id_from_pk(item[KEY_ATTRIBUTE])}
-    for field in EDITABLE_FIELDS:
+    # PROFILE_FIELDS, not EDITABLE_FIELDS: the two self-service fields go on the
+    # wire like everything else, and absent reads as '' for the same reason
+    # archivedAs does - absent and empty mean the same thing to a reader.
+    for field in PROFILE_FIELDS:
         employee[field] = item.get(field, '')
 
     employee['checklist'] = checklist

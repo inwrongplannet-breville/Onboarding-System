@@ -11,9 +11,25 @@ GET pays no such price and stays eventually consistent: nothing it returns was
 written a millisecond earlier by the same caller, and consistent reads cost twice
 as much.
 """
+from common import responses
 from common.db import table
-from common.keys import key
-from common.models import to_api_employee
+from common.keys import EXISTS, key
+from common.models import ARCHIVED_MESSAGE, to_api_employee
+
+# The condition every profile write in this codebase shares: the employee has to
+# exist and must not be archived.
+#
+# UpdateItem *upserts* by default, so without the EXISTS half a write to an
+# unknown id would happily create a half-employee with no checklist behind it.
+# The other half is the archive freeze - checked as a condition on the write
+# itself rather than by reading first, so an archive landing mid-request cannot
+# be overwritten.
+#
+# Spelled with an alias because `archivedAs` travels in the same
+# ExpressionAttributeNames map as the SET clause it guards. Every caller must add
+# '#archivedAs' to that map; DynamoDB rejects a names entry no expression uses,
+# so the two only ever travel together.
+ACTIVE_GUARD = EXISTS + ' AND attribute_not_exists(#archivedAs)'
 
 
 def load_employee(employee_id, consistent=False):
@@ -53,3 +69,21 @@ def load_archive_state(employee_id):
     if item is None:
         return None
     return {'archivedAs': item.get('archivedAs', '')}
+
+
+def guard_failure_response(employee_id):
+    """
+    Turn a fired ACTIVE_GUARD into the right status code.
+
+    Re-reads rather than guessing which half of the condition it was, because
+    'archived' and 'never existed' are a 409 and a 404, and telling a caller the
+    wrong one sends them looking in the wrong place.
+
+    Shared by the two handlers that write a profile - HR's full replace and the
+    employee's own contact patch. One condition expression, one decision about
+    what its failure meant.
+    """
+    state = load_archive_state(employee_id)
+    if state is not None and state['archivedAs']:
+        return responses.conflict(ARCHIVED_MESSAGE)
+    return responses.not_found('No employee with id ' + employee_id + '.')

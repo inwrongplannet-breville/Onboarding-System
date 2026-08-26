@@ -29,9 +29,8 @@ from boto3.dynamodb.conditions import Attr
 
 from common import responses
 from common.db import table
-from common.accounts import ROLE_OFFICIAL
-from common.handler import api_handler, require_role
-from common.models import restrict_for_employee, to_api_employee
+from common.handler import api_handler, require_official
+from common.models import to_api_employee
 
 
 def _scan_all():
@@ -57,9 +56,16 @@ def _scan_all():
         kwargs['ExclusiveStartKey'] = last_key
 
 
+# Officials only. An employee has exactly one record they may read and they reach
+# it by id, so there is no trimmed version of this list to serve them - the
+# endpoint has one audience, and refusing it outright is both simpler and a
+# smaller thing to get wrong than a whitelist applied per row.
+_REFUSED = 'Employee records other than your own are not visible to your account.'
+
+
 @api_handler
 def lambda_handler(event, context):
-    role = require_role(event)
+    require_official(event, _REFUSED)
 
     employees = []
     for item in _scan_all():
@@ -72,12 +78,5 @@ def lambda_handler(event, context):
         employees.append(employee)
 
     employees.sort(key=lambda employee: (employee['startDate'], employee['lastName']))
-
-    # Restricted last, after the archive filter above and the sort - both read
-    # fields the employee shape does not carry. Sorting the full objects and
-    # trimming afterwards keeps one ordering for both roles; trimming first would
-    # mean either two sort keys or two code paths.
-    if role != ROLE_OFFICIAL:
-        employees = [restrict_for_employee(employee) for employee in employees]
 
     return responses.ok({'employees': employees, 'count': len(employees)})

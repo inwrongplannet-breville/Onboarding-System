@@ -51,6 +51,19 @@ window.App = window.App || {};
     return Number(parts[2]) + ' ' + month + ' ' + parts[0];
   }
 
+  /*
+   * A file size a person can read. Binary units, because that is what a file
+   * manager shows and a 240 KB resume matching the OS is worth more than being
+   * pedantic about KiB.
+   */
+  function formatBytes(bytes) {
+    if (typeof bytes !== 'number' || bytes < 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    var kb = bytes / 1024;
+    if (kb < 1024) return Math.round(kb) + ' KB';
+    return (Math.round(kb / 1024 * 10) / 10) + ' MB';
+  }
+
   // Both of these read a value the server derived. Nothing is invented when it
   // is absent - an employee with no status renders no badge, which is visibly
   // wrong, where a defaulted "Pending" would be invisibly wrong.
@@ -109,6 +122,26 @@ window.App = window.App || {};
           : ' fill="none" stroke="currentColor" stroke-width="1.3"' +
             ' stroke-linejoin="round"') +
       '/></svg>';
+  }
+
+  /*
+   * The done/not-done mark on a checklist somebody may only read.
+   *
+   * Not a disabled checkbox. A disabled control is skipped by keyboard
+   * navigation and reads as an action that is unavailable, and neither is true
+   * here - the state of an onboarding item is a fact about the record, not a
+   * button the employee is briefly forbidden from pressing. Same 16px grid and
+   * same currentColor reasoning as commentIcon.
+   */
+  function checklistStateIcon(done) {
+    var ring = '<circle cx="8" cy="8" r="6.35" fill="none" stroke="currentColor"' +
+      ' stroke-width="1.3"/>';
+    var tick = '<circle cx="8" cy="8" r="7" fill="currentColor"/>' +
+      '<path d="M4.6 8.3l2.2 2.2 4.6-4.6" fill="none" stroke="#fff"' +
+        ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
+
+    return '<svg class="item-state" viewBox="0 0 16 16" width="16" height="16"' +
+      ' aria-hidden="true" focusable="false">' + (done ? tick : ring) + '</svg>';
   }
 
   /*
@@ -178,6 +211,95 @@ window.App = window.App || {};
       '</div>';
   }
 
+  /*
+   * The three document slots, for whichever side is asking.
+   *
+   * One function and not two, so the employee's view and HR's cannot drift on
+   * what "uploaded" looks like. `editable` is the whole difference: true only for
+   * an employee looking at their own live record. HR never gets it - they have no
+   * upload route to call - and neither does an archived employee, whose record is
+   * frozen server side.
+   *
+   * A slot arrives as {slot, label, uploaded} plus, when uploaded, {filename,
+   * size, uploadedAt, downloadUrl}. Nothing is invented when a slot is empty:
+   * there is no downloadUrl to link to, and this draws the empty state instead.
+   */
+  function documentsSection(documents, editable) {
+    var cells = (documents || []).map(function (entry) {
+      var body;
+
+      if (entry.uploaded) {
+        // slice(0, 10) because uploadedAt is a full ISO timestamp and formatDate
+        // wants YYYY-MM-DD - handed the whole thing it returns "NaN Sep 2026".
+        // archivedNotice does the same.
+        var meta = formatBytes(entry.size) + ' \u00b7 ' +
+          formatDate(String(entry.uploadedAt || '').slice(0, 10));
+
+        body = '' +
+          '<p class="doc-filename">' + escapeHtml(entry.filename) + '</p>' +
+          '<p class="doc-meta">' + escapeHtml(meta) + '</p>' +
+          // rel=noopener on a target=_blank link, always. Also note the download
+          // is forced by Content-Disposition on the signed URL rather than by a
+          // `download` attribute - that attribute is ignored cross-origin.
+          '<p class="doc-actions">' +
+            '<a href="' + escapeHtml(entry.downloadUrl) + '" target="_blank"' +
+              ' rel="noopener">' + (editable ? 'View' : 'Download') + '</a>' +
+          '</p>';
+      } else {
+        body = '<p class="doc-empty">' +
+          (editable ? 'Nothing uploaded yet' : '\u2014 not uploaded \u2014') +
+          '</p>';
+      }
+
+      if (!editable) {
+        return '<div class="doc-slot">' +
+          '<h3>' + escapeHtml(entry.label) + '</h3>' + body + '</div>';
+      }
+
+      // A label wrapping a visually hidden file input, rather than a button that
+      // opens one. The label IS the drop zone, so the same element a mouse drags
+      // onto is the one a keyboard reaches - and it needs no click handler at all,
+      // because a label activating its input is native behaviour.
+      var inputId = 'doc-file-' + entry.slot;
+
+      return '' +
+        '<div class="doc-slot" data-slot="' + escapeHtml(entry.slot) + '">' +
+          '<h3>' + escapeHtml(entry.label) + '</h3>' +
+          body +
+          '<label class="doc-drop" for="' + inputId + '">' +
+            '<span class="doc-drop-main">' +
+              (entry.uploaded ? 'Replace this file' : 'Drop a file here') +
+            '</span>' +
+            '<span class="doc-drop-hint">or click to browse \u00b7 ' +
+              'PDF, JPG, PNG or Word, up to 10 MB</span>' +
+            // No `name`, deliberately. readForm() in js/app.js walks
+            // form.elements and takes .value off anything named - and a file
+            // input's value is the fake path "C:\fakepath\cv.pdf". This input
+            // sits outside the contact form anyway; leaving the name off means it
+            // stays harmless if that ever changes.
+            '<input class="sr-only" type="file" id="' + inputId + '"' +
+              ' data-slot="' + escapeHtml(entry.slot) + '"' +
+              ' accept=".pdf,.jpg,.jpeg,.png,.docx">' +
+          '</label>' +
+          '<p class="doc-status" data-status-for="' +
+            escapeHtml(entry.slot) + '" role="status"></p>' +
+        '</div>';
+    }).join('');
+
+    var note = editable
+      ? 'These are yours to upload. HR can see them but cannot change them.'
+      : 'Uploaded by the employee. Read-only here \u2014 ask them to replace a ' +
+        'wrong file.';
+
+    return '' +
+      '<section id="documents">' +
+        '<h2>' + (editable ? 'Your documents' : 'Documents') + '</h2>' +
+        '<p class="view-note">' + note + '</p>' +
+        '<div class="doc-grid">' + (cells ||
+          '<p class="doc-empty">Documents could not be loaded.</p>') + '</div>' +
+      '</section>';
+  }
+
   function field(config) {
     // The asterisk is decoration - aria-required is what actually says
     // "required", and reading "star" out loud says nothing.
@@ -210,6 +332,17 @@ window.App = window.App || {};
         '<option value="">Select&hellip;</option>' +
         options(config.choices, config.value) +
         '</select>';
+    } else if (config.type === 'textarea') {
+      // Its own branch so the address box gets the same label, hint,
+      // aria-describedby, aria-invalid and error slot every other control has -
+      // which is the entire reason field() exists rather than hand-written markup.
+      // readonly rather than disabled, for the reason spelled out below.
+      control = '<textarea id="' + config.name + '" name="' + config.name + '"' +
+        ' rows="' + (config.rows || 3) + '"' + shared +
+        (config.maxlength ? ' maxlength="' + config.maxlength + '"' : '') +
+        (config.readonly ? ' readonly' : '') +
+        (config.placeholder ? ' placeholder="' + escapeHtml(config.placeholder) + '"' : '') +
+        '>' + escapeHtml(config.value || '') + '</textarea>';
     } else {
       control = '<input id="' + config.name + '" name="' + config.name + '"' +
         ' type="' + (config.type || 'text') + '"' +
@@ -249,6 +382,8 @@ window.App = window.App || {};
     escapeHtml: escapeHtml,
     fullName: fullName,
     formatDate: formatDate,
+    formatBytes: formatBytes,
+    documentsSection: documentsSection,
 
     /**
      * The sign-in screen. `error` is the message from a rejected attempt, or
@@ -277,6 +412,10 @@ window.App = window.App || {};
               name: 'username',
               label: 'Username',
               required: true,
+              // Because the two roles do not sign in with the same kind of thing.
+              // HR has an account; an employee has a number, and nothing on this
+              // page would otherwise say so.
+              hint: 'HR signs in with a username. Employees use their employee number.',
               // Tells a password manager which field is which. Without it, the
               // browser cannot offer to fill or save either one.
               autocomplete: 'username'
@@ -298,85 +437,162 @@ window.App = window.App || {};
           '<div class="login-hint">' +
             '<p><strong>Demo accounts</strong></p>' +
             '<p>Officials &mdash; <code>hr.admin</code> / <code>onboard-2026</code><br>' +
-            'Employee &mdash; <code>employee</code> / <code>welcome-2026</code></p>' +
+            'Employee &mdash; your employee number, e.g. <code>E1001</code> / ' +
+              '<code>welcome-2026</code></p>' +
           '</div>' +
         '</div>';
     },
 
-    /** Directory rows - the employee-role counterpart of employeeRows. */
-    directoryRows: function (employees) {
-      if (!employees.length) {
-        return '<tr><td class="empty-state" colspan="6">' +
-          'No employees match this view.</td></tr>';
-      }
-
-      return employees.map(function (employee) {
-        // No data-id and no actions cell. There is nothing on this row to act
-        // on, so there is nothing for a handler to read an id from.
-        return '' +
-          '<tr>' +
-            '<td class="id-cell">' + escapeHtml(employee.id) + '</td>' +
-            '<td class="name-cell">' + escapeHtml(fullName(employee)) + '</td>' +
-            '<td>' + escapeHtml(employee.department) + '</td>' +
-            '<td>' + escapeHtml(employee.jobTitle) + '</td>' +
-            '<td>' + escapeHtml(formatDate(employee.startDate)) + '</td>' +
-            '<td>' + progressCell(employee) + ' ' + statusBadge(employee) + '</td>' +
-          '</tr>';
-      }).join('');
-    },
-
     /**
-     * The employee-role view: everyone, read-only.
+     * The employee's own record - the whole employee side of the app, in one
+     * screen.
      *
-     * A separate function rather than a `readOnly` flag on listView. listView
-     * carries the Add button, an actions column and a delete control on every
-     * row, and threading a flag through all of that leaves this view one
-     * forgotten conditional away from rendering an Edit link. Two functions
-     * cannot make that mistake - the markup for editing an employee does not
-     * exist in this one.
+     * It replaced a directory of everybody. The shape of that change is worth
+     * knowing when reading this: nothing here filters or hides a field, because
+     * the server already sent exactly what this role may see
+     * (own_profile_view in common/models.py). What this file decides is which
+     * parts are *editable*, and the API refuses the rest independently - so a
+     * control added here by mistake produces a 403, not an edit.
      *
-     * The columns are the fields the API sends this role. It does not send
-     * email, phone, manager, employment type or the checklist at all - see
-     * EMPLOYEE_VISIBLE_FIELDS in common/models.py - so nothing is being hidden
-     * here, and nothing would leak if this file were wrong.
+     * Four sections, in the order somebody actually wants them: how far along am
+     * I, what does the company have on file, what is outstanding, and what do you
+     * need from me.
      */
-    directoryView: function (employees, filters, facets) {
+    profileView: function (employee, documents) {
+      var p = employee.progress;
+      // Archived records are frozen server side. Offering live inputs over one
+      // would present an action that can only ever fail with a 409.
+      var frozen = !!employee.archived;
+
+      var items = employee.checklist.map(function (item) {
+        return '' +
+          '<li class="' + (item.done ? 'done' : '') + '">' +
+            '<div class="item-row">' +
+              checklistStateIcon(item.done) +
+              // The icon is aria-hidden, so the state has to be said in words
+              // somewhere or the list reads as eight labels and no answers.
+              '<span class="sr-only">' + (item.done ? 'Done' : 'Not done yet') +
+                '</span>' +
+              '<span class="item-label">' + escapeHtml(item.label) + '</span>' +
+              // Kept, and it is the most useful thing on the row: it says who
+              // the item is waiting on, which is sometimes them.
+              '<span class="owner">' + escapeHtml(item.owner) + '</span>' +
+            '</div>' +
+          '</li>';
+      }).join('');
+
+      var detail = function (label, value) {
+        return '<div><dt>' + escapeHtml(label) + '</dt><dd>' +
+          escapeHtml(value || '-') + '</dd></div>';
+      };
+
       return '' +
         '<div class="page-head">' +
           '<div>' +
-            '<h1 tabindex="-1">Employee Directory</h1>' +
-            '<p class="subtitle" id="record-count" aria-live="polite"></p>' +
+            '<h1 tabindex="-1">' + escapeHtml(fullName(employee)) + '</h1>' +
+            '<p class="subtitle">' + escapeHtml(employee.jobTitle) + ' &middot; ' +
+              escapeHtml(employee.department) + '</p>' +
           '</div>' +
         '</div>' +
 
-        '<p class="view-note">You are signed in with employee access. This ' +
-          'directory is read-only.</p>' +
+        archivedNotice(employee) +
 
-        '<div class="filters">' +
-          // No status filter. Sorting the whole company by who is behind on
-          // their paperwork is HR's view of this data, not this one's; the
-          // badge on the row is the fact, and a filter would make it a list.
-          '<input id="search" type="search" placeholder="Search by ID or name"' +
-            ' aria-label="Search the directory by employee ID or name"' +
-            ' value="' + escapeHtml(filters.search || '') + '">' +
-          '<select id="department-filter" aria-label="Filter by department">' +
-            '<option value="">All departments</option>' +
-            options(facets.departments, filters.department) +
-          '</select>' +
+        '<div class="summary-card">' +
+          statusBadge(employee) +
+          ' <strong id="progress-text">' + p.done + ' of ' + p.total +
+            ' complete</strong>' +
+          '<div class="progress-track" style="margin-top:8px" role="progressbar"' +
+            ' aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + p.percent + '"' +
+            ' aria-labelledby="progress-text">' +
+            '<div class="progress-bar" style="width:' + p.percent + '%"></div>' +
+          '</div>' +
+          '<dl class="summary-grid">' +
+            detail('Employee ID', employee.id) +
+            detail('Department', employee.department) +
+            detail('Job title', employee.jobTitle) +
+            detail('Start date', formatDate(employee.startDate)) +
+            detail('Reporting manager', employee.manager) +
+            detail('Employment type', employee.employmentType) +
+            detail('Work email', employee.email) +
+          '</dl>' +
+          '<p class="view-note">HR maintains the details above. Ask them if any ' +
+            'of it needs correcting &mdash; an employee number can never be ' +
+            'changed at all.</p>' +
         '</div>' +
 
-        '<table>' +
-          '<thead><tr>' +
-            '<th scope="col">Employee ID</th>' +
-            '<th scope="col">Name</th><th scope="col">Department</th>' +
-            '<th scope="col">Job title</th><th scope="col">Start date</th>' +
-            '<th scope="col">Onboarding</th>' +
-          '</tr></thead>' +
-          '<tbody id="employee-rows"></tbody>' +
-        '</table>';
+        '<h2>Your onboarding checklist</h2>' +
+        '<p class="view-note">HR and IT tick these off as they go. The owner ' +
+          'beside each one says who it is waiting on.</p>' +
+        '<ul class="checklist readonly">' + items + '</ul>' +
+
+        '<h2>Your details</h2>' +
+        '<p class="view-note">' + (frozen
+          ? 'This record is archived, so these can no longer be changed.'
+          : 'These three are yours to fill in and to keep up to date.') + '</p>' +
+        '<form class="form" id="contact-form" novalidate>' +
+          '<div class="form-grid">' +
+            field({
+              name: 'phone',
+              label: 'Phone',
+              value: employee.phone,
+              readonly: frozen,
+              placeholder: '+61 4XX XXX XXX'
+            }) +
+            field({
+              name: 'personalEmail',
+              label: 'Personal email',
+              type: 'email',
+              value: employee.personalEmail,
+              readonly: frozen,
+              hint: 'Somewhere we can reach you before your work account exists.'
+            }) +
+            field({
+              name: 'address',
+              label: 'Home address',
+              type: 'textarea',
+              rows: 3,
+              maxlength: 300,
+              full: true,
+              value: employee.address,
+              readonly: frozen
+            }) +
+          '</div>' +
+          (frozen
+            ? ''
+            : '<div class="btn-row">' +
+                '<button class="btn btn-primary" type="submit">Save details</button>' +
+              '</div>') +
+        '</form>' +
+
+        // Editable only on a live record. An archived one is frozen server side,
+        // so its slots render as plain text rather than as drop zones that could
+        // only ever produce a 409.
+        documentsSection(documents, !frozen);
     },
 
-    /** Table rows only - re-rendered on its own when filters change. */
+    /**
+     * Stands in for profileView when the signed-in number has no record behind it.
+     *
+     * Not notFoundView: that one offers a link back to #/employees, which the
+     * employee guard bounces straight back here - a dead end that looks like a
+     * broken app. This is reachable in two ordinary ways, so it says what to do
+     * about both: a mistyped employee number (POST /login cannot check one
+     * exists - it has no table access, by design), and a session left open from
+     * before this screen existed.
+     */
+    profileMissingView: function (employeeId) {
+      return '' +
+        '<div class="message-card">' +
+          '<h1 tabindex="-1">We cannot find your record</h1>' +
+          '<p>Nothing is on file under <code>' + escapeHtml(employeeId || '-') +
+            '</code>.</p>' +
+          '<p>If that is not your employee number, sign out and sign in again ' +
+            'with the right one. If it is, HR has not added your record yet ' +
+            '&mdash; they will need to create it before this page can show you ' +
+            'anything.</p>' +
+        '</div>';
+    },
+
     employeeRows: function (employees) {
       if (!employees.length) {
         return '<tr><td class="empty-state" colspan="7">' +
@@ -521,7 +737,7 @@ window.App = window.App || {};
       * the page repaints this whole view from the server's response - and a
       * half-written comment must survive that.
       */
-    checklistView: function (employee, editing) {
+    checklistView: function (employee, editing, documents) {
       var p = employee.progress;
       // Archived records are frozen server side. Presenting live checkboxes over
       // one would offer the user an action that can only ever fail with a 409.
@@ -591,9 +807,9 @@ window.App = window.App || {};
         '<h2>Onboarding checklist</h2>' +
         '<ul class="checklist" id="checklist">' + items + '</ul>' +
 
-        '<h2>Documents</h2>' +
-        '<div class="stub">Offer letter, ID proof and signed policy uploads land here ' +
-          'once document storage (S3) is built in a later phase.</div>';
+        // Read-only, always. There is no officials upload route to call - see
+        // handlers/request_document_upload - so this cannot offer one.
+        documentsSection(documents, false);
     },
 
     /*

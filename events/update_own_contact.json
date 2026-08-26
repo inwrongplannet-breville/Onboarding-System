@@ -1,0 +1,20 @@
+{
+  "resource": "/employees/{id}/contact",
+  "path": "/employees/E1001/contact",
+  "httpMethod": "PATCH",
+  "pathParameters": {
+    "id": "E1001"
+  },
+  "queryStringParameters": null,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"phone\": \"+61 400 111 222\", \"personalEmail\": \"priya@example.com\", \"address\": \"12 Smith Street, Sydney NSW 2000\"}",
+  "isBase64Encoded": false,
+  "requestContext": {
+    "authorizer": {
+      "role": "employee",
+      "username": "E1001"
+    }
+  }
+}

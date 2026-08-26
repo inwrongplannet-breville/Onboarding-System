@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Employee Management & Onboarding System.
-  One DynamoDB item per employee + six Lambdas behind API Gateway, wired to the UI.
+  One DynamoDB item per employee + eleven Lambdas behind API Gateway, wired to the UI.
   DELETE archives rather than erases - see src/handlers/delete_employee.py.
 
 Parameters:
@@ -103,6 +103,93 @@ Resources:
   #
   # GenerateSecretString runs on create only, so redeploying does not rotate the
   # key and does not sign everybody out.
+  # ------------------------------------------------------------ document store
+  #
+  # Three objects per employee at most - employees/<id>/resume and its two
+  # siblings. The layout and the reasoning behind it are in
+  # src/common/documents.py; what matters here is that nothing public can reach
+  # it and that the browser can POST to it directly.
+  #
+  # No BucketName, for the same reason OnboardingTable has no TableName: an
+  # explicit name is what makes a resource replacement undeployable. Two bonuses
+  # specific to S3 - bucket names are globally unique, so a literal would collide
+  # with anyone else deploying this, and a generated name is guaranteed dot-free,
+  # which matters because a dotted name breaks TLS against the
+  # *.s3.<region>.amazonaws.com wildcard certificate on the virtual-hosted URL
+  # the browser uploads to.
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    # Delete, matching OnboardingTable - but note this is NOT sufficient on its
+    # own. CloudFormation cannot delete a bucket that still holds objects: the
+    # stack lands in DELETE_FAILED and `sam delete` reports failure. The bucket
+    # has to be emptied first, and README.md carries the command.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      # Nothing about a document is public. All four, because the two Block*
+      # settings and the two Ignore/Restrict settings cover different paths in
+      # and any one left false is a way back.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # ACLs off entirely. With BucketOwnerEnforced there is no per-object owner
+      # to get wrong, which is also why the upload ticket sends no `acl` field -
+      # S3 would reject one.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # No VersioningConfiguration, and that is a decision rather than an
+      # omission. One file per slot at a fixed key means overwrite *is* the
+      # feature - there is no history to show and nothing that has to work out
+      # which upload is current. Versioning would also make teardown a two-pass
+      # job: delete the objects, then the versions and delete markers.
+      CorsConfiguration:
+        CorsRules:
+          # The browser posts the file straight here, so this bucket needs its
+          # own CORS rule - the one on OnboardingApi covers the API only.
+          #
+          # A multipart/form-data POST with no custom request headers is a
+          # CORS-safelisted "simple request", so no preflight is sent. The
+          # *response* still has to carry Access-Control-Allow-Origin or fetch()
+          # rejects it - and rejects it as an opaque TypeError with no status, so
+          # without this rule the UI reports "could not reach the server" for an
+          # upload S3 actually accepted.
+          #
+          # POST and not PUT: the ticket is a form POST, because only a POST
+          # policy can carry content-length-range and cap the upload at 10 MB.
+          # GET and HEAD are for completeness - HR downloads by following a
+          # presigned link, which is a navigation rather than a cross-origin
+          # fetch, so CORS never enters into it.
+          #
+          # Note `!Ref` and not the `!Sub "'${...}'"` form used on OnboardingApi
+          # below. The quoted form is an API Gateway requirement; here it would
+          # put literal apostrophes into the allowed origin and fail every
+          # upload for a reason nothing in the browser console spells out.
+          - AllowedOrigins:
+              - !Ref AllowedOrigin
+            AllowedMethods:
+              - POST
+              - GET
+              - HEAD
+            # Content-Type only. x-amz-meta-filename travels as a form *field*,
+            # not a header, so listing it here would describe a request nobody
+            # makes. This only matters for a preflight, which this flow does not
+            # trigger; it is here so a future XHR that sets a header works.
+            AllowedHeaders:
+              - Content-Type
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+      Tags:
+        - Key: Project
+          Value: onboarding-system
+
   JwtSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -113,6 +200,23 @@ Resources:
         # material - so punctuation buys nothing and only risks quoting
         # accidents for anyone who ever has to handle it.
         ExcludePunctuation: true
+
+  # Login credentials - see common/accounts.py. Unlike JwtSecret above, this
+  # cannot use GenerateSecretString: a signing key can be any random string, but
+  # a salt+hash pair has to correspond to an actual chosen password, which
+  # CloudFormation cannot generate meaningfully.
+  #
+  # So it starts as a placeholder that matches nothing - an empty accounts map
+  # and an all-zero employee credential - and every login 401s until
+  # scripts/seed_accounts_secret.py runs against the deployed stack. That is
+  # the point: a forgotten seeding step is a loud, obvious failure at the login
+  # screen, not a silent bypass or a stack that quietly ships with no real
+  # credentials at all.
+  AccountsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Login accounts (PBKDF2 salt+hash) for hr.admin and the shared employee credential.
+      SecretString: '{"accounts":{},"employeeCredential":{"salt":"00000000000000000000000000000000","hash":"0000000000000000000000000000000000000000000000000000000000000000"}}'
 
   # ------------------------------------------------------------------- the API
   OnboardingApi:
@@ -208,7 +312,7 @@ Resources:
 
   # ----------------------------------------------------------------- functions
   #
-  # Six separate functions sharing one CodeUri. Separate so each gets its own
+  # Eleven separate functions sharing one CodeUri. Separate so each gets its own
   # IAM role and its own CloudWatch log group; shared CodeUri so `common/` is
   # packaged into each one without a Lambda layer. Each zip is a few KB.
   #
@@ -257,15 +361,19 @@ Resources:
       Environment:
         Variables:
           JWT_SECRET_ARN: !Ref JwtSecret
+          ACCOUNTS_SECRET_ARN: !Ref AccountsSecret
       Policies:
         - Version: '2012-10-17'
           Statement:
-            # The signing key, and nothing else. No DynamoDB at all - a login
-            # route that could read the employee table is a login route that
-            # would, if it were ever wrong.
+            # The signing key and the login accounts, and nothing else. No
+            # DynamoDB at all - a login route that could read the employee
+            # table is a login route that would, if it were ever wrong.
             - Effect: Allow
               Action: secretsmanager:GetSecretValue
               Resource: !Ref JwtSecret
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref AccountsSecret
       Events:
         Api:
           Type: Api
@@ -401,6 +509,122 @@ Resources:
             Path: /employees/{id}
             Method: DELETE
 
+  UpdateOwnContactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.update_own_contact.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # UpdateItem for the write, GetItem for the two reads around it: the
+            # consistent re-read that builds the response, and the read on a
+            # failed condition that tells an archived record from a missing one.
+            # The same pair UpdateEmployeeFunction needs, for the same reasons.
+            #
+            # No dynamodb:Attributes condition, though it is tempting here - the
+            # handler only ever names five attributes. It is left off because moto
+            # does not emulate IAM, so a wrong condition would pass every test in
+            # tests/ and fail only against the deployed stack. The whitelist in
+            # common/models.SELF_EDITABLE_FIELDS is the control; adding IAM as a
+            # second one is worth doing when it can be tested.
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}/contact
+            Method: PATCH
+
+  # The two document functions. Both get BUCKET_NAME and the other nine do not -
+  # which looks like the JWT_SECRET_ARN treatment above and is doing something
+  # different, so it is worth being clear about which.
+  #
+  # JWT_SECRET_ARN is scoped because the value is a *capability*: knowing it plus
+  # a GetSecretValue permission mints tokens. A bucket name is not - the
+  # capability is entirely in the s3:GetObject / s3:PutObject below, and a
+  # function that knows the name and has no policy can do precisely nothing with
+  # it. So this is not a confidentiality control and should not be mistaken for
+  # one.
+  #
+  # It is scoped because it fails loudly. common/documents.py reads
+  # os.environ['BUCKET_NAME'] at module scope, so a tenth function that imports
+  # it gets a KeyError at cold start with an obvious cause. Put the name in
+  # Globals and that same mistake becomes a runtime AccessDenied surfacing as a
+  # generic 500.
+
+  GetDocumentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.get_documents.lambda_handler
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DocumentsBucket
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # GetObject for the download links. Note this function *reads* no
+            # object body - it heads them and signs URLs - but a presigned URL
+            # carries the signer's permissions, so the signer needs the
+            # permission the URL will exercise. generate_presigned_url makes no
+            # API call, so without this the tickets mint happily and 403 in the
+            # browser.
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub '${DocumentsBucket.Arn}/employees/*'
+            # ListBucket, and it is not optional. S3 answers a HeadObject for a
+            # *missing* key with 403 rather than 404 unless the caller may list
+            # the bucket - it will not confirm non-existence to someone with no
+            # business enumerating. Without this every empty slot raises 403,
+            # describe_slots re-raises, and a new employee's documents page is a
+            # 500. moto does not emulate IAM, so no test can catch it.
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource: !GetAtt DocumentsBucket.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}/documents
+            Method: GET
+
+  RequestDocumentUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.request_document_upload.lambda_handler
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DocumentsBucket
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # PutObject and nothing else. No GetObject, so the route that
+            # authorises an upload structurally cannot read documents back; no
+            # DeleteObject anywhere in this stack, which is what makes "nobody
+            # can remove a document through the app" a property of IAM rather
+            # than of the UI.
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub '${DocumentsBucket.Arn}/employees/*'
+            # The archived-and-exists check. A consistent projected read, so a
+            # ticket is never minted for an employee who does not exist or whose
+            # record is frozen.
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /employees/{id}/documents/{slot}
+            Method: POST
+
   SetChecklistItemFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -434,8 +658,19 @@ Outputs:
   TableName:
     Description: DynamoDB table name.
     Value: !Ref OnboardingTable
+  DocumentsBucketName:
+    Description: >
+      Employee document store. This bucket must be EMPTIED BY HAND before
+      `sam delete` - CloudFormation cannot delete a bucket that still holds
+      objects, and the stack lands in DELETE_FAILED if you try. See README.md.
+    Value: !Ref DocumentsBucket
   JwtSecretArn:
     Description: >
       Signing key for session tokens. Rotate it to invalidate every token in
       circulation - see the resource comment for the one-liner.
     Value: !Ref JwtSecret
+  AccountsSecretArn:
+    Description: >
+      Login accounts secret. Starts as a placeholder that matches no password -
+      populate it with scripts/seed_accounts_secret.py after each deploy.
+    Value: !Ref AccountsSecret

@@ -35,7 +35,23 @@ VALID = {
 # ever read requestContext. Role *enforcement* is tested separately, at the bottom
 # of this file, where the point is the employee context rather than the CRUD.
 OFFICIAL = {'requestContext': {'authorizer': {'role': 'official', 'username': 'hr.admin'}}}
-EMPLOYEE = {'requestContext': {'authorizer': {'role': 'employee', 'username': 'employee'}}}
+
+
+def as_employee(employee_id):
+    """
+    An employee caller, signed in as that employee number.
+
+    An employee's username *is* their employee number - see common/accounts.py -
+    so the tests that care whose record is being touched build their context from
+    the id rather than sharing one constant.
+    """
+    return {'requestContext': {'authorizer': {'role': 'employee', 'username': employee_id}}}
+
+
+# A caller whose number matches nothing this suite creates. Every "an employee
+# cannot X" test below uses it, and they all still fail closed: 'employee' folds
+# to 'EMPLOYEE', which is a well-formed employee number and never a real record.
+EMPLOYEE = as_employee('employee')
 
 
 def signed_in(event, context=None):
@@ -69,6 +85,14 @@ def delete(handlers, employee_id, context=None):
 
 def patch(handlers, employee_id, item_id, done, context=None):
     return patch_raw(handlers, employee_id, item_id, {'done': done}, context)
+
+
+def patch_contact(handlers, employee_id, payload, context=None):
+    """PATCH /employees/{id}/contact. Note this is a different route from `patch`
+    above, which is the checklist one."""
+    return handlers['update_own_contact'](signed_in(
+        {'pathParameters': {'id': employee_id}, 'body': json.dumps(payload)},
+        context), None)
 
 
 def patch_raw(handlers, employee_id, item_id, payload, context=None):

@@ -12,12 +12,14 @@ _profile_update.
 
 The condition expression is load-bearing too: UpdateItem *upserts* by default, so
 a PUT to an unknown id would happily create a half-employee with no checklist
-behind it. That is what the EXISTS half of PROFILE_GUARD is for.
+behind it. That is what the EXISTS half of ACTIVE_GUARD is for.
 
 An archived employee is refused with a 409 - see handlers/delete_employee for why
 the record freezes. The check happens once, as a condition on the write itself, so
-an archive landing mid-request cannot be overwritten; _guard_failure then reads
-back to say which half of the condition fired.
+an archive landing mid-request cannot be overwritten; guard_failure_response then
+reads back to say which half of the condition fired. Both the condition and that
+reading live in common/repository.py, because the employee's own contact patch
+needs exactly the same pair.
 
 There is no rename here, and there cannot be. `employeeId` is the partition key,
 and an UpdateItem naming a different Key does not move an item - it upserts a new
@@ -43,27 +45,9 @@ from common.handler import (
     parse_body,
     require_official,
 )
-from common.keys import EXISTS, key
-from common.models import ARCHIVED_MESSAGE, EDITABLE_FIELDS, pick_editable, validate_employee
-from common.repository import load_archive_state, load_employee
-
-
-# The employee has to exist and must not be archived.
-PROFILE_GUARD = EXISTS + ' AND attribute_not_exists(#archivedAs)'
-
-
-def _guard_failure(employee_id):
-    """
-    Turn a fired PROFILE_GUARD into the right status code.
-
-    Re-reads rather than guessing which half of the condition it was, because
-    'archived' and 'never existed' are a 409 and a 404 and telling a caller the
-    wrong one sends them looking in the wrong place.
-    """
-    state = load_archive_state(employee_id)
-    if state is not None and state['archivedAs']:
-        return responses.conflict(ARCHIVED_MESSAGE)
-    return responses.not_found('No employee with id ' + employee_id + '.')
+from common.keys import key
+from common.models import EDITABLE_FIELDS, pick_editable, validate_employee
+from common.repository import ACTIVE_GUARD, guard_failure_response, load_employee
 
 
 def _profile_update(values, now):
@@ -85,7 +69,7 @@ def _profile_update(values, now):
     names['#updatedAt'] = 'updatedAt'
     values_map[':updatedAt'] = now
 
-    # Not in the SET clause - it is here for PROFILE_GUARD, which shares this
+    # Not in the SET clause - it is here for ACTIVE_GUARD, which shares this
     # names map. DynamoDB rejects an ExpressionAttributeNames entry that no
     # expression uses, so this is only legal because the two always travel
     # together.
@@ -115,11 +99,11 @@ def lambda_handler(event, context):
             UpdateExpression=expression,
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values_map,
-            ConditionExpression=PROFILE_GUARD,
+            ConditionExpression=ACTIVE_GUARD,
         )
     except ClientError as error:
         if is_condition_failure(error):
-            return _guard_failure(employee_id)
+            return guard_failure_response(employee_id)
         raise
 
     # Re-read so the response carries the checklist too, matching GET exactly.

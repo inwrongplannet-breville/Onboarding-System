@@ -2,7 +2,7 @@
 API Gateway proxy responses.
 
 Every handler returns through here so status codes, headers and the error body
-shape stay identical across all six routes.
+shape stay identical across all eight routes.
 
 CORS headers are set now even though Phase 2 is tested with curl only - the
 browser needs them the moment Phase 3 points the UI at this API, and a missing
@@ -22,7 +22,7 @@ import os
 # that; the throttle in template.yaml covers what is left.
 #
 # Falls back to '*' only if the variable is missing, which in a deployed stack it
-# is not - template.yaml sets it on all eight functions. The fallback exists so
+# is not - template.yaml sets it on all nine functions. The fallback exists so
 # that `sam local` and the tests do not have to care.
 ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN') or '*'
 

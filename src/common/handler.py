@@ -137,6 +137,33 @@ def is_official(event):
     return caller_role(event) == ROLE_OFFICIAL
 
 
+def caller_username(event):
+    """
+    The username API Gateway's authorizer put on this request, or ''.
+
+    Same source as caller_role and the same guarantee: the token was verified
+    once, by handlers/authorizer.py, before this Lambda was invoked. Nothing in
+    the request body or headers can reach this value, which is the only reason it
+    is safe to authorise anything with.
+    """
+    context = ((event.get('requestContext') or {}).get('authorizer') or {})
+    value = context.get('username')
+    return value if isinstance(value, str) else ''
+
+
+def caller_employee_id(event):
+    """
+    The caller's own employee number, or ''.
+
+    An employee's username *is* their employee number - see common/accounts.py -
+    and this folds it exactly as employee_id_param folds the one in the URL, so
+    the two are comparable. An officials username ('hr.admin') folds to something
+    that is not a valid employee number and therefore matches no record, which is
+    what makes require_self closed to officials rather than accidentally open.
+    """
+    return clean_employee_id(caller_username(event))
+
+
 def require_role(event):
     """
     The caller's role, or 403. First line of the two reading endpoints.
@@ -152,13 +179,44 @@ def require_role(event):
     return role
 
 
-def require_official(event):
+# Written for the four writing endpoints, which is why it talks about writes.
+# GET /employees is officials-only now too and needs a different sentence - see
+# the call there.
+READ_ONLY_MESSAGE = 'Your account has read-only access to employee records.'
+
+
+def require_official(event, message=READ_ONLY_MESSAGE):
     """
-    Gate for the four writing endpoints. First line of each handler.
+    Gate for the four writing endpoints, and for the directory. First line of each.
 
     The message says what the caller is rather than what they are missing -
     "your account is read-only" is actionable, where "insufficient permissions"
-    invites a retry.
+    invites a retry. It is a parameter because the default sentence is about
+    writing, and one caller is refusing a read.
     """
     if not is_official(event):
-        raise Forbidden('Your account has read-only access to employee records.')
+        raise Forbidden(message)
+
+
+def require_self(event, employee_id):
+    """
+    Gate for the two own-record endpoints. 403 unless this record is the caller's.
+
+    No officials bypass. Officials reach every record through require_official,
+    and folding both rules together here would leave a refusal unable to say
+    which one applied.
+
+    Called *before* the read, deliberately, so an employee probing ids gets the
+    same 403 whether or not the record exists - the endpoint says nothing about
+    who is in the table.
+
+    The emptiness check is not redundant, and this is the part worth keeping.
+    caller_employee_id is '' for an event carrying no username at all, and
+    employee_id_param cannot return '' today because path_param raises on a
+    falsy value. Without the check, that pairing is one refactor away from an
+    unauthenticated request matching a record - so it fails closed here instead
+    of relying on a guarantee made in another file.
+    """
+    caller = caller_employee_id(event)
+    if not caller or not employee_id or caller != employee_id:
+        raise Forbidden('You can only see your own record.')

@@ -863,11 +863,11 @@
       }
     },
     {
-      "name": "Employee role - read-only",
-      "description": "Signs in as the employee account and shows both halves of the role split: a trimmed read and a refused write. Run in order.",
+      "name": "Employee role - their own record only",
+      "description": "Signs in as an employee and shows both halves of the role split: their own record in full, and a refusal for everything else - the directory, another employee's record, and every write but their own contact details. Run in order.",
       "item": [
         {
-          "name": "Sign in as employee (stores {{employeeToken}})",
+          "name": "Sign in as E1001 (stores {{employeeToken}})",
           "event": [
             {
               "listen": "test",
@@ -878,6 +878,11 @@
                   "var body = pm.response.json();",
                   "pm.test('role is employee', function () {",
                   "  pm.expect(body.role).to.eql('employee');",
+                  "});",
+                  "// The number, not a name. POST /login has no table access by design, so it",
+                  "// has nothing else it could return - see the LoginFunction policy.",
+                  "pm.test('displayName is the employee number', function () {",
+                  "  pm.expect(body.displayName).to.eql('E1001');",
                   "});",
                   "pm.collectionVariables.set('employeeToken', body.token);"
                 ]
@@ -897,7 +902,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"employee\",\n  \"password\": \"welcome-2026\"\n}"
+              "raw": "{\n  \"username\": \"E1001\",\n  \"password\": \"welcome-2026\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/login",
@@ -911,30 +916,17 @@
           }
         },
         {
-          "name": "List as employee - no email, phone, manager or checklist",
+          "name": "The directory as an employee - 403",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('200', function () { pm.response.to.have.status(200); });",
-                  "var employees = pm.response.json().employees;",
-                  "pm.test('there is something to check', function () {",
-                  "  pm.expect(employees.length).to.be.above(0);",
-                  "});",
-                  "// Absent, not blank. See restrict_for_employee in common/models.py.",
-                  "['email', 'phone', 'manager', 'employmentType', 'checklist',",
-                  " 'archived', 'archivedAs', 'archivedAt'].forEach(function (field) {",
-                  "  pm.test('does not send ' + field, function () {",
-                  "    employees.forEach(function (employee) {",
-                  "      pm.expect(employee).to.not.have.property(field);",
-                  "    });",
-                  "  });",
-                  "});",
-                  "pm.test('still sends onboarding progress', function () {",
-                  "  pm.expect(employees[0]).to.have.property('progress');",
-                  "  pm.expect(employees[0]).to.have.property('status');",
+                  "pm.test('403 - there is no directory for this role any more',",
+                  "  function () { pm.response.to.have.status(403); });",
+                  "pm.test('and it leaks no names', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('@breville.com');",
                   "});"
                 ]
               }
@@ -960,6 +952,642 @@
               ],
               "path": [
                 "employees"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Own record - the whole thing, minus checklist comments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var employee = pm.response.json();",
+                  "// The directory used to hide these because they were somebody else's.",
+                  "// On your own record they are simply yours.",
+                  "['email', 'phone', 'manager', 'employmentType', 'checklist',",
+                  " 'personalEmail', 'address', 'status', 'progress'].forEach(function (field) {",
+                  "  pm.test('sends ' + field, function () {",
+                  "    pm.expect(employee).to.have.property(field);",
+                  "  });",
+                  "});",
+                  "// The one exception, and the check that matters: a comment is an HR",
+                  "// working note. Absent, not blank. See own_profile_view in common/models.py.",
+                  "pm.test('no checklist item carries a comment', function () {",
+                  "  employee.checklist.forEach(function (item) {",
+                  "    pm.expect(item).to.not.have.property('comment');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Another employee's record - 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', function () { pm.response.to.have.status(403); });",
+                  "pm.test('and no name escapes with it', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('@breville.com');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1002",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1002"
+              ]
+            }
+          }
+        },
+        {
+          "name": "A record that does not exist - 403, identically",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The same refusal as the request above, byte for byte. require_self runs",
+                  "// before the read, so walking the id space says nothing about who is real.",
+                  "pm.test('403, not 404', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/E9999",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E9999"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Own contact details - 200, and HR fields untouched",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var employee = pm.response.json();",
+                  "pm.test('the three it owns were written', function () {",
+                  "  pm.expect(employee.phone).to.eql('+61 400 111 222');",
+                  "  pm.expect(employee.personalEmail).to.eql('priya@example.com');",
+                  "  pm.expect(employee.address).to.include('Smith Street');",
+                  "});",
+                  "// The body named department and firstName too. The whitelist drops them.",
+                  "pm.test('and nothing else was', function () {",
+                  "  pm.expect(employee.department).to.not.eql('Finance');",
+                  "  pm.expect(employee.firstName).to.not.eql('Somebody');",
+                  "  pm.expect(employee.checklist.length).to.eql(8);",
+                  "});",
+                  "// The write path must apply the same trim as the read path, or a 200 that",
+                  "// looked entirely correct would hand back every comment on the record.",
+                  "pm.test('the response is the own-record shape', function () {",
+                  "  employee.checklist.forEach(function (item) {",
+                  "    pm.expect(item).to.not.have.property('comment');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"+61 400 111 222\",\n  \"personalEmail\": \"priya@example.com\",\n  \"address\": \"12 Smith Street, Sydney NSW 2000\",\n  \"department\": \"Finance\",\n  \"firstName\": \"Somebody\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/contact",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "contact"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Another employee's contact details - 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', function () { pm.response.to.have.status(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"+61 400 000 000\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1002/contact",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1002",
+                "contact"
+              ]
+            }
+          }
+        },
+        {
+          "name": "A contact patch naming nothing it owns - 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// `department` is not theirs to send, so the whitelist left the body empty",
+                  "// - and an empty contact patch is a request that forgot to say what it wanted.",
+                  "pm.test('400', function () { pm.response.to.have.status(400); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"department\": \"HR\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/contact",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "contact"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Own documents - three slots, uploaded or not",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var documents = pm.response.json().documents;",
+                  "pm.test('always three slots, in column order', function () {",
+                  "  pm.expect(documents.map(function (d) { return d.slot; }))",
+                  "    .to.eql(['resume', 'id-document', 'signed-offer-letter']);",
+                  "});",
+                  "// An empty slot is not omitted and not a 404 - it is reported as absent,",
+                  "// which is what lets the UI draw an empty drop zone.",
+                  "pm.test('an empty slot has no downloadUrl at all', function () {",
+                  "  documents.forEach(function (slot) {",
+                  "    if (!slot.uploaded) {",
+                  "      pm.expect(slot).to.not.have.property('downloadUrl');",
+                  "      pm.expect(slot).to.not.have.property('filename');",
+                  "    }",
+                  "  });",
+                  "});",
+                  "pm.test('uploadedAt is a string, not a datetime', function () {",
+                  "  documents.forEach(function (slot) {",
+                  "    if (slot.uploaded) pm.expect(slot.uploadedAt).to.be.a('string');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/documents",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "documents"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Another employee's documents - 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', function () { pm.response.to.have.status(403); });",
+                  "pm.test('and no filename or bucket name escapes', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('.pdf');",
+                  "  pm.expect(pm.response.text()).to.not.include('s3');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1002/documents",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1002",
+                "documents"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Upload ticket for own resume - 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var ticket = pm.response.json();",
+                  "// The key is built server-side from the slot and the token. Nothing from",
+                  "// the body reaches it - which is why the traversal test below is a",
+                  "// non-event rather than a near miss.",
+                  "pm.test('the key is fixed and server-built', function () {",
+                  "  pm.expect(ticket.fields.key).to.eql('employees/E1001/resume');",
+                  "});",
+                  "pm.test('the policy caps the size', function () {",
+                  "  var policy = JSON.parse(atob(ticket.fields.policy));",
+                  "  var ranges = policy.conditions.filter(function (c) {",
+                  "    return Array.isArray(c) && c[0] === 'content-length-range';",
+                  "  });",
+                  "  pm.expect(ranges.length).to.eql(1);",
+                  "  pm.expect(ranges[0][2]).to.eql(10485760);",
+                  "});",
+                  "// BucketOwnerEnforced means an acl field is rejected, and anything extra",
+                  "// in the form is \"Extra input fields\".",
+                  "pm.test('no acl field', function () {",
+                  "  pm.expect(ticket.fields).to.not.have.property('acl');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"Priya Sharma CV.pdf\",\n  \"contentType\": \"application/pdf\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/documents/resume",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "documents",
+                "resume"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Upload ticket with a traversing filename - key unchanged",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', function () { pm.response.to.have.status(200); });",
+                  "var ticket = pm.response.json();",
+                  "pm.test('the key did not move', function () {",
+                  "  pm.expect(ticket.fields.key).to.eql('employees/E1001/resume');",
+                  "});",
+                  "pm.test('the filename was sanitised', function () {",
+                  "  pm.expect(ticket.filename).to.not.include('..');",
+                  "  pm.expect(ticket.filename).to.not.include('/');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"../../../etc/passwd\",\n  \"contentType\": \"application/pdf\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/documents/resume",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "documents",
+                "resume"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Upload ticket for another employee's slot - 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403', function () { pm.response.to.have.status(403); });",
+                  "// A ticket IS the capability, so a leaked one is the whole risk.",
+                  "pm.test('and no ticket leaked', function () {",
+                  "  var payload = pm.response.json();",
+                  "  pm.expect(payload).to.not.have.property('url');",
+                  "  pm.expect(payload).to.not.have.property('fields');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"cv.pdf\",\n  \"contentType\": \"application/pdf\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1002/documents/resume",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1002",
+                "documents",
+                "resume"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Upload ticket for an unknown slot - 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', function () { pm.response.to.have.status(400); });",
+                  "// The slot is attacker-controlled and this message is rendered by the UI.",
+                  "pm.test('the message does not echo the slot', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('not-a-slot');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{employeeToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"filename\": \"cv.pdf\",\n  \"contentType\": \"application/pdf\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/employees/E1001/documents/not-a-slot",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "employees",
+                "E1001",
+                "documents",
+                "not-a-slot"
               ]
             }
           }

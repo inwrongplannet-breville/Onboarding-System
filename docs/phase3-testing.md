@@ -44,10 +44,21 @@ browser is not the thing enforcing it.
 | 1 | Load `/` signed out | The login card. Not a flash of the employee list on the way past |
 | 2 | Type `#/employees`, `#/employees/new`, `#/employees/E1001/edit`, `#/employees/E1001/checklist` into the address bar, signed out | Every one lands on `#/login` |
 | 3 | Sign in with a wrong password | Inline message above the fields, password cleared, focus in the password box, and the message is announced |
-| 4 | Sign in as `employee` / `welcome-2026` | The directory: six columns, no Add button, no Edit/Checklist/Delete, no actions column at all |
-| 5 | As the employee, expand a row in the Network response for `GET /employees` | **No `email`, `phone`, `manager`, `employmentType` or `checklist` keys.** Absent, not empty — this is the check that matters, because the UI not drawing a field proves nothing |
-| 6 | As the employee, type the four officials hashes from step 2 | Every one lands on `#/directory` |
-| 7 | As the employee, search for `und` | No matches. (`applyFilters` builds its haystack from a field the employee response omits; without the coercion in `app.js` this matches every row) |
+| 4 | Sign in as `E1001` / `welcome-2026` | `#/me` — one person's record. Their name in the header chip (not `E1001`, which is all the login could return), their own checklist with no checkboxes, and one form of three fields |
+| 4b | Sign in as `e1001`, lower case | The same record. The number is upper-cased into the token so it matches the partition key |
+| 5 | As the employee, read the Network response for `GET /employees/E1001` | The **whole** record — `email`, `manager`, `employmentType`, `checklist` all present. Then check every checklist item: **no `comment` key at all.** Absent, not empty. This is the check that matters, because the UI not drawing a field proves nothing |
+| 5b | As the employee, type `#/employees/E1002` in the address bar | Bounced to `#/me`. Then in the console, `fetch(App.API_BASE_URL + '/employees/E1002', {headers:{Authorization:'Bearer ' + App.auth.token()}}).then(r => r.status)` → **403**. The guard sent you back; the API is what refused you |
+| 5c | Same again for `/employees/E9999`, a number with no record | **403**, with a body identical to 5b. The check runs before the read, so this endpoint will not tell you which numbers are real |
+| 5d | As the employee, `fetch` `GET /employees` | **403**. There is no directory for this role any more |
+| 6 | As the employee, type the four officials hashes from step 2 | Every one lands on `#/me` |
+| 7 | As the employee, edit phone / personal email / address and save, then reload | The values persist. Send a personal email of `nope` first: the message lands **under that input**, not in the page banner |
+| 7c | As the employee, drag a PDF onto **Resume** | Filename, size and date appear with no reload. The other two slots are untouched. In the Network tab: a `POST` to *our* API returning a ticket, then a `POST` **to `s3.amazonaws.com`** returning `204` — the file never goes through API Gateway |
+| 7d | Tab to a drop zone | A visible focus ring. `.sr-only` clips rather than hides, so the file input is focusable and its own ring is clipped away — `.doc-drop:focus-within` is the only thing drawing one |
+| 7e | Drop a 20 MB file | Refused with a message beside the slot and **no request made**. Then raise the limit in devtools and force it: S3 itself returns `403`, which is the `content-length-range` policy condition doing the work rather than the browser |
+| 7f | Drop a `.exe`, then a file just outside a zone | Refused on type; and the page does **not** navigate away to render the file — that is the document-level `dragover`/`drop` guard in `app.js` |
+| 7g | Upload a file called `../../etc/passwd.pdf` | Succeeds, stored as `passwd.pdf`. In the S3 console the key is still exactly `employees/E1001/resume` — the key is built from the slot and the token, so a filename can never move it |
+| 7h | Now save your contact details | **The documents section is still populated.** Every repaint in this app is driven by a write's response, and no write response carries documents — this is the regression that check exists for |
+| 7b | Sign in as `E9999` / `welcome-2026` | Signs in fine, then "We cannot find your record". `POST /login` has no table access, so a mistyped number cannot be caught any earlier — and this screen has no link back to `#/employees`, which the guard would bounce |
 | 8 | Sign in as `hr.admin` and check any request header | `Authorization: Bearer …`, and the preflight `OPTIONS` returns 200. A failed preflight shows up here as a CORS error rather than as a 401 |
 | 9 | Reload mid-session | Still signed in |
 | 10 | Sign out, then press Back | The login page, not the app |
@@ -55,17 +66,19 @@ browser is not the thing enforcing it.
 
 ### Prove the guard is not the control
 
-Signed in as `employee`, in the console:
+Signed in as `E1001`, in the console:
 
 ```js
 var s = JSON.parse(sessionStorage['onboarding.session']);
 s.role = 'official';                       // there is no such field any more
+s.employeeId = 'E1002';                    // nor this one
 sessionStorage['onboarding.session'] = JSON.stringify(s);
 location.hash = '#/employees';
 ```
 
-**Nothing happens** — you stay in the directory. The role is read from the token's own payload,
-so there is no stored copy to edit. Adding one changes nothing.
+**Nothing happens** — you stay on your own profile. The role *and* which employee you are come from
+the token's own payload, so there is no stored copy of either to edit. Adding one changes nothing:
+the session object holds a token and a display label, and that is all.
 
 Now tamper with the token itself:
 
@@ -79,6 +92,10 @@ s.token = p.join('.');
 sessionStorage['onboarding.session'] = JSON.stringify(s);
 location.hash = '#/employees';
 ```
+
+Or forge the identity rather than the role, by swapping `sub` for `E1002` the same way. Same
+outcome, and it is the more interesting one: the signature breaks, so the API never gets as far as
+comparing the id.
 
 The officials shell renders for an instant, the first request comes back **401**, and you land
 back on the login page with **"Your session expired. Sign in again." shown on the form**. That
@@ -108,6 +125,8 @@ Each step feeds the next, so run them in order.
 | 6g | Open a box, type something, then click that icon again | it asks before discarding. Cancel and Esc don't ask — they say "discard" in as many words; the icon doesn't |
 | 7 | Hard-refresh (Ctrl+Shift+R) on the checklist URL | state persisted, comments included. This is the proof the writes reached DynamoDB |
 | 8 | Delete it, from the row button and from the form button | `DELETE` 200; the row leaves the list, and the item is still in the table stamped `archivedAs` |
+| 7i | Open any employee's checklist page | A **Documents** section: three columns, filename/size/date where something was uploaded, `— not uploaded —` where it wasn't. **No upload control anywhere** — there is no officials upload route to call. Download arrives under the original filename |
+| 7j | Tick a checklist box on that page | The tick lands **and the documents section stays populated** — same repaint trap as 7h |
 | 8a | Open the archived employee's URL directly (`#/employees/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
 | 8b | Open the archived employee's edit URL (`#/employees/<id>/edit`) | the read-only archived page, not the form |
 | 8c | Re-add someone on the archived employee's work email | `201` — nothing reserves the address any more. You now have two records on one mailbox, which is the accepted cost of dropping the guard item |

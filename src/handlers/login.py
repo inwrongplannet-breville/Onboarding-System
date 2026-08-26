@@ -9,7 +9,17 @@ The role travels *inside* the signature, not beside it. The response repeats it
 as a convenience so the UI knows which view to paint, but nothing trusts that
 copy - each subsequent request is authorised from the token alone, so editing the
 role in sessionStorage changes what the browser draws and not one thing about
-what the API will do.
+what the API will do. The same is true of `sub`, which now names *which employee*
+is signed in and is what handler.require_self compares against.
+
+**This route does not check that the employee number exists, and that is not an
+oversight.** LoginFunction has no DynamoDB permission at all - see its policy in
+template.yaml, and the comment above it - because a login route that could read
+the employee table is a login route that would, if it were ever wrong. So the
+number is validated for shape and nothing more: `E9999` signs in successfully and
+gets a 404 from its first read of `/employees/E9999`. Adding a GetItem here would
+buy a slightly earlier error message and cost the one IAM boundary this design
+rests on. There is a test pinning the behaviour so it does not get "fixed".
 
 Not here, and deliberately: rate limiting. Two hard-coded accounts with a 200k
 round PBKDF2 derivation each is not a realistic online guessing target, and the
@@ -42,16 +52,19 @@ def lambda_handler(event, context):
             'password': '' if password else 'Password is required.',
         })
 
-    account = verify_credentials(username, password)
-    if account is None:
+    principal = verify_credentials(username, password)
+    if principal is None:
         return responses.unauthorized(_REJECTED)
 
-    token = sign({'sub': username, 'role': account['role']}, secret())
+    # principal['username'], never the string the caller typed: an employee number
+    # is upper-cased on the way through, so `e1001` and `E1001` sign one identity
+    # and it is the same fold the partition key uses.
+    token = sign({'sub': principal['username'], 'role': principal['role']}, secret())
 
     return responses.ok({
         'token': token,
-        'role': account['role'],
-        'displayName': account['displayName'],
+        'role': principal['role'],
+        'displayName': principal['displayName'],
         # Seconds, so the client can decide to sign out early rather than
         # discovering the expiry as a failed request mid-edit.
         'expiresIn': DEFAULT_TTL_SECONDS,

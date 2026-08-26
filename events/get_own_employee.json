@@ -1,8 +1,10 @@
 {
-  "resource": "/employees",
-  "path": "/employees",
+  "resource": "/employees/{id}",
+  "path": "/employees/E1001",
   "httpMethod": "GET",
-  "pathParameters": null,
+  "pathParameters": {
+    "id": "E1001"
+  },
   "queryStringParameters": null,
   "headers": {
     "Content-Type": "application/json"
@@ -12,7 +14,7 @@
   "requestContext": {
     "authorizer": {
       "role": "employee",
-      "username": "employee"
+      "username": "E1001"
     }
   }
 }

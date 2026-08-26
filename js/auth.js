@@ -52,7 +52,7 @@ window.App = window.App || {};
    * the key is in Secrets Manager. This decides which screen to draw. The
    * server decides everything else.
    */
-  function roleFromToken(token) {
+  function claimsFromToken(token) {
     var parts = String(token || '').split('.');
     if (parts.length !== 3) return null;
 
@@ -68,8 +68,33 @@ window.App = window.App || {};
     }
 
     if (!claims || typeof claims !== 'object') return null;
+    return claims;
+  }
+
+  function roleFromToken(token) {
+    var claims = claimsFromToken(token);
+    if (!claims) return null;
     if (claims.role !== OFFICIAL && claims.role !== EMPLOYEE) return null;
     return claims.role;
+  }
+
+  /**
+   * Which employee is signed in, from the token's own `sub`.
+   *
+   * Same single-source rule as roleFromToken, and for the same reason: the id is
+   * a claim inside the signature, not a field beside it. An employee's username
+   * *is* their employee number - see src/common/accounts.py - and the server
+   * upper-cased it at login, so this needs no folding.
+   *
+   * Editing it here reaches the same dead end as editing the role: the API
+   * re-derives it from the signature in handlers/authorizer.py, and every
+   * own-record route compares against *that* value. A tampered id draws somebody
+   * else's screen full of 403s.
+   */
+  function employeeIdFromToken(token) {
+    var claims = claimsFromToken(token);
+    if (!claims || typeof claims.sub !== 'string' || !claims.sub) return null;
+    return claims.sub;
   }
 
   function valid(session) {
@@ -166,10 +191,29 @@ window.App = window.App || {};
       return App.auth.role() === EMPLOYEE;
     },
 
+    /** The signed-in employee's number, or null for an official. */
+    employeeId: function () {
+      return employeeIdFromToken(App.auth.token());
+    },
+
+    /**
+     * Swap the header chip's label once we know who this actually is.
+     *
+     * A login can only tell an employee their own number back - POST /login has
+     * no table access by design, so there is no name for it to return. The
+     * profile load is the first moment a real name exists, and this is how it
+     * reaches the chip. The token is untouched: this is a label, not an identity.
+     */
+    setDisplayName: function (name) {
+      var session = load();
+      if (!session || !name || session.displayName === name) return;
+      save({ token: session.token, displayName: name });
+    },
+
     /** Where this role starts, and where the guard sends it back to. */
     home: function () {
       if (App.auth.isOfficial()) return '#/employees';
-      if (App.auth.isEmployee()) return '#/directory';
+      if (App.auth.isEmployee()) return '#/me';
       return '#/login';
     },
 
@@ -180,14 +224,13 @@ window.App = window.App || {};
      */
     signIn: function (username, password) {
       return App.store.login(username, password).then(function (result) {
-        // No role field. It is a claim in the token, and a second copy is a
-        // second answer to the same question - see roleFromToken. The response
-        // still carries `role`, which is fine for a server to say and pointless
-        // for a client to keep.
+        // No role and no username. Both are claims inside the token - see
+        // roleFromToken and employeeIdFromToken - and a second copy beside it is
+        // a second answer to the same question. displayName is neither: it is a
+        // label with nothing depending on it.
         var session = {
           token: result.token,
-          displayName: result.displayName || username,
-          username: username
+          displayName: result.displayName || username
         };
 
         if (!valid(session)) {

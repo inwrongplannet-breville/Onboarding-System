@@ -3,8 +3,14 @@ What the two roles can actually do, at the handler seam.
 
 Separate from test_handlers.py, which asks whether the six routes are correct.
 These ask a different question about the same routes - who is allowed to call
-them, and how much of the answer they get back - so they read better together
-than scattered through six hundred lines of CRUD.
+them - so they read better together than scattered through six hundred lines of
+CRUD.
+
+The reads used to be here too, as a set of tests about how much of a *colleague's*
+record an employee was trimmed down to. There is no such thing any more: an
+employee reads their own record and gets a 403 for anybody else's, so that half
+moved to test_own_profile.py, where it sits beside the writes that share its trim.
+What is left here is the boundary itself.
 
 The helpers are imported rather than rewritten: `create`, `post` and the rest
 already know how to build a valid request, and the only thing changing here is
@@ -15,31 +21,20 @@ genuine. That happens in the authorizer, before any of this runs, and is covered
 in test_auth.py. Here the context is taken as given - which is exactly what a
 handler does.
 """
-import pytest
-
-from common.models import EMPLOYEE_VISIBLE_FIELDS
 from test_handlers import (
     EMPLOYEE,
     OFFICIAL,
     VALID,
-    archive,
+    as_employee,
     body,
     create,
     delete,
     get,
     listing,
     patch,
+    patch_contact,
     post,
     put,
-)
-
-# Every field an officials response carries that an employee's must not. Spelled
-# out rather than derived from EMPLOYEE_VISIBLE_FIELDS, so that adding a field to
-# the model and forgetting it here is a failing test rather than a silent pass:
-# a derived list would grow to exclude whatever was added.
-HIDDEN_FROM_EMPLOYEES = (
-    'email', 'phone', 'manager', 'employmentType',
-    'checklist', 'archived', 'archivedAs', 'archivedAt',
 )
 
 
@@ -124,82 +119,49 @@ def test_officials_are_unaffected_by_any_of_this(handlers):
     assert delete(handlers, employee['id'])['statusCode'] == 200
 
 
-# ------------------------------------------------- reads are trimmed by role
+# ------------------------------------------------- reads are scoped by role
 
-def test_the_list_an_employee_sees_carries_only_the_directory_fields(handlers):
-    create(handlers)
-    listed = body(listing(handlers, EMPLOYEE))['employees']
-
-    assert listed
-    for employee in listed:
-        assert sorted(employee) == sorted(EMPLOYEE_VISIBLE_FIELDS)
-
-
-@pytest.mark.parametrize('field', HIDDEN_FROM_EMPLOYEES)
-def test_a_listed_employee_hides_each_restricted_field(handlers, field):
+def test_the_directory_is_officials_only(handlers):
     """
-    One test per field, so a failure names the field that leaked rather than
-    reporting that a dict comparison did not match.
+    There is no trimmed list any more. An employee has exactly one record they may
+    read and they reach it by id, so the endpoint has one audience - and refusing
+    it outright is a smaller thing to get wrong than a whitelist applied per row.
     """
     create(handlers)
-    for employee in body(listing(handlers, EMPLOYEE))['employees']:
-        assert field not in employee
+
+    response = listing(handlers, EMPLOYEE)
+    assert response['statusCode'] == 403
+    assert body(response)['error']['code'] == 'Forbidden'
 
 
-@pytest.mark.parametrize('field', HIDDEN_FROM_EMPLOYEES)
-def test_reading_one_employee_hides_each_restricted_field(handlers, field):
-    employee_id = create(handlers)['id']
-    assert field not in body(get(handlers, employee_id, EMPLOYEE))
+def test_a_refused_directory_read_leaks_no_names(handlers):
+    create(handlers, firstName='Meera', lastName='Nair')
+    response = listing(handlers, EMPLOYEE)
+
+    assert response['statusCode'] == 403
+    assert 'Meera' not in response['body']
+    assert 'Nair' not in response['body']
 
 
-def test_an_employee_still_sees_onboarding_progress(handlers):
+def test_an_employee_cannot_read_a_colleague(handlers):
     """
-    The restriction is not "show almost nothing". Progress is the thing this app
-    exists to report, and a directory that cannot say who has started is not
-    worth signing in to.
+    The other half of the directory being closed: closing the list is worth
+    nothing if the record is still readable one id at a time.
     """
     employee_id = create(handlers)['id']
-    patch(handlers, employee_id, 'offer-letter', True)
-
-    seen = body(get(handlers, employee_id, EMPLOYEE))
-    assert seen['status'] == 'In Progress'
-    assert seen['progress'] == {'done': 1, 'total': 8, 'percent': 13}
+    assert get(handlers, employee_id, as_employee('E7009'))['statusCode'] == 403
 
 
-def test_both_roles_are_shown_the_same_employees_in_the_same_order(handlers):
+def test_an_employee_reads_and_writes_only_their_own_record(handlers):
     """
-    Restricting fields must not restrict rows or reorder them. The trim happens
-    after the archive filter and the sort for exactly this reason.
+    The boundary in one test. What the own record actually contains, and what a
+    contact patch may change, are test_own_profile.py's subject.
     """
-    for start in ('2026-03-01', '2026-01-05', '2026-02-11'):
-        create(handlers, startDate=start)
+    create(handlers, employeeId='E7010')
 
-    official_ids = [e['id'] for e in body(listing(handlers))['employees']]
-    employee_ids = [e['id'] for e in body(listing(handlers, EMPLOYEE))['employees']]
-
-    assert employee_ids == official_ids
-
-
-def test_an_archived_employee_is_invisible_to_the_employee_role(handlers):
-    """
-    404, not a trimmed record. They are already off the list, and the only way
-    an employee could reach one is by guessing the URL - at which point the
-    honest answer is the same one the list gave.
-    """
-    employee_id = create(handlers)['id']
-    archive(handlers, employee_id)
-
-    assert get(handlers, employee_id, EMPLOYEE)['statusCode'] == 404
-    # Still readable by an official, exactly as before.
-    assert get(handlers, employee_id)['statusCode'] == 200
-
-
-def test_the_count_an_employee_sees_matches_the_rows(handlers):
-    create(handlers)
-    create(handlers)
-    result = body(listing(handlers, EMPLOYEE))
-
-    assert result['count'] == len(result['employees']) == 2
+    assert get(handlers, 'E7010', as_employee('E7010'))['statusCode'] == 200
+    assert patch_contact(handlers, 'E7010', {'phone': '+61 400 000 000'},
+                         as_employee('E7010'))['statusCode'] == 200
 
 
 def test_officials_still_get_the_whole_record(handlers):
@@ -207,6 +169,8 @@ def test_officials_still_get_the_whole_record(handlers):
     employee_id = create(handlers)['id']
     full = body(get(handlers, employee_id, OFFICIAL))
 
-    for field in HIDDEN_FROM_EMPLOYEES:
+    for field in ('email', 'phone', 'manager', 'employmentType', 'personalEmail',
+                  'address', 'checklist', 'archived', 'archivedAs', 'archivedAt'):
         assert field in full
     assert len(full['checklist']) == 8
+    assert all('comment' in item for item in full['checklist'])

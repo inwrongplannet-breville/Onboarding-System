@@ -1,0 +1,20 @@
+{
+  "resource": "/employees/{id}/documents",
+  "path": "/employees/E1001/documents",
+  "httpMethod": "GET",
+  "pathParameters": {
+    "id": "E1001"
+  },
+  "queryStringParameters": null,
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": null,
+  "isBase64Encoded": false,
+  "requestContext": {
+    "authorizer": {
+      "role": "employee",
+      "username": "E1001"
+    }
+  }
+}

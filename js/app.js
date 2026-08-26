@@ -3,8 +3,8 @@
  *
  * Routes (hash-based, so views are linkable and the back button works):
  *   #/login
- *   #/directory                  employee role - read-only, everyone
- *   #/employees                  officials role - the five routes below
+ *   #/me                         employee role - their own record, and only theirs
+ *   #/employees                  officials role - the four routes below
  *   #/employees/new
  *   #/employees/:id/edit
  *   #/employees/:id/checklist
@@ -185,7 +185,7 @@ window.App = window.App || {};
         // Says which of the two views they are in, because the difference
         // between them is mostly things that are absent - and an employee who
         // cannot find the Add button should be able to see why.
-        (auth.isEmployee() ? ' <span class="session-role">employee view</span>' : '') +
+        (auth.isEmployee() ? ' <span class="session-role">my profile</span>' : '') +
       '</span>' +
       '<button class="btn-link" type="button" data-action="sign-out">Sign out</button>';
   }
@@ -253,8 +253,25 @@ window.App = window.App || {};
     errorSlot.innerHTML = '';
   }
 
-  function failLoad(context) {
+  /*
+   * Bumped by renderLogin and by every render* function below that fetches
+   * before it paints. Sign-out is the case that surfaced this: it clears the
+   * session and swaps the hash to #/login synchronously, but a fetch already in
+   * flight for the view being left - the employee list on first load, most
+   * often - keeps running and, with nothing to stop it, painted its result over
+   * the login form once it resolved. The address bar said #/login; the screen
+   * did not, because nothing had told that fetch it was no longer wanted.
+   *
+   * Each render* function captures the id current when *it* started, and checks
+   * it again before painting. A response that arrives after something newer has
+   * started is for a screen nobody is looking at any more, and is dropped
+   * instead of drawn.
+   */
+  var renderGeneration = 0;
+
+  function failLoad(context, myGeneration) {
     return function (error) {
+      if (myGeneration !== renderGeneration) return;
       showError(error);
       paint(ui.messageView(context));
       focusHeading();
@@ -278,6 +295,29 @@ window.App = window.App || {};
     if (event.key === 'Escape' && errorSlot.firstChild) clearError();
   });
 
+  /*
+   * The three document slots for whichever employee is on screen, or null.
+   *
+   * Module scope for the same reason commentEditor is: every repaint in this app
+   * is driven by a write's response, and no write response carries documents. So
+   * paintProfile and paintChecklist would blank the documents section on every
+   * checkbox tick and every contact save if they had to be handed one. Loaded
+   * once per render, passed through on every repaint after that.
+   */
+  var loadedDocuments = null;
+
+  // Mirrors ALLOWED_CONTENT_TYPES and MAX_UPLOAD_BYTES in common/documents.py.
+  // Checked here only so an obviously-wrong file fails instantly instead of after
+  // a round trip; the real limits are policy conditions on the presigned POST,
+  // which is what stops a devtools user from stepping past these.
+  var UPLOAD_TYPES = {
+    'application/pdf': 'PDF',
+    'image/jpeg': 'JPG',
+    'image/png': 'PNG',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word'
+  };
+  var UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
   /* ---------------------------------------------------------------- routing */
 
   function parseHash() {
@@ -288,7 +328,7 @@ window.App = window.App || {};
     // everything it does not recognise to the officials list. A route added
     // after that line is a route that never matches.
     if (segments[0] === 'login') return { name: 'login' };
-    if (segments[0] === 'directory') return { name: 'directory' };
+    if (segments[0] === 'me') return { name: 'profile' };
 
     if (segments[0] !== 'employees') return { name: 'list' };
     if (segments.length === 1) return { name: 'list' };
@@ -317,8 +357,8 @@ window.App = window.App || {};
    * Four rules, in this order:
    *   no session          -> the login page, whatever they asked for
    *   session, on login   -> their home, so a reload does not re-ask
-   *   employee, elsewhere -> the directory
-   *   official, directory -> the employee list
+   *   employee, elsewhere -> their own profile
+   *   official, on profile -> the employee list
    *
    * Worth being clear about what this is: a way of keeping people out of
    * screens that would not work for them, not a security boundary. Nothing here
@@ -338,12 +378,12 @@ window.App = window.App || {};
       return true;
     }
 
-    if (auth.isEmployee() && route.name !== 'directory') {
-      navigate('#/directory');
+    if (auth.isEmployee() && route.name !== 'profile') {
+      navigate('#/me');
       return true;
     }
 
-    if (auth.isOfficial() && route.name === 'directory') {
+    if (auth.isOfficial() && route.name === 'profile') {
       navigate('#/employees');
       return true;
     }
@@ -369,7 +409,7 @@ window.App = window.App || {};
     // a live region speaks when its contents change, not because they are there.
 
     if (route.name === 'login') return renderLogin();
-    if (route.name === 'directory') return renderDirectory();
+    if (route.name === 'profile') return renderProfile();
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
     if (route.name === 'edit') return renderForm(route.id);
@@ -379,6 +419,12 @@ window.App = window.App || {};
   /* ------------------------------------------------------------ login view */
 
   function renderLogin() {
+    // No fetch of its own, so nothing here ever checks this - but it still has
+    // to move the counter, or signing out while a previous view's fetch is in
+    // flight would leave that fetch looking current and free to paint over this
+    // screen once it resolves. See renderGeneration above.
+    renderGeneration++;
+
     setTitle('Sign in');
 
     // Consumed, not just read: an expiry notice belongs to the arrival that
@@ -442,35 +488,103 @@ window.App = window.App || {};
     wireLogin();
   }
 
-  /* -------------------------------------------------------- directory view */
+  /* ---------------------------------------------------------- profile view */
 
   /*
-   * The employee-role list. Same store call as renderList - the API decides
-   * what an employee token is shown, and this file does not filter anything.
-   * See EMPLOYEE_VISIBLE_FIELDS in common/models.py.
+   * The employee's own record. The whole employee side of the app.
+   *
+   * No id argument, and there cannot be one: store.getOwnProfile reads it out of
+   * the token, so this cannot be pointed at somebody else by changing a URL. The
+   * API would refuse it anyway - require_self in common/handler.py - but the
+   * frontend having no way to *ask* is what keeps the two honest.
    */
-  function renderDirectory() {
+  function renderProfile() {
+    var myGeneration = ++renderGeneration;
     showLoading();
 
-    store.listEmployees().then(function (employees) {
-      setEmployees(employees);
-      setTitle('Employee Directory');
-      paint(ui.directoryView(employees, filters, facets));
-      refreshRows();
-      focusHeading();
+    // Both at once. The documents call is allowed to fail without taking the page
+    // with it - a profile that renders with an apologetic documents section beats
+    // a blank screen - so it is caught here rather than in the Promise.all.
+    Promise.all([
+      store.getOwnProfile(),
+      store.getOwnDocuments().catch(function () { return null; })
+    ]).then(function (results) {
+      // Still the current screen - see renderGeneration.
+      if (myGeneration !== renderGeneration) return;
 
-      document.getElementById('search').addEventListener('input', function (event) {
-        filters.search = event.target.value;
-        refreshRows();
+      var employee = results[0];
+      loadedDocuments = results[1];
+      // null, not an error. POST /login does not check that an employee number
+      // exists - it has no table access, deliberately - so a mistyped number
+      // reaches this screen with a perfectly valid session. So does a session
+      // opened before this feature existed, whose token names no employee at all.
+      if (!employee) {
+        setTitle('No record found');
+        paint(ui.profileMissingView(auth.employeeId()));
+        focusHeading();
+        return;
+      }
+
+      paintProfile(employee);
+    }, failLoad('Could not load your profile.', myGeneration));
+  }
+
+  /*
+   * Paint, then re-wire. Called on load and again after a successful save,
+   * because the response to the save *is* the new record - the same repaint-from-
+   * the-server rule the checklist view follows.
+   */
+  function paintProfile(employee) {
+    // The login could only tell us our own employee number; this is the first
+    // moment a real name exists, so the header chip gets it now.
+    auth.setDisplayName(ui.fullName(employee));
+    paintSession();
+
+    setTitle('My profile');
+    paint(ui.profileView(employee, loadedDocuments));
+    focusHeading();
+
+    // Wired before the contact form, because an archived record has drop zones
+    // that are absent and a contact form that is absent too - neither wiring
+    // depends on the other.
+    wireDropZones(employee);
+
+    var form = document.getElementById('contact-form');
+    // Absent on an archived record - it is read-only server side, so there is no
+    // form to wire and no button to press.
+    if (!form) return;
+
+    var submitting = false;
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (submitting) return;
+
+      var values = readForm(form);
+      var errors = validateContact(values);
+      showErrors(form, errors);
+      if (Object.keys(errors).length) return;
+
+      var submitButton = form.querySelector('[type="submit"]');
+      var submitLabel = submitButton.textContent;
+
+      submitting = true;
+      submitButton.disabled = true;
+      submitButton.textContent = 'Saving…';
+      clearError();
+
+      store.updateOwnContact(values).then(function (saved) {
+        announce('Your details were saved.');
+        // Repainting discards this form and its listener along with it, so the
+        // submitting flag does not need resetting on the way out.
+        paintProfile(saved);
+      }, function (error) {
+        submitting = false;
+        submitButton.disabled = false;
+        submitButton.textContent = submitLabel;
+        showSaveError(form, error);
       });
-
-      document.getElementById('department-filter').addEventListener('change', function (event) {
-        filters.department = event.target.value;
-        refreshRows();
-      });
-
-      // No row handler. There is nothing on a directory row to click.
-    }, failLoad('Could not load the directory.'));
+    });
   }
 
   /* ------------------------------------------------------------- list view */
@@ -486,10 +600,11 @@ window.App = window.App || {};
       // The id is searchable now that it is something a person knows by heart -
       // "E1024" is exactly what someone would paste in from a payroll export,
       // and it used to be a UUID nobody could have typed.
-      // employee.email is absent for the employee role - the API does not send
-      // it - so it is coerced rather than concatenated raw. Without this the
-      // haystack reads "E1024 Priya Sharma undefined" and searching for "und"
-      // matches the entire directory.
+      //
+      // email used to need coercing here, because the employee role was served a
+      // response with no email on it and the haystack read "... undefined". This
+      // list is officials-only now and email is a required field, so it is always
+      // a string - the || '' stays as a cheap guard, not as a load-bearing one.
       var haystack = (employee.id + ' ' + ui.fullName(employee) + ' ' +
         (employee.email || '')).toLowerCase();
       return haystack.indexOf(term) !== -1;
@@ -501,19 +616,21 @@ window.App = window.App || {};
     if (!tbody) return;
 
     var visible = applyFilters(loadedEmployees);
-    // Which rows depends on who is signed in, and the two renderers differ in
-    // more than styling: directoryRows emits no actions cell and no data-id.
-    tbody.innerHTML = auth.isEmployee()
-      ? ui.directoryRows(visible)
-      : ui.employeeRows(visible);
+    // One renderer. There used to be two, because the employee role had a
+    // read-only table of everybody; that role has its own screen now and never
+    // reaches this one.
+    tbody.innerHTML = ui.employeeRows(visible);
     document.getElementById('record-count').textContent =
       ui.countLabel(visible.length, loadedEmployees.length);
   }
 
   function renderList() {
+    var myGeneration = ++renderGeneration;
     showLoading();
 
     store.listEmployees().then(function (employees) {
+      if (myGeneration !== renderGeneration) return;
+
       setEmployees(employees);
       setTitle('Employees');
       paint(ui.listView(employees, filters, facets));
@@ -566,7 +683,7 @@ window.App = window.App || {};
           showError(error);
         });
       });
-    }, failLoad('Could not load employees.'));
+    }, failLoad('Could not load employees.', myGeneration));
   }
 
   /* ------------------------------------------------------------- form view */
@@ -641,6 +758,31 @@ window.App = window.App || {};
   }
 
   /**
+   * The employee's own three fields. Mirrors validate_self_fields in
+   * common/models.py.
+   *
+   * Separate from validate() above, which demands the seven facts HR asserts.
+   * All three of these are optional - somebody who has not filled in their
+   * address yet is a new starter, not an invalid record - so this only ever
+   * checks the shape of what was actually typed.
+   */
+  function validateContact(values) {
+    var errors = {};
+
+    if (values.personalEmail && !EMAIL_PATTERN.test(values.personalEmail)) {
+      errors.personalEmail = 'Enter a valid email address.';
+    }
+
+    // Mirrors ADDRESS_MAX_LENGTH. The textarea carries the same number as a
+    // maxlength, so this only fires for a value that got in another way.
+    if (values.address && values.address.length > 300) {
+      errors.address = 'Keep the address under 300 characters.';
+    }
+
+    return errors;
+  }
+
+  /**
    * The API's 400 body carries a `fields` map keyed by the same names as
    * validate() returns, phrased the same way - common/models.py was written to
    * mirror this file. So server-side validation reuses the painter we already
@@ -657,6 +799,8 @@ window.App = window.App || {};
   }
 
   function renderForm(id) {
+    var myGeneration = ++renderGeneration;
+
     // Both forms wait now, the add form included: its dropdowns are built from
     // the employees the API returns, so there is nothing to render until that
     // list is in.
@@ -668,6 +812,8 @@ window.App = window.App || {};
     ]).then(function (results) { return results[0]; });
 
     load.then(function (employee) {
+      if (myGeneration !== renderGeneration) return;
+
       if (id && !employee) {
         setTitle('Not found');
         paint(ui.notFoundView());
@@ -746,7 +892,145 @@ window.App = window.App || {};
           });
         });
       }
-    }, failLoad(id ? 'Could not load this employee.' : 'Could not load the form.'));
+    }, failLoad(id ? 'Could not load this employee.' : 'Could not load the form.', myGeneration));
+  }
+
+  /* ------------------------------------------------------------- documents */
+
+  /*
+   * Drag-and-drop and click-to-browse for the three slots.
+   *
+   * No wiring at all when the section is read-only - HR's page and an archived
+   * employee's both render slots with no `data-slot` and no file input, so the
+   * loop below finds nothing and does nothing.
+   */
+  function wireDropZones(employee) {
+    var section = document.getElementById('documents');
+    if (!section) return;
+
+    var zones = section.querySelectorAll('.doc-slot[data-slot]');
+    if (!zones.length) return;
+
+    Array.prototype.forEach.call(zones, function (zone) {
+      var slot = zone.getAttribute('data-slot');
+      var input = zone.querySelector('input[type="file"]');
+
+      // dragenter AND dragover, both preventDefault. Without preventDefault on
+      // dragover the browser refuses the drop and then navigates to the file,
+      // replacing the whole app with a PDF viewer - the classic version of this
+      // bug, and the reason for the document-level guard further down too.
+      ['dragenter', 'dragover'].forEach(function (name) {
+        zone.addEventListener(name, function (event) {
+          event.preventDefault();
+          zone.classList.add('is-dragover');
+        });
+      });
+
+      ['dragleave', 'dragend'].forEach(function (name) {
+        zone.addEventListener(name, function () {
+          zone.classList.remove('is-dragover');
+        });
+      });
+
+      zone.addEventListener('drop', function (event) {
+        event.preventDefault();
+        zone.classList.remove('is-dragover');
+        var files = event.dataTransfer && event.dataTransfer.files;
+        if (files && files.length) uploadFile(employee, slot, files[0]);
+      });
+
+      if (input) {
+        input.addEventListener('change', function () {
+          if (input.files && input.files.length) {
+            uploadFile(employee, slot, input.files[0]);
+          }
+        });
+      }
+    });
+  }
+
+  function slotLabel(slot) {
+    var match = (loadedDocuments || []).filter(function (entry) {
+      return entry.slot === slot;
+    })[0];
+    return match ? match.label : 'Document';
+  }
+
+  function slotStatus(slot, text) {
+    var node = document.querySelector('[data-status-for="' + slot + '"]');
+    if (node) node.textContent = text || '';
+  }
+
+  /*
+   * One file, one slot: check it, get a ticket, send it to S3, redraw.
+   *
+   * The redraw is the documents section ALONE, and that is deliberate. Everywhere
+   * else a write repaints the whole view from its response, because the response
+   * is the new record. Here a full paintProfile would throw away whatever the
+   * employee had typed into the contact form and not yet saved - so this replaces
+   * one element and re-wires it.
+   */
+  function uploadFile(employee, slot, file) {
+    var problem = uploadProblem(file);
+    if (problem) {
+      slotStatus(slot, problem);
+      announce(problem);
+      return;
+    }
+
+    clearError();
+    slotStatus(slot, 'Uploading\u2026');
+    var zone = document.querySelector('.doc-slot[data-slot="' + slot + '"]');
+    if (zone) zone.classList.add('is-uploading');
+
+    store.requestUpload(employee.id, slot, file).then(function (ticket) {
+      return store.uploadToS3(ticket, file);
+    }).then(function () {
+      return store.getDocuments(employee.id);
+    }).then(function (documents) {
+      loadedDocuments = documents;
+      repaintDocuments(employee);
+
+      // Named, not just "Uploaded" - three zones look alike, and the live region
+      // is the only confirmation a screen reader gets.
+      var label = slotLabel(slot);
+      announce(label + ' uploaded.');
+      slotStatus(slot, 'Uploaded.');
+    }, function (error) {
+      if (zone) zone.classList.remove('is-uploading');
+      slotStatus(slot, '');
+      // A field-level 400 belongs beside the slot; anything else is a banner.
+      var fields = error.fields || {};
+      var message = fields.filename || fields.contentType || error.message;
+      slotStatus(slot, message);
+      announce(message);
+    });
+  }
+
+  /* The message to show instead of uploading, or '' if the file is fine. */
+  function uploadProblem(file) {
+    if (!file) return 'No file was chosen.';
+    if (!UPLOAD_TYPES[file.type]) {
+      return 'Upload a PDF, JPG, PNG or Word document.';
+    }
+    if (file.size > UPLOAD_MAX_BYTES) {
+      return 'That file is larger than 10 MB.';
+    }
+    if (file.size === 0) return 'That file is empty.';
+    return '';
+  }
+
+  /* Replaces the documents section in place and re-wires it. See uploadFile. */
+  function repaintDocuments(employee) {
+    var section = document.getElementById('documents');
+    if (!section) return;
+
+    var editable = !employee.archived && auth.isEmployee();
+    var wrapper = document.createElement('div');
+    wrapper.innerHTML = ui.documentsSection(loadedDocuments, editable);
+
+    section.parentNode.replaceChild(wrapper.firstChild, section);
+    wireDropZones(employee);
   }
 
   /* -------------------------------------------------------- checklist view */
@@ -767,10 +1051,18 @@ window.App = window.App || {};
   }
 
   function renderChecklist(id) {
+    var myGeneration = ++renderGeneration;
     showLoading();
     commentEditor = null;
 
-    store.getEmployee(id).then(function (employee) {
+    Promise.all([
+      store.getEmployee(id),
+      store.getDocuments(id).catch(function () { return null; })
+    ]).then(function (results) {
+      if (myGeneration !== renderGeneration) return;
+
+      var employee = results[0];
+      loadedDocuments = results[1];
       if (!employee) {
         setTitle('Not found');
         paint(ui.notFoundView());
@@ -779,7 +1071,7 @@ window.App = window.App || {};
       }
       setTitle(ui.fullName(employee) + ' \u2014 checklist');
       paintChecklist(employee);
-    }, failLoad('Could not load this checklist.'));
+    }, failLoad('Could not load this checklist.', myGeneration));
   }
 
   /*
@@ -792,7 +1084,7 @@ window.App = window.App || {};
    * { kind: 'checkbox' | 'button' | 'editor', itemId }, or null for the heading.
    */
   function paintChecklist(employee, focus) {
-    paint(ui.checklistView(employee, commentEditor));
+    paint(ui.checklistView(employee, commentEditor, loadedDocuments));
 
     /*
      * A tick replaces the whole view, which throws away the control the user is
@@ -1013,6 +1305,18 @@ window.App = window.App || {};
   }
 
   /* ------------------------------------------------------------- bootstrap */
+
+  /*
+   * A file dropped anywhere that is not a drop zone. Without these two the
+   * browser navigates away from the app and renders the file instead, which looks
+   * exactly like a crash - and it is easy to miss a zone by a few pixels.
+   */
+  ['dragover', 'drop'].forEach(function (name) {
+    document.addEventListener(name, function (event) {
+      if (event.target.closest && event.target.closest('.doc-slot[data-slot]')) return;
+      event.preventDefault();
+    });
+  });
 
   window.addEventListener('hashchange', render);
 
