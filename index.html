@@ -4,6 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Employee Management &amp; Onboarding</title>
+
+  <!--
+    Runs before the stylesheet paints, and that is the whole point: the theme
+    lives in an attribute on <html>, so reading it back from localStorage here -
+    rather than in js/app.js, which loads at the end of <body> - is what stops a
+    dark-theme user seeing a white page flash on every navigation.
+
+    Light is the default and the absence of the attribute means light, so a
+    first-time visitor and a visitor whose storage is unavailable land in the
+    same place. The OS preference is deliberately NOT consulted: the toggle is
+    the only thing that decides, so what you last chose is what you get.
+  -->
+  <script>
+    (function () {
+      try {
+        var saved = window.localStorage.getItem('theme');
+        if (saved === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) {
+        /* Private mode or storage disabled - fall through to the light default. */
+      }
+    })();
+  </script>
+
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -12,13 +35,46 @@
       <!-- href is rewritten per role by paintSession() in js/app.js. Left
            pointing at the login page so that the first paint, before any script
            has run, cannot offer a signed-out visitor a link the guard bounces. -->
-      <a class="brand" href="#/login">Breville &middot; Employee Onboarding</a>
-      <span class="env-tag">Phase 4 &mdash; two roles</span>
+      <a class="brand" href="#/login">
+        <span class="brand-mark" aria-hidden="true">B</span>
+        <span class="brand-text">Breville
+          <span class="brand-sub">Employee Onboarding</span>
+        </span>
+      </a>
 
-      <!-- Who is signed in, and the way out. Outside #app deliberately: every
-           render replaces #app wholesale, and a sign-out button that vanishes
-           for the duration of a fetch is one people click twice. -->
-      <div id="session-chip" class="session-chip"></div>
+      <div class="header-right">
+        <!--
+          Outside #session-chip on purpose: the chip is emptied when nobody is
+          signed in, and the theme is a preference of whoever is sitting at the
+          machine, not of an account - so it has to stay reachable on the login
+          screen too. aria-pressed is what says "this is a two-state control";
+          the label is rewritten by paintTheme() to name the state it will move
+          to, because an icon on its own answers neither question.
+        -->
+        <button id="theme-toggle" class="theme-toggle" type="button"
+                aria-pressed="false" aria-label="Switch to dark theme"
+                title="Switch to dark theme">
+          <svg class="icon-moon" viewBox="0 0 16 16" width="16" height="16"
+               aria-hidden="true" focusable="false">
+            <path d="M14 10.3A6.4 6.4 0 0 1 5.7 2 6.5 6.5 0 1 0 14 10.3Z"
+                  fill="currentColor"/>
+          </svg>
+          <svg class="icon-sun" viewBox="0 0 16 16" width="16" height="16"
+               aria-hidden="true" focusable="false">
+            <circle cx="8" cy="8" r="3.1" fill="currentColor"/>
+            <g stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+              <path d="M8 1.1v1.7M8 13.2v1.7M1.1 8h1.7M13.2 8h1.7
+                       M3.2 3.2l1.2 1.2M11.6 11.6l1.2 1.2
+                       M12.8 3.2l-1.2 1.2M4.4 11.6l-1.2 1.2"/>
+            </g>
+          </svg>
+        </button>
+
+        <!-- Who is signed in, and the way out. Outside #app deliberately: every
+             render replaces #app wholesale, and a sign-out button that vanishes
+             for the duration of a fetch is one people click twice. -->
+        <div id="session-chip" class="session-chip"></div>
+      </div>
     </div>
   </header>
 
@@ -26,6 +82,13 @@
        failure this most needs to report is the one where no view rendered at all. -->
   <div class="container">
     <div id="app-error" role="alert" aria-live="assertive"></div>
+
+    <!-- The visible half of a write confirmation - "Changes saved", "Document
+         uploaded" - for the handful of actions that have no other on-screen
+         sign that they worked. Outside #app for the same reason as the error
+         banner: it must survive a full view repaint. role=status rather than
+         alert, because a success is not urgent. -->
+    <div id="app-notice" role="status" aria-live="polite"></div>
 
     <!-- Confirmations, not failures: "Changes saved", "3 of 8 complete". Outside
          #app for the same reason as the banner, and for one more - a live region

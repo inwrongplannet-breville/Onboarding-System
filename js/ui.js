@@ -74,23 +74,30 @@ window.App = window.App || {};
       escapeHtml(employee.status) + '</span>';
   }
 
-  function progressCell(employee) {
+  /*
+   * The bar plus the fraction it is drawing, for a list card.
+   *
+   * `idSuffix` keeps the label's id unique: the same employee can be rendered
+   * twice on one page in principle, and a duplicated id would point every
+   * aria-labelledby at whichever copy came first.
+   */
+  function progressBlock(employee, idSuffix) {
     var p = employee.progress;
     if (!p) return '';
 
     // A bare div's width is invisible to a screen reader, so the same fraction
     // the bar draws is stated on the element as well.
-    var labelId = 'progress-label-' + employee.id;
+    var labelId = 'progress-label-' + (idSuffix || 'card') + '-' + employee.id;
 
     return '' +
       '<div class="progress">' +
-        '<div class="progress-label" id="' + escapeHtml(labelId) + '">' +
-          p.done + ' of ' + p.total + '</div>' +
         '<div class="progress-track" role="progressbar"' +
           ' aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + p.percent + '"' +
           ' aria-labelledby="' + escapeHtml(labelId) + '">' +
           '<div class="progress-bar" style="width:' + p.percent + '%"></div>' +
         '</div>' +
+        '<div class="progress-label" id="' + escapeHtml(labelId) + '">' +
+          p.done + ' of ' + p.total + ' complete</div>' +
       '</div>';
   }
 
@@ -114,7 +121,9 @@ window.App = window.App || {};
     var bubble = 'M3 2.75h10A1.75 1.75 0 0 1 14.75 4.5v4.75A1.75 1.75 0 0 1 13 11h-6.4' +
       'L4 13.4V11H3A1.75 1.75 0 0 1 1.25 9.25V4.5A1.75 1.75 0 0 1 3 2.75Z';
 
-    return '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"' +
+    // 16px, not 15 - matched to checklistStateIcon's grid so the two icon
+    // families line up wherever a row shows both.
+    return '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"' +
       ' focusable="false">' +
       '<path d="' + bubble + '"' +
         (hasComment
@@ -291,12 +300,27 @@ window.App = window.App || {};
       : 'Uploaded by the employee. Read-only here \u2014 ask them to replace a ' +
         'wrong file.';
 
+    /*
+     * Three states, not two, and the distinction matters: the documents request
+     * is no longer awaited before this view paints (see renderChecklist), so
+     * "not here yet" is a normal condition and must not be reported as a
+     * failure. null/undefined means still loading; an empty array means the
+     * request finished and had nothing to give.
+     */
+    var body;
+    if (!documents) {
+      body = '<p class="doc-empty" role="status">Loading documents&hellip;</p>';
+    } else if (!cells) {
+      body = '<p class="doc-empty">Documents could not be loaded.</p>';
+    } else {
+      body = cells;
+    }
+
     return '' +
       '<section id="documents">' +
         '<h2>' + (editable ? 'Your documents' : 'Documents') + '</h2>' +
         '<p class="view-note">' + note + '</p>' +
-        '<div class="doc-grid">' + (cells ||
-          '<p class="doc-empty">Documents could not be loaded.</p>') + '</div>' +
+        '<div class="doc-grid">' + body + '</div>' +
       '</section>';
   }
 
@@ -593,36 +617,74 @@ window.App = window.App || {};
         '</div>';
     },
 
-    employeeRows: function (employees) {
+    /**
+     * One card per employee, as <li>s for the <ul> that listView renders.
+     *
+     * This replaced a seven-column table. The table was the more honest
+     * structure for tabular data and it is worth being clear about what was
+     * traded away: a screen reader no longer announces "Department, Engineering"
+     * as it moves across a row, because there are no longer columns to name. So
+     * the card states each fact in words instead - the job title and department
+     * read as one sentence, the start date carries its own "Starts" label - and
+     * the list is a <ul> so the count and the boundaries between records are
+     * still announced.
+     */
+    employeeCards: function (employees) {
       if (!employees.length) {
-        return '<tr><td class="empty-state" colspan="7">' +
-          'No employees match this view.</td></tr>';
+        return '<li class="employee-empty">' +
+          '<p class="empty-state">No employees match this view.</p></li>';
       }
 
       return employees.map(function (employee) {
         // "Edit" six times over tells a screen-reader user nothing about which
-        // row they are on, so every control in the row carries the name.
+        // record they are on, so every control in the card carries the name.
         var name = escapeHtml(fullName(employee));
         var href = '#/employees/' + encodeURIComponent(employee.id);
 
         return '' +
-          '<tr data-id="' + escapeHtml(employee.id) + '">' +
-            '<td class="id-cell">' + escapeHtml(employee.id) + '</td>' +
-            '<td class="name-cell">' + escapeHtml(fullName(employee)) +
-              '<small>' + escapeHtml(employee.email) + '</small></td>' +
-            '<td>' + escapeHtml(employee.department) + '</td>' +
-            '<td>' + escapeHtml(employee.jobTitle) + '</td>' +
-            '<td>' + escapeHtml(formatDate(employee.startDate)) + '</td>' +
-            '<td>' + progressCell(employee) + ' ' + statusBadge(employee) + '</td>' +
-            '<td class="actions">' +
-              '<a class="btn-link" href="' + href + '/checklist"' +
-                ' aria-label="Onboarding checklist for ' + name + '">Checklist</a>' +
+          '<li class="employee-card" data-id="' + escapeHtml(employee.id) + '">' +
+            '<div class="ec-top">' +
+              '<span class="ec-id">' + escapeHtml(employee.id) + '</span>' +
+              statusBadge(employee) +
+            '</div>' +
+
+            '<div>' +
+              /*
+               * The name is a real <a>, and styles.css stretches its ::after
+               * over the whole card - so the entire card is the click target
+               * for "open this checklist", which is what the hover state has
+               * always implied. A real link and not a click handler on the
+               * <li>, so middle-click, ctrl-click, right-click -> copy address
+               * and tabbing to it all behave the way they look like they
+               * should. The employee's name IS the link text, which is the
+               * label a screen reader wants anyway.
+               */
+              '<h3 class="ec-name">' +
+                '<a class="ec-link" href="' + href + '/checklist">' + name + '</a>' +
+              '</h3>' +
+              '<p class="ec-role">' + escapeHtml(employee.jobTitle) +
+                ' &middot; ' + escapeHtml(employee.department) + '</p>' +
+            '</div>' +
+
+            '<p class="ec-email">' + escapeHtml(employee.email) + '</p>' +
+
+            progressBlock(employee, 'list') +
+
+            '<p class="ec-start">' +
+              '<span class="ec-start-label">Starts</span>' +
+              escapeHtml(formatDate(employee.startDate)) +
+            '</p>' +
+
+            // No "Checklist" link any more - the card itself is that link now,
+            // and two controls for one destination is one too many. These two
+            // sit above the stretched overlay; see .ec-foot in styles.css.
+            '<div class="ec-foot">' +
               '<a class="btn-link" href="' + href + '/edit"' +
                 ' aria-label="Edit ' + name + '">Edit</a>' +
               '<button class="btn-link danger" type="button" data-action="delete"' +
                 ' aria-label="Delete ' + name + '">Delete</button>' +
-            '</td>' +
-          '</tr>';
+            '</div>' +
+          '</li>';
       }).join('');
     },
 
@@ -663,18 +725,12 @@ window.App = window.App || {};
           '</select>' +
         '</div>' +
 
-        '<table>' +
-          '<thead><tr>' +
-            '<th scope="col">Employee ID</th>' +
-            '<th scope="col">Name</th><th scope="col">Department</th>' +
-            '<th scope="col">Job title</th><th scope="col">Start date</th>' +
-            '<th scope="col">Onboarding</th>' +
-            // Not left empty: a column with no header is a column a screen
-            // reader cannot name when it reads the cells under it.
-            '<th scope="col"><span class="sr-only">Actions</span></th>' +
-          '</tr></thead>' +
-          '<tbody id="employee-rows"></tbody>' +
-        '</table>';
+        // A list, not a table - the column count is what used to force a
+        // horizontal scroll on anything narrower than a laptop, and the grid in
+        // styles.css reflows from three columns to one on its own. <ul> rather
+        // than a bare set of divs so the number of records and the boundary
+        // between them are still announced.
+        '<ul class="employee-grid" id="employee-cards"></ul>';
     },
 
     formView: function (employee, facets) {
@@ -843,6 +899,31 @@ window.App = window.App || {};
       return '<p class="empty-state" role="status">Loading&hellip;</p>';
     },
 
+    /**
+     * The checklist page, as grey bars, for the one path that actually waits:
+     * a deep link or a hard refresh, where there is no cached record to paint.
+     * Arriving from the list skips this entirely.
+     *
+     * The bars are aria-hidden and a single sr-only line carries the state, so
+     * this announces "Loading" once rather than reading out a dozen empty divs.
+     */
+    checklistSkeleton: function () {
+      var rows = '';
+      for (var i = 0; i < 5; i += 1) {
+        rows += '<div class="sk-row"></div>';
+      }
+
+      return '' +
+        '<p class="sr-only" role="status">Loading this employee&rsquo;s record&hellip;</p>' +
+        '<div class="skeleton" aria-hidden="true">' +
+          '<div class="sk-bar sk-title"></div>' +
+          '<div class="sk-bar sk-subtitle"></div>' +
+          '<div class="sk-card"></div>' +
+          '<div class="sk-bar sk-heading"></div>' +
+          '<div class="sk-list">' + rows + '</div>' +
+        '</div>';
+    },
+
     /** Replaces a view that could not be loaded, so "Loading..." is never the last word. */
     messageView: function (text) {
       return '<p class="empty-state">' + escapeHtml(text) + '</p>';
@@ -853,6 +934,20 @@ window.App = window.App || {};
         '<div class="alert">' +
           '<span>' + escapeHtml(message) + '</span>' +
           '<button type="button" class="btn-link" data-action="dismiss-error">Dismiss</button>' +
+        '</div>';
+    },
+
+    /**
+     * The visible half of a write confirmation - "Changes saved.", "Document
+     * uploaded." - for the actions that have no other on-screen sign that they
+     * worked. Same shape as errorBanner so the two behave identically; only the
+     * colour and the data-action differ, so dismissing one never eats the other.
+     */
+    successBanner: function (message) {
+      return '' +
+        '<div class="notice">' +
+          '<span>' + escapeHtml(message) + '</span>' +
+          '<button type="button" class="btn-link" data-action="dismiss-notice">Dismiss</button>' +
         '</div>';
     }
   };

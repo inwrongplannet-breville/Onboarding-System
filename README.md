@@ -194,6 +194,22 @@ ticket, and HR sees the three slots read-only on the employee's checklist page. 
 overwritten in place, 10 MB cap enforced by S3 rather than by the browser. The reasoning is in
 [design.md](docs/design.md#documents-s3-presigned-employee-owned).
 
+The UI has been reworked since the review: a light/dark theme with an explicit toggle in the header
+(light is the default, the choice is remembered, and the OS preference is deliberately not consulted),
+the employee table replaced by a card grid that reflows instead of scrolling sideways, and one accent
+rule worth knowing — red is the brand and the delete colour only, blue is every other action, because
+the previous design painted "Add Employee" and "Delete" the same shade. The palette reasoning lives in
+the header comment of [css/styles.css](css/styles.css).
+
+HR's candidate page also opens much faster: it paints the record the list already loaded and stops
+waiting on the documents call to draw the checklist. That is a perceived-latency fix rather than a
+faster API — what is actually slow, and what would fix it, is in
+[design.md](docs/design.md#the-officials-checklist-page-loads-in-two-halves).
+
+Inline previews of uploaded documents were tried for HR's view and backed out; the reasoning and what
+a real implementation needs are recorded under
+[Not built yet](docs/design.md#not-built-yet).
+
 The SNS/SQS onboarding triggers are not started.
 
 The five data-model decisions that came out of the review are recorded in

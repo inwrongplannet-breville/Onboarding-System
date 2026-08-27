@@ -640,6 +640,13 @@ empty slot raises 403, and a brand-new employee's documents page is a 500. `desc
 rather than a silent, permanent "nothing uploaded yet". moto does not emulate IAM, so no test can
 catch this — only the deployed stack can.
 
+**The download link is deliberately not previewable.** `presigned_download` signs the disposition and
+the content type alongside everything else, so a client cannot rewrite either, and it pins the type to
+`application/octet-stream` — an uploaded SVG or HTML served as *its own* type would execute against
+the bucket's origin, and nothing in the app needs to display a document inline. Forcing a download
+costs nothing and closes that. The consequence, and what showing a preview would actually take, is
+under [Not built yet](#not-built-yet).
+
 **One race is accepted rather than closed.** A ticket is valid for five minutes and S3 knows nothing
 about archive state, so an employee archived inside that window can still land an object on a frozen
 record. Closing it would mean proxying uploads through Lambda, which is the thing presigned POST
@@ -653,6 +660,44 @@ that does not exist.
 
 ---
 
+## The officials' checklist page loads in two halves
+
+Opening a candidate from the employee list used to be noticeably slower than the list itself, and the
+frontend was making it worse than it needed to be. `renderChecklist` now does three things
+differently. Worth recording because two of them look like caching bugs if you meet them without the
+reasoning.
+
+**It paints the record it already has.** `GET /employees` returns whole employee items, checklist
+included — the Scan has to read them anyway to derive status and progress, see the docstring on
+`list_employees`. So arriving from the list, the record is already in memory and the page paints
+immediately instead of showing a placeholder while refetching what it holds. The `GET` still goes out
+behind the paint and repaints from the response, because another official may have ticked something a
+minute ago; the cache decides *when the first paint happens*, never what is finally true.
+
+**It no longer waits on documents to draw the checklist.** These were one `Promise.all`, which meant
+the slower call gated the page — and documents is much slower, because `describe_slots` makes three
+sequential S3 `HeadObject` round trips, one per slot, whether or not anything is uploaded. Documents
+render at the *bottom* of the page and the checklist is the point of it, so they load independently and
+the documents section fills in when it arrives. This is why `documentsSection` distinguishes three
+states rather than two: `null` means still in flight, `[]` means the request finished with nothing.
+Collapsing those two would report a normal wait as "Documents could not be loaded".
+
+**The documents payload is cached per employee, with a TTL under five minutes.** The TTL is not a
+nicety and must not be raised past `DOWNLOAD_TTL_SECONDS`: every `downloadUrl` in the payload is
+presigned for 300 seconds, so a cache entry older than that hands out links that answer 403. It is set
+to 240 to leave headroom. Both caches are dropped on sign-out and on session expiry, since the payload
+carries still-live signed URLs for someone else's documents.
+
+What this does **not** do is make the API faster — it stops the browser waiting on it. The actual
+latency is still there and is mostly backend: up to three cold starts per open (the authorizer,
+`GetEmployeeFunction` and `GetDocumentsFunction` are separate functions with separate warm pools and no
+provisioned concurrency), three serial `HeadObject`s inside one of them, 256 MB of memory and so
+roughly a sixth of a vCPU to import boto3 on a cold start, and — cheapest of the lot to fix — a CORS
+preflight on *every* request, because the API's `Cors` block sets no `MaxAge` and the `OPTIONS` is
+therefore never cached.
+
+---
+
 ## Not built yet
 
 - **Automatic cleanup of an archived employee's documents** — archiving touches nothing in S3, which
@@ -663,6 +708,31 @@ that does not exist.
   pinned into the upload policy, so the stored object cannot disagree with the declaration; nothing
   checks the declaration against the bytes. Magic-byte sniffing needs a Lambda triggered after the
   upload, which is the same machinery the SNS/SQS item below needs.
+- **Previewing a document in HR's view** — attempted and backed out; the code is gone, so this is the
+  only record of it. Worth reading before trying again.
+
+  HR currently gets a filename and a Download link, and wants to see an ID photo without downloading
+  it. The blocker is deliberate: `presigned_download` pins `ResponseContentType` to
+  `application/octet-stream` and the disposition to `attachment`, precisely so an uploaded HTML or SVG
+  file is never served as its own type against the bucket's origin. An `<img>` or `<iframe>` pointed at
+  that URL cannot render it.
+
+  The attempt went around that from the frontend alone, because the documents bucket already allows
+  cross-origin `GET` (see its `CorsConfiguration`): fetch the bytes, re-wrap them as a `Blob` whose
+  type comes from a three-entry allowlist rather than from the file, and point an `<img>` or `<iframe>`
+  at the resulting `blob:` URL. That does close the original hole — an `.html` renamed `.png` becomes
+  a blob typed `image/png`, which an `<img>` fails to decode instead of a parser running it — and
+  **images did work**, thumbnail and enlarged view both. **PDF did not work in practice** and the
+  feature was removed rather than shipped half-covered.
+
+  Two things to know if this is revisited. First, the honest version is a **backend** change: a
+  separate `previewUrl` per slot, signed with `inline` disposition and the real content type, issued
+  only for the allowlisted types — not a frontend workaround against a URL that was hardened on
+  purpose. Second, the security question does not disappear either way: content types are
+  unverified (the item above), so serving `application/pdf` inline runs the browser's PDF viewer over
+  bytes nobody validated. Images are safe because a non-image simply fails to decode; PDF is a real
+  surface, and a *rendered* PDF thumbnail needs a rasteriser (PDF.js in the browser, against a README
+  that promises no build step, or a server-side render) rather than any change to the signing code.
 - **Who wrote a comment, and when** — the item stores `updatedAt`, and there is now an authenticated
   username to record against it (`requestContext.authorizer.username`), but neither handler writes
   it and the API does not return either. Cheap to add now that the caller has a name.
@@ -702,6 +772,14 @@ that does not exist.
 - **Per-item permissions** — the `owner` field on checklist items is still display-only. Officials
   can tick IT's items, which is decision 2 below and unchanged; the role split is between officials
   and employees, not within officials.
+- **The backend half of the checklist-page latency** — the section above moved the waiting off the
+  critical path without reducing it. Four things would actually reduce it, cheapest first: set
+  `MaxAge` on the API's `Cors` block, which removes a preflight round trip from *every* request in the
+  app and is one line; parallelise the three `HeadObject` calls in `describe_slots` with a thread pool,
+  turning three serial round trips into roughly one; raise `MemorySize` above 256 MB, since CPU scales
+  with memory and cold-start boto3 imports are CPU-bound; and, if it is still worth it after those,
+  fold documents into `GET /employees/{id}` to drop a whole request, cold start and preflight — at the
+  cost of coupling the two and slowing the call that currently paints first.
 - **Automated onboarding triggers** — notifications, IT setup request, HR alert. SNS/SQS, Phase 4.
 - **Pagination on `GET /employees`** — the Scan follows `LastEvaluatedKey` internally and returns
   everything in one response. Fine at this scale; revisit alongside the GSI if it ever isn't.

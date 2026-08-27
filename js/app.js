@@ -21,6 +21,7 @@ window.App = window.App || {};
 
   var root = document.getElementById('app');
   var errorSlot = document.getElementById('app-error');
+  var noticeSlot = document.getElementById('app-notice');
   var statusSlot = document.getElementById('app-status');
   var store = App.store;
   var ui = App.ui;
@@ -57,6 +58,31 @@ window.App = window.App || {};
   function announce(text) {
     statusSlot.textContent = text;
   }
+
+  var noticeTimer = null;
+
+  /*
+   * The visible counterpart to announce(), for the handful of writes that have
+   * no other on-screen sign that they worked (a contact-form save, an
+   * archive, a comment). Not called alongside announce() for the same
+   * message - that would speak it to a screen reader twice, once from each
+   * live region - so a call site uses one or the other, never both.
+   */
+  function notify(text) {
+    noticeSlot.innerHTML = ui.successBanner(text);
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(clearNotice, 4000);
+  }
+
+  function clearNotice() {
+    noticeSlot.innerHTML = '';
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+
+  noticeSlot.addEventListener('click', function (event) {
+    if (event.target.closest('[data-action="dismiss-notice"]')) clearNotice();
+  });
 
   /** The title is how a tab, a history entry and a screen reader all name the view. */
   function setTitle(text) {
@@ -155,6 +181,76 @@ window.App = window.App || {};
     };
   }
 
+  /* ----------------------------------------------------------------- theme */
+
+  /*
+   * Light or dark, chosen here and nowhere else.
+   *
+   * The attribute on <html> is the single source of truth - css/styles.css
+   * declares every colour twice, once on :root and once under
+   * [data-theme="dark"], so flipping it repaints the whole app. This function
+   * does not set it on first load: the inline script in index.html already did
+   * that, before the stylesheet painted, which is what stops a dark-theme user
+   * seeing a white flash on every navigation.
+   *
+   * prefers-color-scheme is deliberately not consulted. Light is the default
+   * and the toggle is the only thing that changes it, so what you last picked
+   * is what you get on the next visit - including when that differs from the OS.
+   */
+
+  var themeButton = document.getElementById('theme-toggle');
+  var THEME_KEY = 'theme';
+
+  function isDark() {
+    return document.documentElement.getAttribute('data-theme') === 'dark';
+  }
+
+  /*
+   * Rewrites the button to describe the press rather than the state. An icon
+   * alone cannot say which of the two it means, and "Dark theme" as a label is
+   * ambiguous between "you are in it" and "this takes you to it".
+   */
+  function paintTheme() {
+    if (!themeButton) return;
+
+    var dark = isDark();
+    var label = dark ? 'Switch to light theme' : 'Switch to dark theme';
+
+    themeButton.setAttribute('aria-pressed', dark ? 'true' : 'false');
+    themeButton.setAttribute('aria-label', label);
+    themeButton.setAttribute('title', label);
+  }
+
+  function setTheme(dark) {
+    if (dark) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    } else {
+      // Removed rather than set to "light": the absence of the attribute is
+      // what :root already styles, so there is only one way to be in light
+      // mode instead of two that have to be kept in agreement.
+      document.documentElement.removeAttribute('data-theme');
+    }
+
+    try {
+      window.localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light');
+    } catch (e) {
+      // Private mode, or storage full. The theme still applies for this page
+      // view; it just will not survive a reload, which is a better outcome
+      // than refusing to switch at all.
+    }
+
+    paintTheme();
+    announce(dark ? 'Dark theme on.' : 'Light theme on.');
+  }
+
+  if (themeButton) {
+    themeButton.addEventListener('click', function () {
+      setTheme(!isDark());
+    });
+  }
+
+  paintTheme();
+
   /* ------------------------------------------------------------ session chip */
 
   /*
@@ -166,6 +262,15 @@ window.App = window.App || {};
 
   var sessionSlot = document.getElementById('session-chip');
   var brandLink = document.querySelector('.brand');
+
+  /** "Jordan Lee" -> "JL". Up to two words, so an employee number with no
+    * space yet (a stale display name) still yields one legible letter. */
+  function initials(name) {
+    var letters = (name || '').trim().split(/\s+/).slice(0, 2).map(function (word) {
+      return word.charAt(0).toUpperCase();
+    });
+    return letters.join('');
+  }
 
   function paintSession() {
     var session = auth.session();
@@ -181,6 +286,8 @@ window.App = window.App || {};
     if (brandLink) brandLink.setAttribute('href', auth.home());
 
     sessionSlot.innerHTML = '' +
+      '<span class="session-avatar" aria-hidden="true">' +
+        ui.escapeHtml(initials(session.displayName)) + '</span>' +
       '<span class="session-name">' + ui.escapeHtml(session.displayName) +
         // Says which of the two views they are in, because the difference
         // between them is mostly things that are absent - and an employee who
@@ -194,6 +301,10 @@ window.App = window.App || {};
     if (!event.target.closest('[data-action="sign-out"]')) return;
 
     auth.signOut();
+    // Both of these hold somebody's documents - one as still-valid signed URLs,
+    // the other as the file bytes themselves. Signing out has to drop them, or
+    // the next person at this browser inherits them.
+    forgetDocuments();
     paintSession();
     announce('Signed out.');
     navigate('#/login');
@@ -223,6 +334,9 @@ window.App = window.App || {};
    * longer load.
    */
   auth.onExpired(function () {
+    // Same reasoning as sign-out: the session is over, so the documents it
+    // loaded go with it.
+    forgetDocuments();
     paintSession();
     loginNotice = 'Your session expired. Sign in again.';
     announce(loginNotice);
@@ -289,10 +403,12 @@ window.App = window.App || {};
     if (event.target.closest('[data-action="dismiss-error"]')) clearError();
   });
 
-  // Escape dismisses the banner, which until now was reachable only by finding
-  // and clicking its button.
+  // Escape dismisses whichever banner is showing, which until now was
+  // reachable only by finding and clicking its button.
   document.addEventListener('keydown', function (event) {
-    if (event.key === 'Escape' && errorSlot.firstChild) clearError();
+    if (event.key !== 'Escape') return;
+    if (errorSlot.firstChild) clearError();
+    if (noticeSlot.firstChild) clearNotice();
   });
 
   /*
@@ -305,6 +421,46 @@ window.App = window.App || {};
    * once per render, passed through on every repaint after that.
    */
   var loadedDocuments = null;
+
+  /*
+   * Documents by employee id, so list -> checklist -> back -> same checklist does
+   * not refetch. Worth caching specifically: GET /documents costs three
+   * sequential S3 HeadObject round trips server side (describe_slots in
+   * common/documents.py), which made it the slowest call on the page.
+   *
+   * The TTL is not a nicety. Every downloadUrl in the payload is a presigned URL
+   * signed for DOWNLOAD_TTL_SECONDS = 300, so a cache entry older than that
+   * hands out links that answer 403. 240s leaves a minute of headroom.
+   */
+  var documentsCache = {};
+  var DOCUMENTS_TTL_MS = 240 * 1000;
+
+  function cachedDocuments(id) {
+    var hit = documentsCache[id];
+    if (!hit) return null;
+    if (Date.now() - hit.fetchedAt > DOCUMENTS_TTL_MS) {
+      delete documentsCache[id];
+      return null;
+    }
+    return hit.documents;
+  }
+
+  function cacheDocuments(id, documents) {
+    // null means "the call failed" - don't cache a failure as an answer.
+    if (!documents) return;
+    documentsCache[id] = { documents: documents, fetchedAt: Date.now() };
+  }
+
+  /*
+   * Drop the cached document payloads. They carry presigned URLs that stay live
+   * for up to five minutes, so the session ending - by sign-out or by expiry -
+   * has to discard them rather than leave them for whoever is at this browser
+   * next.
+   */
+  function forgetDocuments() {
+    documentsCache = {};
+    loadedDocuments = null;
+  }
 
   // Mirrors ALLOWED_CONTENT_TYPES and MAX_UPLOAD_BYTES in common/documents.py.
   // Checked here only so an obviously-wrong file fails instantly instead of after
@@ -507,7 +663,9 @@ window.App = window.App || {};
     // a blank screen - so it is caught here rather than in the Promise.all.
     Promise.all([
       store.getOwnProfile(),
-      store.getOwnDocuments().catch(function () { return null; })
+      // [] and not null: documentsSection reads null as "still loading" now, so
+      // a failure here has to be an empty answer rather than an absent one.
+      store.getOwnDocuments().catch(function () { return []; })
     ]).then(function (results) {
       // Still the current screen - see renderGeneration.
       if (myGeneration !== renderGeneration) return;
@@ -574,7 +732,7 @@ window.App = window.App || {};
       clearError();
 
       store.updateOwnContact(values).then(function (saved) {
-        announce('Your details were saved.');
+        notify('Your details were saved.');
         // Repainting discards this form and its listener along with it, so the
         // submitting flag does not need resetting on the way out.
         paintProfile(saved);
@@ -612,14 +770,14 @@ window.App = window.App || {};
   }
 
   function refreshRows() {
-    var tbody = document.getElementById('employee-rows');
-    if (!tbody) return;
+    var list = document.getElementById('employee-cards');
+    if (!list) return;
 
     var visible = applyFilters(loadedEmployees);
     // One renderer. There used to be two, because the employee role had a
-    // read-only table of everybody; that role has its own screen now and never
+    // read-only list of everybody; that role has its own screen now and never
     // reaches this one.
-    tbody.innerHTML = ui.employeeRows(visible);
+    list.innerHTML = ui.employeeCards(visible);
     document.getElementById('record-count').textContent =
       ui.countLabel(visible.length, loadedEmployees.length);
   }
@@ -652,12 +810,14 @@ window.App = window.App || {};
         refreshRows();
       });
 
-      document.getElementById('employee-rows').addEventListener('click', function (event) {
+      document.getElementById('employee-cards').addEventListener('click', function (event) {
         var button = event.target.closest('[data-action="delete"]');
         if (!button) return;
 
-        var row = button.closest('tr');
-        var id = row.getAttribute('data-id');
+        // The card carries data-id, so this reads the attribute rather than
+        // the element type - the row used to be a <tr> and is now an <li>.
+        var card = button.closest('[data-id]');
+        var id = card.getAttribute('data-id');
         var employee = loadedEmployees.filter(function (item) { return item.id === id; })[0];
         if (!employee) return;
 
@@ -673,7 +833,7 @@ window.App = window.App || {};
           // Said out loud, because the row simply vanishing is not an event a
           // screen reader reports. The state comes off the response rather than
           // being recomputed here - the server owns that rule.
-          announce(ui.fullName(employee) + ' was removed from the list and marked ' +
+          notify(ui.fullName(employee) + ' was removed from the list and marked ' +
             archived.archivedAs + '.');
           renderList();
         }, function (error) {
@@ -862,7 +1022,7 @@ window.App = window.App || {};
           : store.createEmployee(values);
 
         save.then(function () {
-          announce(employee ? 'Changes saved.' : 'Employee added.');
+          notify(employee ? 'Changes saved.' : 'Employee added.');
           navigate('#/employees');   // nothing to restore; navigating discards this DOM
         }, function (error) {
           submitting = false;
@@ -882,7 +1042,7 @@ window.App = window.App || {};
           deleteButton.disabled = true;
 
           store.archiveEmployee(employee.id).then(function (archived) {
-            announce(ui.fullName(employee) + ' was removed from the list and marked ' +
+            notify(ui.fullName(employee) + ' was removed from the list and marked ' +
               archived.archivedAs + '.');
             navigate('#/employees');
           }, function (error) {
@@ -979,7 +1139,7 @@ window.App = window.App || {};
     }
 
     clearError();
-    slotStatus(slot, 'Uploading\u2026');
+    slotStatus(slot, 'Uploading ' + file.name + '\u2026');
     var zone = document.querySelector('.doc-slot[data-slot="' + slot + '"]');
     if (zone) zone.classList.add('is-uploading');
 
@@ -991,10 +1151,10 @@ window.App = window.App || {};
       loadedDocuments = documents;
       repaintDocuments(employee);
 
-      // Named, not just "Uploaded" - three zones look alike, and the live region
-      // is the only confirmation a screen reader gets.
+      // Named, not just "Uploaded" - three zones look alike, and the banner is
+      // shared by the whole page.
       var label = slotLabel(slot);
-      announce(label + ' uploaded.');
+      notify(label + ' uploaded.');
       slotStatus(slot, 'Uploaded.');
     }, function (error) {
       if (zone) zone.classList.remove('is-uploading');
@@ -1020,17 +1180,31 @@ window.App = window.App || {};
     return '';
   }
 
+  /*
+   * Swaps the #documents section for a freshly rendered one.
+   *
+   * The low-level half, shared by the employee's upload path and the officials'
+   * deferred documents load - the two disagree on `editable`, which is why it is
+   * an argument.
+   */
+  function repaintDocumentsSection(documents, editable) {
+    var section = document.getElementById('documents');
+    if (!section) return null;
+
+    var wrapper = document.createElement('div');
+    wrapper.innerHTML = ui.documentsSection(documents, editable);
+    var fresh = wrapper.firstChild;
+
+    section.parentNode.replaceChild(fresh, section);
+    return fresh;
+  }
+
   /* Replaces the documents section in place and re-wires it. See uploadFile. */
   function repaintDocuments(employee) {
-    var section = document.getElementById('documents');
-    if (!section) return;
-
     var editable = !employee.archived && auth.isEmployee();
-    var wrapper = document.createElement('div');
-    wrapper.innerHTML = ui.documentsSection(loadedDocuments, editable);
-
-    section.parentNode.replaceChild(wrapper.firstChild, section);
-    wireDropZones(employee);
+    if (repaintDocumentsSection(loadedDocuments, editable)) {
+      wireDropZones(employee);
+    }
   }
 
   /* -------------------------------------------------------- checklist view */
@@ -1050,28 +1224,116 @@ window.App = window.App || {};
     })[0];
   }
 
+  /*
+   * The officials' view of one employee.
+   *
+   * This used to be one Promise.all over getEmployee and getDocuments behind a
+   * "Loading..." placeholder, which made the page feel far slower than the list
+   * it was opened from. Two things were wrong with that and both are fixed here:
+   *
+   *   1. It refetched an employee it already had. The list Scan returns whole
+   *      records, checklist included (see handlers/list_employees.py), so
+   *      arriving from the list there is nothing to wait for - paint the cached
+   *      record at once and revalidate behind it.
+   *   2. Promise.all made the checklist wait on the documents call, which is the
+   *      slower of the two by a distance - three serial S3 HeadObjects - even
+   *      though documents render at the *bottom* of the page. The two are
+   *      independent now, so the checklist paints without them.
+   *
+   * What is deliberately NOT done: caching the employee past this paint. The
+   * revalidation always runs, because a checklist another official ticked a
+   * minute ago must not stay stale on screen.
+   */
   function renderChecklist(id) {
     var myGeneration = ++renderGeneration;
-    showLoading();
     commentEditor = null;
 
-    Promise.all([
-      store.getEmployee(id),
-      store.getDocuments(id).catch(function () { return null; })
-    ]).then(function (results) {
+    var cached = loadedEmployees.filter(function (item) {
+      return item.id === id;
+    })[0];
+
+    // Documents come from their own cache and their own request; the checklist
+    // never waits on either.
+    loadedDocuments = cachedDocuments(id);
+
+    if (cached && !cached.archived) {
+      setTitle(ui.fullName(cached) + ' \u2014 checklist');
+      paintChecklist(cached);
+    } else {
+      // No cache: a deep link or a hard refresh. A skeleton rather than a bare
+      // line, because this is the one path that genuinely waits.
+      root.setAttribute('aria-busy', 'true');
+      root.innerHTML = ui.checklistSkeleton();
+    }
+
+    loadDocuments(id, myGeneration);
+
+    store.getEmployee(id).then(function (employee) {
       if (myGeneration !== renderGeneration) return;
 
-      var employee = results[0];
-      loadedDocuments = results[1];
       if (!employee) {
         setTitle('Not found');
         paint(ui.notFoundView());
         focusHeading();
         return;
       }
+
       setTitle(ui.fullName(employee) + ' \u2014 checklist');
+      // Repaints even when a cached copy is already on screen: this is the
+      // authoritative record, and the point of revalidating is to replace it.
+      // paintChecklist re-wires from scratch, so there is nothing to clean up.
       paintChecklist(employee);
-    }, failLoad('Could not load this checklist.', myGeneration));
+    }, function (error) {
+      if (myGeneration !== renderGeneration) return;
+
+      // A cached record is already readable on screen, so a failed
+      // revalidation is a banner rather than a replacement - tearing down a
+      // usable view to say "could not load" would be strictly worse.
+      if (cached && !cached.archived) {
+        showError(error);
+        return;
+      }
+      failLoad('Could not load this checklist.', myGeneration)(error);
+    });
+  }
+
+  /*
+   * Documents for one employee, painted into whatever view is already on screen.
+   *
+   * Separate from the employee request so neither blocks the other, and
+   * generation-guarded like every other fetch here: a slow documents response
+   * for a screen the user has left must not paint.
+   */
+  function loadDocuments(id, myGeneration) {
+    if (loadedDocuments) return;   // already cached - nothing to fetch
+
+    store.getDocuments(id).then(function (documents) {
+      if (myGeneration !== renderGeneration) return;
+
+      cacheDocuments(id, documents);
+      loadedDocuments = documents;
+
+      // Only replaces the documents section, so a checklist the user has
+      // already started ticking is left alone.
+      var section = document.getElementById('documents');
+      if (section) repaintDocumentsSection(documents, false, auth.isOfficial());
+    }, function () {
+      if (myGeneration !== renderGeneration) return;
+
+      // An empty array, not null: null is the "still loading" state, so leaving
+      // it would make the next tick's repaint show the loading line forever.
+      loadedDocuments = [];
+
+      // A documents failure must not take the page with it - the checklist is
+      // the point of this screen. Say so in place of the slots.
+      var section = document.getElementById('documents');
+      if (section) {
+        var grid = section.querySelector('.doc-grid');
+        if (grid) {
+          grid.innerHTML = '<p class="doc-empty">Documents could not be loaded.</p>';
+        }
+      }
+    });
   }
 
   /*
@@ -1268,7 +1530,7 @@ window.App = window.App || {};
     store.setChecklistComment(employee.id, itemId, text).then(function (updated) {
       commentEditor = null;
       paintChecklist(updated, { kind: 'button', itemId: itemId });
-      announce(text
+      notify(text
         ? 'Comment saved on ' + item.label + '.'
         : 'Comment removed from ' + item.label + '.');
     }, function (error) {
