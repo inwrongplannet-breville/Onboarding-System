@@ -39,7 +39,7 @@ than the tables directly — including the promote sequences, so a broken seed i
 so it signs in first; pass `--username`/`--password` if the stack isn't using the demo accounts.
 `--wipe` goes at the tables directly and needs no credentials.
 
-The six fixtures take employee numbers `E1001`–`E1006`. Those numbers are the DynamoDB partition
+The eight fixtures take employee numbers `E1001`–`E1008`. Those numbers are the DynamoDB partition
 key, so `--seed` without `--wipe` now fails loudly with a `409` instead of quietly creating a second
 copy of everyone.
 
@@ -47,7 +47,7 @@ copy of everyone.
 
 ```bash
 py -m pip install -r requirements-dev.txt
-py -m pytest                    # 194 tests, ~30 seconds
+py -m pytest                    # 436 tests, ~60 seconds
 ```
 
 No AWS account or credentials needed — the handler tests run against an in-memory DynamoDB.
