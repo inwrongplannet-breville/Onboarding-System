@@ -212,7 +212,7 @@ window.App = window.App || {};
 
     /** Where this role starts, and where the guard sends it back to. */
     home: function () {
-      if (App.auth.isOfficial()) return '#/employees';
+      if (App.auth.isOfficial()) return '#/dashboard';
       if (App.auth.isEmployee()) return '#/me';
       return '#/login';
     },

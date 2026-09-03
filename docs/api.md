@@ -164,6 +164,17 @@ somebody fills them in.
 `employeeId` on anything but `POST`. Send them and they're silently dropped, matching `pickEditable`
 in `js/store.js`.
 
+### The promoted shape
+
+`GET /staff/employees` and `GET /staff/interns` both read the same underlying table
+(`EmployeeTable`, filtered by `entityType`) and return objects built the same way, with the same
+profile fields, but three differences from an onboarding object: `checklist` is built from
+`onboardingChecklist` rather than `checklist`; `archived`/`archivedAs`/`archivedAt` are always
+`false`/`""`/`""` (a promoted record can never be archived — that is an onboarding-table concept);
+and there are new fields — `onboardedAt`, `joinedOn`, `interns` (employee objects only, `[]` when
+there are none) and `reportingManagerId` (intern objects only). See
+[Promotion, un-promotion and manager reassignment](#promotion-un-promotion-and-manager-reassignment).
+
 ### Field rules
 
 | Field | Required | Rule |
@@ -532,6 +543,129 @@ Valid `itemId` values: `offer-letter`, `id-proof`, `bank-details`, `laptop`, `em
 
 ---
 
+## Promotion, un-promotion and manager reassignment
+
+Officials only, all eleven routes. Each is its own endpoint, individually callable, rather than one
+atomic call — see [docs/database-design.md#promotion](database-design.md#promotion) for the full
+reasoning. The short version: every step here is idempotent, the destructive step in a sequence is
+always last, and the API refuses a destructive call whose precondition has not been met yet. That
+combination means **re-running a whole sequence after any failure is always safe** — nothing here
+needs a "did that already happen?" check before you retry it.
+
+### `POST /staff/employees`
+
+Step one of promoting a finished, non-intern onboarding record. Body `{"employeeId": "E1024"}`.
+
+Refuses with `409` unless the checklist is 8 of 8 ("Onboarded"). Refuses with `400` naming
+`employmentType` if the record is an intern — use `POST /staff/interns` instead. A second call for
+an id already on the employee dashboard is `409`, not an error worth treating specially.
+
+```bash
+curl -s -X POST "$BASE_URL/staff/employees" \
+  -H 'Content-Type: application/json' -d '{"employeeId": "E1024"}'
+```
+
+Returns `201` with the new `EmployeeTable` record: every profile field, `onboardingChecklist` (the
+whole checklist, frozen as history), `onboardedAt`, `joinedOn`, and `interns: []`.
+
+### `POST /staff/interns`
+
+Step one of promoting a finished intern. Body `{"employeeId": "E1024", "reportingManagerId": "E1001"}`.
+
+Same completion gate as above. `reportingManagerId` is required and must name a record that already
+exists in `EmployeeTable` **and is itself an employee, not an intern** — `400` with
+`fields.reportingManagerId` if it does not (including when the named manager is still onboarding,
+does not exist at all, or is an intern - employees and interns share `EmployeeTable`, so existence
+alone is not proof of which one a record is).
+
+Returns `201` with the new `EmployeeTable` record (entityType `Intern`), including
+`reportingManagerId`. Note this call alone does **not** update the manager's `interns` list — that
+is the next step.
+
+### `POST /staff/employees/{id}/interns`
+
+Links one intern to this manager. Body `{"internId": "E1024"}`. Idempotent: calling it twice with
+the same `internId` leaves the list with one entry, not two. Returns the manager's `EmployeeTable`
+record.
+
+### `DELETE /staff/employees/{id}/interns/{internId}`
+
+Unlinks one intern from this manager. Idempotent — already-unlinked is `200`, not `404`. Removes the
+whole `interns` attribute, rather than leaving `[]`, when this was the last one.
+
+### `PUT /staff/interns/{id}/manager`
+
+HR manually reassigns an intern's reporting manager. Body `{"reportingManagerId": "E1002"}`. The new
+manager is validated the same way `POST /staff/interns` validates one.
+
+Returns `200` with the updated intern record **plus** `previousReportingManagerId` — the frontend
+needs that to know which old link to remove, since this call has already overwritten it. Reassigning
+to the manager an intern already has is a no-op `200`, not a `409`.
+
+The full reassign sequence is this call, then `POST /staff/employees/{newManagerId}/interns`, then
+`DELETE /staff/employees/{oldManagerId}/interns/{id}` — new link added before the old one is removed.
+
+### `DELETE /onboarding/{id}`
+
+The destructive last step of a promote sequence. Removes the row from `OnboardingTable` outright —
+**not** the same route as `DELETE /employees/{id}` below, which still archives in place.
+
+Refuses with `409` unless the id already exists in `EmployeeTable` — as an employee or an intern,
+either counts — called out of order, before either promote call above, it would destroy the only
+copy of someone's onboarding history. Idempotent: an id already gone from onboarding is `200`.
+
+```bash
+curl -s -X DELETE "$BASE_URL/onboarding/$EMPLOYEE_ID"
+```
+
+### `POST /onboarding/restore`
+
+"Undo move" - step one of un-promoting. Body `{"employeeId": "E1024"}`.
+
+Available for **seven days** from the promoted record's `onboardedAt`. Past that, `409` — there is
+no other way back; a mistaken promotion older than a week needs table access. Returns `201` with the
+restored onboarding record, checklist and every HR comment on it intact.
+
+### `DELETE /staff/employees/{id}` / `DELETE /staff/interns/{id}`
+
+The destructive last step of un-promoting. Both routes act on the same `EmployeeTable` - each
+refuses with `404` if the id names the *other* kind of record (an employee id given to the intern
+route, or vice versa), and with `409` unless **both** the onboarding row already exists again
+(`POST /onboarding/restore` ran first) and the record is still inside the seven-day window —
+checked again here even though `restore` already checked it, so a call arriving out of order
+cannot rely on a window that was open when an earlier step ran.
+
+The full un-promote sequence for an intern is: `POST /onboarding/restore`, then
+`DELETE /staff/employees/{managerId}/interns/{id}`, then `DELETE /staff/interns/{id}`. For a
+non-intern, skip the middle step.
+
+### `GET /staff/employees`
+
+Every onboarded, non-intern employee — the Employee Tracking dashboard. Same shape as
+`GET /employees`: `{ "employees": [...], "count": N }`, each carrying `onboardingChecklist`,
+`onboardedAt`, `joinedOn` and `interns`.
+
+### `GET /staff/interns`
+
+Every onboarded intern — the Interns dashboard. `{ "interns": [...], "count": N }`. With
+`?managerId=E1001`, filters to the interns reporting to that manager via the `ByReportingManager`
+GSI (a `Query`, not a `Scan` — this is the one place the index is used directly).
+
+```bash
+curl -s "$BASE_URL/staff/interns?managerId=E1001"
+```
+
+### Known gap: no automatic compensation
+
+None of the eleven routes above roll anything back on their own, and there is no background sweep
+for a half-finished sequence or a stale `interns` entry after a reassignment. What is guaranteed
+is that every such state is visible on the dashboards and fixed by re-running the sequence from its
+first step — not that it cannot happen. Building real compensation (an idempotency key per sequence,
+a sweep, automatic retry) is deliberately deferred; see
+[docs/database-design.md#known-gap-no-server-side-compensation](database-design.md#known-gap-no-server-side-compensation).
+
+---
+
 ## Acceptance run
 
 The sequence that proves Phase 2 is done. Every line should print the status code on the right.
@@ -638,3 +772,37 @@ Three more checks that curl can't make for you:
    its 8-entry `checklist` list intact.
 3. **Comments survived** — any note written on a checklist item is still on the archived record.
    That history is the reason the item is still there.
+
+## Manual verification log — 2026-09-03
+
+Every route above exercised against the live `onboarding-system-dev` stack (not `sam local`), by
+signing in for real and reading each response, rather than just re-checking the code:
+
+| Route | As | Result |
+|---|---|---|
+| `POST /login` | `hr.admin` / `onboard-2026` | `200`, official token |
+| `POST /login` | `hr.admin` / wrong password | `401`, generic message |
+| `GET /employees` | official | `200`, live table — 7 records, one already an `Intern` |
+| `GET /employees` | no token | `401 Unauthorized` |
+| `GET /employees` | garbage bearer token | `401 Unauthorized` |
+| `GET /employees` | employee (own scope) | `403 Forbidden` |
+| `POST /employees` | official, new id `ZTEST01` | `201`, fresh checklist, all 8 items `done: false` |
+| `GET /employees/{id}` | official | `200` |
+| `GET /employees/{id}` | official, unknown id | `404 NotFound` |
+| `PUT /employees/{id}` | official | `200`, edited fields updated |
+| `PATCH /employees/{id}/checklist/{itemId}` | official | `200`, `status`/`progress` recomputed (`Pending` → `In Progress`) |
+| `PATCH /employees/{id}/checklist/{itemId}` | official, unknown item id | `404 NotFound` |
+| `PATCH /employees/{id}/checklist/{itemId}` | employee | `403 Forbidden` — read-only access |
+| `GET /employees/{id}/documents` | official | `200`, all three slots `uploaded: false` |
+| `POST /login` | `ZTEST01` / `welcome-2026` | `200`, employee token — a freshly created employee is a valid login on the shared password with no separate provisioning step |
+| `GET /employees/{id}` | self | `200` |
+| `GET /employees/{id}` | self, someone else's id | `403 Forbidden` |
+| `GET /employees` | self | `403 Forbidden` — the list itself, not just other records |
+| `PATCH /employees/{id}/contact` | self | `200`, `phone`/`personalEmail`/`address` written, checklist echoed back with **no `comment` key** |
+| `GET /employees/{id}/documents` | self | `200` |
+| `POST /employees/{id}/documents/{slot}` | self, missing `filename` | `400 ValidationError`, field-scoped error |
+| `POST /employees/{id}/documents/{slot}` | self, valid request | `200`, presigned S3 POST ticket (bucket, key `employees/ZTEST01/resume`, short-lived credential) |
+| `DELETE /employees/{id}` | official | `200`, `archived: true`, `archivedAs: "Onboarding Cancelled"` — record kept, not deleted |
+
+`ZTEST01` was left in its archived state afterwards, matching the soft-delete design rather than
+being hard-removed from the table — the same state `DELETE` leaves any real employee in.

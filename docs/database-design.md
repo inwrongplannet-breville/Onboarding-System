@@ -3,6 +3,8 @@
 Everything about how employees are stored in DynamoDB, and why. This is the authoritative
 description of the data model — [design.md](design.md) summarises it and links here.
 
+- [Two tables, not one](#two-tables-not-one)
+- [Promotion](#promotion)
 - [The table](#the-table)
 - [The item](#the-item)
 - [Access patterns](#access-patterns)
@@ -14,6 +16,161 @@ description of the data model — [design.md](design.md) summarises it and links
 - [Verified behaviour](#verified-behaviour)
 
 ---
+
+## Two tables, not one
+
+The system started as one table, `OnboardingTable`, holding every employee regardless of where
+they stood in onboarding. It is now two, split by lifecycle stage rather than by subtype:
+
+| Table | Backs | Holds |
+|---|---|---|
+| `OnboardingTable` | `#/onboarding` | People whose onboarding is not yet finished |
+| `EmployeeTable` | `#/tracking` and `#/interns` | Onboarded staff — employees **and** interns, side by side |
+
+`OnboardingTable`'s own schema and item shape are **unchanged** by the split — see
+[The table](#the-table) and [The item](#the-item) below, both still describe it exactly. What
+changed is that a record now *leaves* it, via [promotion](#promotion), rather than staying there
+for the rest of its life.
+
+An employee and an intern were briefly two tables, `EmployeeTable` and `InternTable`, split by
+subtype - each with its own key attribute and prefix. They were merged before the first deploy:
+`entityType` was already the discriminator the DynamoDB item-type convention calls for (it has
+distinguished item kinds since before this table held more than one), a second table keyed on its
+own `internKey`/`INT#` prefix was redundant with it, and `attribute_not_exists(employeeKey)` on one
+shared table now makes **"promoted as both an employee and an intern" structurally impossible** -
+two independent tables' conditions never guaranteed that on their own.
+
+### `EmployeeTable`
+
+| | |
+|---|---|
+| Partition key | `employeeKey` (String), `EMP#<employeeId>` — same attribute and prefix as `OnboardingTable`, so a promoted record keeps the id it always had, whichever kind it becomes |
+| Sort key | none |
+| Secondary index | `ByReportingManager` — GSI, HASH `reportingManagerId`, `Projection: ALL` |
+| Billing | `PAY_PER_REQUEST` |
+
+Every `PROFILE_FIELDS` attribute `OnboardingTable` has, minus `checklist`/`archivedAs`/`archivedAt`
+(archiving is an onboarding-table concept — a staff record can never be archived), plus:
+
+| Attribute | On | Notes |
+|---|---|---|
+| `entityType` | both | `"Employee"` or `"Intern"` — the one attribute that tells the two kinds of item apart. `common/models.py`'s `is_employee_item()`/`is_intern_item()` are the only way handlers read it |
+| `onboardingChecklist` | both | the whole 8-item checklist, copied verbatim at promotion — frozen history, not something the checklist PATCH can reach (see the rename note below) |
+| `onboardedAt` | both | ISO8601 `…Z`, when the move happened — the 7-day undo window (see [Promotion](#promotion)) is measured from this |
+| `joinedOn` | both | date of joining, copied from `startDate` (which stays too) |
+| `interns` | employee only | **sparse** — a list of intern ids, present only on a manager with one or more, absent everywhere else, including on every intern item. Written by `POST /staff/employees/{id}/interns`, `REMOVE`d by `DELETE .../interns/{internId}` the moment it would otherwise go empty. Absent and `[]` mean the same thing to a reader — the same rule this file already applies to `archivedAs` and to a checklist comment |
+| `reportingManagerId` | intern only | required, must name an `EmployeeTable` item whose own `entityType` is `"Employee"` — never present on an employee item |
+
+`Projection: ALL` on the GSI because the interns dashboard renders the whole record — a keys-only
+projection would turn one `Query` into a `Query` plus N `GetItem`s. The index is **sparse**: only
+intern items carry `reportingManagerId` at all, so an employee item is simply absent from it rather
+than something a query has to filter out.
+
+### The type guards this table needs that two tables did not
+
+Once one table holds both kinds of record, "this id resolves to a row in `EmployeeTable`" stops
+meaning "this id is an employee" — every handler that used to be able to assume that now checks
+`entityType` explicitly:
+
+| Handler | Guard | Why |
+|---|---|---|
+| `promote_to_intern.py` | new manager must be `is_employee_item` | otherwise an intern could be named as another intern's manager |
+| `set_intern_manager.py` | same, for a reassignment's new manager; and the reassignment target itself must be `is_intern_item` | same reason, both directions |
+| `add_manager_intern.py` | linked record must be `is_intern_item` | otherwise an employee could be linked into someone's `interns` list as if they were an intern |
+| `delete_staff_employee.py` | target must be `is_employee_item` | so this route cannot delete an intern's record |
+| `delete_staff_intern.py` | target must be `is_intern_item` | and vice versa |
+
+This is the one real cost of merging the tables, and it is a cost paid in explicit checks rather
+than in structural safety: nothing here was silently lost, but nothing is free either.
+
+## Promotion
+
+"Move to main employee dashboard" / "Move to intern dashboard" and their reverse are each a short
+**sequence of small, independently callable endpoints** — not a single `TransactWriteItems`, even
+though DynamoDB transactions do span multiple tables in one region and this codebase has held that
+exact machinery before (`git show da9ecc3^:src/common/db.py`). The individual-endpoint shape is a
+deliberate choice, not an oversight: every step is independently triggerable and observable from
+the client, matching how HR actually drives the UI one click at a time.
+
+That choice has a cost, and it is worth being plain about it: a closed tab, a lost connection or a
+500 partway through a sequence leaves the data in a state no server-side process will ever finish
+or reverse. The mitigation is a rule every sequence below obeys:
+
+> **The destructive step is always last, and every endpoint is idempotent.**
+> An interrupted sequence leaves a *duplicate* — someone visible on two dashboards, or a manager
+> link recorded twice — never a vanished record. Re-running the whole sequence from step 1 is
+> always safe and always finishes the job.
+
+Two guards make that a property of the API, not just of a well-behaved client:
+
+- `DELETE /onboarding/{id}` refuses with 409 unless the record already exists in `EmployeeTable`,
+  as an employee or as an intern. Called out of order, it cannot destroy anything.
+- `DELETE /staff/employees/{id}` and `DELETE /staff/interns/{id}` refuse unless the onboarding row
+  already exists again (`POST /onboarding/restore` has run) **and** the promotion is still inside
+  the seven-day undo window. Without this pair, either route is an unrestricted "delete any staff
+  record" endpoint with no copy anywhere first.
+
+### The four sequences
+
+**Promote a non-intern** — `POST /staff/employees` (body `{employeeId}`) → `DELETE /onboarding/{id}`.
+The first call is gated on `derive_status(checklist) == 'Onboarded'`: the whole premise is that
+`OnboardingTable` holds unfinished onboarding and `EmployeeTable` holds finished onboarding, and an
+ungated promote would put a half-ticked checklist somewhere with no route left to finish it — the
+checklist PATCH is onboarding-only. Interrupted after step 1: visible on both `#/onboarding` and
+`#/tracking`; re-running step 1 is a harmless 409, step 2 then completes.
+
+**Promote an intern** — `POST /staff/interns` (body `{employeeId, reportingManagerId}`) →
+`POST /staff/employees/{managerId}/interns` (body `{internId}`) → `DELETE /onboarding/{id}`. The
+first call validates `reportingManagerId` names a live `EmployeeTable` item **whose own entityType
+is `Employee`**, not merely a live item — an onboarding record's free-text `manager` string is not
+enough to establish that on its own, and neither, now, is existence alone: the manager and the
+intern share one table, so an intern's id resolves in `EmployeeTable` too. Interrupted after step
+1: on `#/onboarding` and `#/interns`, but the manager's `interns` list does not yet name them.
+Interrupted after step 2: on both dashboards, link correct. Re-run from step 1 either way — it
+409s harmlessly if already done.
+
+**Undo a move, within seven days** — `POST /onboarding/restore` (body `{employeeId}`) →
+(intern only) `DELETE /staff/employees/{managerId}/interns/{id}` →
+`DELETE /staff/employees/{id}` or `DELETE /staff/interns/{id}`. The window is checked twice — once
+in the restore call, once again in the final delete — because a call arriving out of order must
+not slip through on a stale assumption that the window was open when an earlier step ran. Past the
+window there is no other way back: a mistaken promotion older than a week needs table access, the
+same trade a mistaken hard delete always makes.
+
+**Reassign an intern's manager** — `PUT /staff/interns/{id}/manager` (body `{reportingManagerId}`,
+returns the *previous* manager id) → `POST /staff/employees/{newManagerId}/interns` →
+`DELETE /staff/employees/{oldManagerId}/interns/{id}`. New link added before the old one is
+removed, on purpose: if the last step never runs, the intern is reachable from both managers'
+`interns` lists — a harmless duplicate. The reverse order risks the opposite, an intern linked to
+nobody, which this whole design exists to avoid. `GET /staff/interns?managerId=` reads the
+`ByReportingManager` GSI directly, so the *dashboard* is correct the moment step 1 lands even if
+steps 2–3 have not yet run — only the denormalised `interns` list can be briefly stale.
+
+### Known gap: no server-side compensation
+
+There is no sweep for a record left in an inconsistent state (present but with a stale `interns`
+link, say), no idempotency key tying one sequence's steps together, and no automatic retry. What
+this design guarantees today is that every interrupted state is *visible on the dashboards* and
+*fixable by re-running the sequence* — not that it cannot happen. Building a compensation/rollback
+system is explicitly deferred; see
+[docs/api.md](api.md#known-gap-no-automatic-compensation) for the endpoint-level version of this
+note.
+
+### Why `dynamodb:DeleteItem` exists now
+
+[Rules that must not be broken](#rules-that-must-not-be-broken) and
+`src/handlers/delete_employee.py` both make a point of no function anywhere holding
+`dynamodb:DeleteItem` — deleting an employee has always meant archiving in place. Promotion breaks
+that: `DELETE /onboarding/{id}`, `DELETE /staff/employees/{id}` and `DELETE /staff/interns/{id}` are
+real deletes, because the whole point of the promotion design is that a record's *table* is the
+fact of where it stands, and a promoted record cannot stay in `OnboardingTable` forever.
+
+It is scoped as narrowly as it can be. `DeleteOnboardingRecordFunction` holds it on `OnboardingTable`
+only; `DeleteStaffEmployeeFunction` and `DeleteStaffInternFunction` each hold it on `EmployeeTable`
+only, and neither can also `PutItem` there, so a bug in either cannot turn a delete into data loss
+beyond the one table it is scoped to. What is genuinely lost, relative to the archive-in-place
+`DELETE /employees/{id}`, is recoverability past the seven-day undo window — after that, a mistaken
+promotion needs table access, exactly the trade a mistaken hard delete has always made.
 
 ## The table
 
@@ -70,7 +227,7 @@ What it costs:
   attach a second person's history to the first person's id.
 
 The seed fixtures use `E1001`–`E1006`, so a reseed lands the same people on the same ids and a
-hand-written link like `#/employees/E1003` survives a table reset.
+hand-written link like `#/onboarding/E1003` survives a table reset.
 
 ## The item
 
@@ -184,7 +341,9 @@ skip them — the price of soft deletion on a `Scan`-based list.
 **No transactions anywhere.** An employee is one item, so there is nothing to keep atomic across
 items. `src/common/db.py` holds a single resource-level client; the low-level client,
 `TypeSerializer` and the `CancellationReasons` demux in `handler.py` were all retired with the
-multi-item design.
+multi-item design. Promotion is a genuine multi-item, multi-table write and still does not bring
+any of that back — see [Promotion](#promotion) for why it is a sequence of small endpoints
+instead.
 
 ### IAM, per function
 
@@ -192,17 +351,28 @@ Written out inline rather than via SAM policy templates, which are coarser than 
 `DynamoDBReadPolicy` grants `Scan` to handlers that only need `GetItem`, and `DynamoDBWritePolicy`
 grants no read actions at all, which would push the delete handler to full CRUD.
 
-| Function | Actions |
-|---|---|
-| `ListEmployeesFunction` | `Scan` |
-| `CreateEmployeeFunction` | `PutItem` |
-| `GetEmployeeFunction` | `GetItem` |
-| `UpdateEmployeeFunction` | `UpdateItem`, `GetItem` |
-| `DeleteEmployeeFunction` | `GetItem`, `UpdateItem` — **no `DeleteItem`** |
-| `SetChecklistItemFunction` | `UpdateItem`, `GetItem` |
-| `UpdateOwnContactFunction` | `UpdateItem`, `GetItem` |
-| `GetDocumentsFunction` | none — S3 only |
-| `RequestDocumentUploadFunction` | `GetItem` |
+| Function | Table(s) | Actions |
+|---|---|---|
+| `ListEmployeesFunction` | Onboarding | `Scan` |
+| `CreateEmployeeFunction` | Onboarding | `PutItem` |
+| `UpdateEmployeeFunction` | Onboarding | `UpdateItem`, `GetItem` |
+| `DeleteEmployeeFunction` | Onboarding | `GetItem`, `UpdateItem` — **no `DeleteItem`** |
+| `SetChecklistItemFunction` | Onboarding | `UpdateItem`, `GetItem` |
+| `GetEmployeeFunction` | both | `GetItem` on each — `find_record()` tries them in turn |
+| `UpdateOwnContactFunction` | both | `UpdateItem`, `GetItem` on each — writes whichever table the caller's own record is in |
+| `RequestDocumentUploadFunction` | both | `GetItem` on each |
+| `GetDocumentsFunction` | none | S3 only |
+| `PromoteToEmployeeFunction` | Onboarding, Employee | `GetItem` (Onboarding), `PutItem` (Employee) |
+| `PromoteToInternFunction` | Onboarding, Employee | `GetItem` (Onboarding), `GetItem`+`PutItem` (Employee — GetItem to verify the manager is an employee, PutItem for the new intern row) |
+| `AddManagerInternFunction` | Employee | `GetItem`+`UpdateItem` — one grant, since the manager and the linked intern are the same table now |
+| `RemoveManagerInternFunction` | Employee | `GetItem`, `UpdateItem` |
+| `SetInternManagerFunction` | Employee | `GetItem`+`UpdateItem` — covers the intern's own row and the new manager's, same table |
+| `DeleteOnboardingRecordFunction` | Onboarding, Employee | `GetItem` (Employee, the ordering guard — matches either kind), `DeleteItem` (Onboarding only) |
+| `RestoreOnboardingFunction` | Onboarding, Employee | `GetItem` (Employee), `PutItem` (Onboarding) |
+| `DeleteStaffEmployeeFunction` | Onboarding, Employee | `GetItem` (Onboarding, the restore guard), `GetItem`+`DeleteItem` (Employee only) |
+| `DeleteStaffInternFunction` | Onboarding, Employee | Same shape as above, against the same table — `is_intern_item` in the handler is what tells the two functions' targets apart |
+| `ListStaffEmployeesFunction` | Employee | `Scan` |
+| `ListInternsFunction` | Employee | `Scan` (same table `ListStaffEmployeesFunction` scans), plus `Query` on the `ByReportingManager` index ARN |
 
 `DeleteEmployeeFunction` having no `DeleteItem` is the point, and it matters more now than it did:
 one stray `DeleteItem` would take an employee's checklist and every note on it in a single call.
@@ -310,6 +480,19 @@ so rewording an item in `CHECKLIST_TEMPLATE` does not reach existing employees w
 The upside is that a record shows the wording that was in force when the person was hired. This was
 the shape the old `CHK#` rows had too, so it is not a regression — just not a free fix.
 
+**Promotion has no compensation, and no manual reassignment past the intern flow.** See
+[Promotion](#promotion) for the sequencing trade in full. Two smaller gaps worth naming on their
+own:
+
+- The free-text `manager` field on an onboarding record and `reportingManagerId` on a promoted
+  intern are unrelated. Nothing checks the two agree, and nothing migrates one into the other —
+  HR picks the reporting manager explicitly at promotion time.
+- The `interns` list on `EmployeeTable` is a denormalisation of what the `ByReportingManager` GSI
+  already knows. Every read that matters (`GET /staff/interns?managerId=`) goes through the index,
+  not the list, so a stale list can never produce a wrong dashboard — but it can sit briefly out of
+  sync with the index during a reassignment, between `PUT .../manager` and the two link calls that
+  follow it.
+
 ## Cost and size
 
 Measured against the deployed dev table, not estimated:
@@ -360,19 +543,23 @@ Two other things that bite:
 - `UpdateReplacePolicy: Delete` means the old table and its data are deleted on replacement, not
   orphaned. That is wanted here; on a table with real data it is the opposite of wanted.
 
-### Resetting the dev table
+### Resetting the dev tables
 
 ```bash
 py scripts/seed_employees.py --wipe --seed --yes
 ```
 
-Seeding drives the public REST API, so a broken seed is a broken API rather than a mystery. Wiping
-cannot: `DELETE /employees/{id}` archives rather than erases, so wiping over HTTP would leave every
-record in place and each reseed would pile a fresh set on top of the archived ones. `--wipe` goes
-straight at the table with `Scan` + `BatchWriteItem`.
+`--wipe` clears both tables, resolving each name from the stack's `OnboardingTableName` /
+`EmployeeTableName` outputs (or `--table-onboarding`/`--table-employee`). One pass over
+`EmployeeTable` clears employees and interns together - they share it. Seeding drives the public
+REST API, promote sequence included, so a broken seed is a broken API rather than a mystery.
+Wiping cannot go through the API: `DELETE /employees/{id}` archives rather than erases, and none
+of the promote endpoints hard-delete without a copy existing first, so wiping over HTTP would
+leave records in place. `--wipe` goes straight at each table with `Scan` + `BatchWriteItem`.
 
-That asymmetry is the design working: the API has no hard delete because employee history should not
-be destroyable over HTTP. Resetting a dev table is a deliberate act against the table.
+That asymmetry is the design working: the API has no unconditional hard delete because history
+should not be destroyable over HTTP by accident. Resetting the dev tables is a deliberate act
+against the tables themselves.
 
 ## Verified behaviour
 

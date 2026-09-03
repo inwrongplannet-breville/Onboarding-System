@@ -2,8 +2,12 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Employee Management & Onboarding System.
-  One DynamoDB item per employee + eleven Lambdas behind API Gateway, wired to the UI.
-  DELETE archives rather than erases - see src/handlers/delete_employee.py.
+  Two DynamoDB tables - onboarding, and employees-plus-interns told apart by
+  entityType - + twenty-two Lambdas behind API Gateway, wired to the UI.
+  DELETE /employees/{id} archives rather than erases - see
+  src/handlers/delete_employee.py. Promotion between tables is a sequence of
+  small endpoints, not one cross-table transaction - see
+  docs/database-design.md#promotion.
 
 Parameters:
   Stage:
@@ -30,7 +34,13 @@ Globals:
     CodeUri: src/
     Environment:
       Variables:
-        TABLE_NAME: !Ref OnboardingTable
+        # Two tables, not one - see common/db.py. There is deliberately no
+        # single TABLE_NAME any more: a handler still importing that name fails
+        # to import instead of quietly reading or writing the wrong table.
+        # EmployeeTable holds employees and interns both, told apart by
+        # entityType - there is no third table name to set.
+        ONBOARDING_TABLE_NAME: !Ref OnboardingTable
+        EMPLOYEE_TABLE_NAME: !Ref EmployeeTable
         # Read by common/responses.py for the CORS header on every response.
         ALLOWED_ORIGIN: !Ref AllowedOrigin
         # The `aud` claim tokens are minted for and checked against, so a dev
@@ -75,6 +85,59 @@ Resources:
       KeySchema:
         - AttributeName: employeeKey
           KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      Tags:
+        - Key: Project
+          Value: onboarding-system
+
+  # ------------------------------------------------------------ employee table
+  #
+  # Onboarded staff - employees AND interns, side by side, told apart by
+  # `entityType` rather than by which table they are in. Same key attribute
+  # and EMP# prefix as OnboardingTable - a promoted record keeps the id it
+  # had while onboarding, only the table changes - so common/keys.py's
+  # pk()/key() serve this table unchanged, for either kind of record.
+  # Populated by handlers/promote_to_employee.py and promote_to_intern.py,
+  # never by CreateEmployeeFunction: every new hire starts in OnboardingTable.
+  #
+  # This used to be two tables, EmployeeTable and InternTable, split by
+  # subtype rather than by lifecycle stage. Merged into one: `entityType` was
+  # already the discriminator DynamoDB item-type convention calls for
+  # (list_employees.py's Scan filter used it from day one), a second table
+  # keyed on its own internKey/INT# prefix was redundant with it, and
+  # `attribute_not_exists(employeeKey)` on one table now makes "promoted as
+  # both an employee and an intern" structurally impossible - two independent
+  # conditions could not have guaranteed that.
+  #
+  # The GSI is what lets "which interns report to this manager" be a Query
+  # instead of a Scan-and-filter - see handlers/list_interns.py. It is sparse:
+  # only intern items carry reportingManagerId, so an employee item is simply
+  # absent from the index rather than something a query has to skip.
+  EmployeeTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: employeeKey
+          AttributeType: S
+        - AttributeName: reportingManagerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: employeeKey
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: ByReportingManager
+          KeySchema:
+            - AttributeName: reportingManagerId
+              KeyType: HASH
+          # ALL, not KEYS_ONLY: the interns dashboard renders the whole record,
+          # and a keys-only projection would turn one Query into a Query plus N
+          # GetItems.
+          Projection:
+            ProjectionType: ALL
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: false
       Tags:
@@ -447,9 +510,14 @@ Resources:
       Policies:
         - Version: '2012-10-17'
           Statement:
+            # find_record() (common/repository.py) tries both tables in
+            # turn - a promoted employee's own id is no longer in Onboarding
+            # alone, and this route has to keep answering for them.
             - Effect: Allow
               Action: dynamodb:GetItem
-              Resource: !GetAtt OnboardingTable.Arn
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
       Events:
         Api:
           Type: Api
@@ -527,11 +595,16 @@ Resources:
             # tests/ and fail only against the deployed stack. The whitelist in
             # common/models.SELF_EDITABLE_FIELDS is the control; adding IAM as a
             # second one is worth doing when it can be tested.
+            # Both tables - find_record() locates the caller's own record
+            # wherever promotion left it, then writes against that same table
+            # via table_for(source).
             - Effect: Allow
               Action:
                 - dynamodb:UpdateItem
                 - dynamodb:GetItem
-              Resource: !GetAtt OnboardingTable.Arn
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
       Events:
         Api:
           Type: Api
@@ -611,12 +684,15 @@ Resources:
             - Effect: Allow
               Action: s3:PutObject
               Resource: !Sub '${DocumentsBucket.Arn}/employees/*'
-            # The archived-and-exists check. A consistent projected read, so a
-            # ticket is never minted for an employee who does not exist or whose
-            # record is frozen.
+            # The exists-and-not-archived check, now via find_record() across
+            # both tables - documents live at the same S3 key before and
+            # after promotion, so an employee who has moved must still be able
+            # to upload.
             - Effect: Allow
               Action: dynamodb:GetItem
-              Resource: !GetAtt OnboardingTable.Arn
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
       Events:
         Api:
           Type: Api
@@ -651,13 +727,293 @@ Resources:
             Path: /employees/{id}/checklist/{itemId}
             Method: PATCH
 
+  # -------------------------------------------------------- promote / restore
+  #
+  # Eleven functions for the promote/un-promote/reassign sequences and the two
+  # staff dashboards - see docs/database-design.md#promotion for why these are
+  # small, individually-callable steps rather than one cross-table transaction.
+  # Employees and interns share EmployeeTable now (told apart by entityType),
+  # so several of these grants that used to name two staff-table ARNs now name
+  # one.
+  #
+  # dynamodb:DeleteItem appears here, on three functions, never both actions
+  # and never more than one table per function. That contradicts the
+  # invariant DeleteEmployeeFunction's own comment states - "no DeleteItem
+  # anywhere in this stack" - and it is unavoidable given that promotion and
+  # un-promotion are real deletes, not archives. It is scoped as narrowly as
+  # it can be: DeleteOnboardingRecordFunction only on OnboardingTable;
+  # DeleteStaffEmployeeFunction and DeleteStaffInternFunction each only on
+  # EmployeeTable, and neither can also PutItem there, so a bug in either
+  # cannot turn a delete into data loss beyond the one table it is scoped to.
+  # What this genuinely gives up, relative to the archive-in-place DELETE, is
+  # recoverability past the seven-day undo window - after that a mistaken
+  # promotion needs table access, same as a mistaken hard delete always would.
+
+  PromoteToEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.promote_to_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/employees
+            Method: POST
+
+  PromoteToInternFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.promote_to_intern.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+            # One EmployeeTable grant covering both reads/writes this handler
+            # makes against it: GetItem to verify the named manager is an
+            # employee (is_employee_item), PutItem for the new intern row.
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/interns
+            Method: POST
+
+  AddManagerInternFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.add_manager_intern.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # GetItem covers both the manager's own read and confirming the
+            # named intern exists (is_intern_item) - both are EmployeeTable
+            # now. UpdateItem is the manager's `interns` list write.
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/employees/{id}/interns
+            Method: POST
+
+  RemoveManagerInternFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.remove_manager_intern.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/employees/{id}/interns/{internId}
+            Method: DELETE
+
+  SetInternManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.set_intern_manager.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # One EmployeeTable grant: GetItem covers reading the intern's own
+            # row and confirming the new manager is an employee
+            # (is_employee_item); UpdateItem writes the intern's
+            # reportingManagerId.
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/interns/{id}/manager
+            Method: PUT
+
+  DeleteOnboardingRecordFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.delete_onboarding_record.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # The ordering guard: must see the record already copied - as
+            # either an employee or an intern, both the same table now -
+            # before it may delete the onboarding row.
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt EmployeeTable.Arn
+            - Effect: Allow
+              Action: dynamodb:DeleteItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /onboarding/{id}
+            Method: DELETE
+
+  RestoreOnboardingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.restore_onboarding.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt EmployeeTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt OnboardingTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /onboarding/restore
+            Method: POST
+
+  DeleteStaffEmployeeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.delete_staff_employee.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # The window/ordering guard: must see the onboarding row restored
+            # before it may delete the staff row. GetItem on Onboarding, then
+            # GetItem + DeleteItem on the one table this function owns.
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/employees/{id}
+            Method: DELETE
+
+  DeleteStaffInternFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.delete_staff_intern.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Same window/ordering guard as DeleteStaffEmployeeFunction, and
+            # the same EmployeeTable both of them now target - only the
+            # handler's is_intern_item check tells the two apart.
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt OnboardingTable.Arn
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/interns/{id}
+            Method: DELETE
+
+  ListStaffEmployeesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.list_staff_employees.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource: !GetAtt EmployeeTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/employees
+            Method: GET
+
+  ListInternsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.list_interns.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Same table ListStaffEmployeesFunction scans - the FilterExpression
+            # in the handler is what keeps this to interns only.
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource: !GetAtt EmployeeTable.Arn
+            # The index is a separate resource ARN from the table - omitting
+            # this is an AccessDenied that moto cannot catch, because moto does
+            # not emulate IAM at all. Only a real deploy proves this line.
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${EmployeeTable.Arn}/index/ByReportingManager'
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /staff/interns
+            Method: GET
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the API. This is the value Phase 3 drops into js/store.js.
     Value: !Sub 'https://${OnboardingApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
-  TableName:
-    Description: DynamoDB table name.
+  OnboardingTableName:
+    Description: DynamoDB table name - onboarding not yet finished.
     Value: !Ref OnboardingTable
+  EmployeeTableName:
+    Description: DynamoDB table name - onboarded staff, employees and interns alike.
+    Value: !Ref EmployeeTable
   DocumentsBucketName:
     Description: >
       Employee document store. This bucket must be EMPTIED BY HAND before

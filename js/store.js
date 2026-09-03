@@ -380,6 +380,160 @@ window.App = window.App || {};
       });
     },
 
+    /**
+     * The employee/intern promote/restore/reassign primitives, each its own
+     * fetch to its own endpoint - see docs/database-design.md#promotion for
+     * why these are separate calls rather than one atomic request. `promote`,
+     * `unpromote` and `reassignManager` below sequence them; nothing else
+     * should call these eleven functions directly.
+     */
+    promoteToEmployee: function (employeeId) {
+      return request('POST', '/staff/employees', { employeeId: employeeId });
+    },
+
+    promoteToIntern: function (employeeId, reportingManagerId) {
+      return request('POST', '/staff/interns',
+        { employeeId: employeeId, reportingManagerId: reportingManagerId });
+    },
+
+    addManagerIntern: function (managerId, internId) {
+      return request('POST',
+        '/staff/employees/' + encodeURIComponent(managerId) + '/interns',
+        { internId: internId });
+    },
+
+    listStaffEmployees: function () {
+      return request('GET', '/staff/employees').then(function (payload) {
+        return payload.employees;
+      });
+    },
+
+    /** All interns, or - with managerId - only the ones reporting to them. */
+    listInterns: function (managerId) {
+      var path = '/staff/interns';
+      if (managerId) path += '?managerId=' + encodeURIComponent(managerId);
+      return request('GET', path).then(function (payload) {
+        return payload.interns;
+      });
+    },
+
+    removeManagerIntern: function (managerId, internId) {
+      return request('DELETE',
+        '/staff/employees/' + encodeURIComponent(managerId) +
+        '/interns/' + encodeURIComponent(internId));
+    },
+
+    setInternManager: function (internId, reportingManagerId) {
+      return request('PUT', '/staff/interns/' + encodeURIComponent(internId) + '/manager',
+        { reportingManagerId: reportingManagerId });
+    },
+
+    deleteOnboardingRecord: function (employeeId) {
+      return request('DELETE', '/onboarding/' + encodeURIComponent(employeeId));
+    },
+
+    restoreOnboarding: function (employeeId) {
+      return request('POST', '/onboarding/restore', { employeeId: employeeId });
+    },
+
+    deleteStaffEmployee: function (employeeId) {
+      return request('DELETE', '/staff/employees/' + encodeURIComponent(employeeId));
+    },
+
+    deleteStaffIntern: function (employeeId) {
+      return request('DELETE', '/staff/interns/' + encodeURIComponent(employeeId));
+    },
+
+    /**
+     * "Move to main employee dashboard" / "Move to intern dashboard" - the
+     * frontend half of the promote sequence. `employee` is the onboarding
+     * record; `reportingManagerId` is required only when it is an intern.
+     *
+     * Each step tags a rejection with `error.step`, naming which call in the
+     * sequence failed - app.js uses that to tell the user what actually
+     * happened rather than a bare "something went wrong". The sequence is
+     * always safe to run again from the start: every step is idempotent, and
+     * the destructive one (removing the onboarding row) is always last and
+     * refuses to run until the copy it depends on already exists - see
+     * handlers/delete_onboarding_record.py.
+     */
+    promote: function (employee, reportingManagerId) {
+      function step(name, promise) {
+        return promise.catch(function (error) {
+          error.step = name;
+          throw error;
+        });
+      }
+
+      var copy = employee.employmentType === 'Intern'
+        ? step('promote', App.store.promoteToIntern(employee.id, reportingManagerId))
+          .then(function () {
+            return step('link', App.store.addManagerIntern(reportingManagerId, employee.id));
+          })
+        : step('promote', App.store.promoteToEmployee(employee.id));
+
+      return copy.then(function () {
+        return step('remove', App.store.deleteOnboardingRecord(employee.id));
+      });
+    },
+
+    /**
+     * "Undo move" - the reverse sequence. `staffRecord` is the employee or
+     * intern object as read off the employee/intern dashboard, which is what
+     * carries `onboardedAt` (the undo window) and, for an intern,
+     * `reportingManagerId` (which link to remove).
+     */
+    unpromote: function (staffRecord) {
+      function step(name, promise) {
+        return promise.catch(function (error) {
+          error.step = name;
+          throw error;
+        });
+      }
+
+      var isIntern = staffRecord.employmentType === 'Intern';
+      var managerId = staffRecord.reportingManagerId;
+
+      return step('restore', App.store.restoreOnboarding(staffRecord.id)).then(function () {
+        var unlink = (isIntern && managerId)
+          ? step('unlink', App.store.removeManagerIntern(managerId, staffRecord.id))
+          : Promise.resolve();
+
+        return unlink.then(function () {
+          return step('remove', isIntern
+            ? App.store.deleteStaffIntern(staffRecord.id)
+            : App.store.deleteStaffEmployee(staffRecord.id));
+        });
+      });
+    },
+
+    /**
+     * HR manually moving an intern to a different reporting manager. New
+     * link added before the old one is removed - see set_intern_manager.py
+     * for why that order and not the reverse.
+     */
+    reassignManager: function (intern, newManagerId) {
+      function step(name, promise) {
+        return promise.catch(function (error) {
+          error.step = name;
+          throw error;
+        });
+      }
+
+      return step('reassign', App.store.setInternManager(intern.id, newManagerId))
+        .then(function (result) {
+          var previousManagerId = result.previousReportingManagerId;
+
+          return step('link', App.store.addManagerIntern(newManagerId, intern.id))
+            .then(function () {
+              if (!previousManagerId || previousManagerId === newManagerId) return result;
+              return step('unlink',
+                App.store.removeManagerIntern(previousManagerId, intern.id))
+                .then(function () { return result; });
+            });
+        });
+    },
+
     setChecklistItem: function (employeeId, itemId, done) {
       // Resolves the FULL employee, with status and progress recomputed server
       // side, so the caller can repaint without a follow-up GET.

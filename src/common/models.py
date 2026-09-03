@@ -6,13 +6,24 @@ the Phase 3 swap touched only the function bodies in `js/store.js` and left ever
 existing view in `js/ui.js` alone.
 """
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from common.checklist_template import CHECKLIST_TEMPLATE
 from common.keys import KEY_ATTRIBUTE, employee_id_from_pk
 
 DEPARTMENTS = ('Engineering', 'HR', 'Finance', 'Operations')
 EMPLOYMENT_TYPES = ('Full-time', 'Contract', 'Intern')
+
+# The one place the routing rule lives: an onboarding record with this
+# employmentType promotes with entityType 'Intern' (promoted_item()), everyone
+# else with entityType 'Employee' - both into the same EmployeeTable row shape.
+# Named rather than compared as a literal at each call site - the handler, the
+# seed script and the frontend all need this same test.
+INTERN_EMPLOYMENT_TYPE = 'Intern'
+
+# How long a promoted record stays undoable. Measured from `onboardedAt`, which
+# every promoted record carries - see promoted_item() below.
+UNPROMOTE_WINDOW_DAYS = 7
 
 # Mirrors EDITABLE_FIELDS in js/store.js - checklist is ours, never settable from
 # a request body, and neither is the employee id.
@@ -426,3 +437,195 @@ def to_api_employee(item):
     employee['archivedAs'] = item.get('archivedAs') or ''
     employee['archivedAt'] = item.get('archivedAt') or ''
     return employee
+
+
+def is_intern(employee):
+    """True for an onboarding record that will promote as an intern."""
+    return employee.get('employmentType') == INTERN_EMPLOYMENT_TYPE
+
+
+def is_intern_item(item):
+    """True for a stored EmployeeTable item that is an intern, not an employee."""
+    return item.get('entityType') == 'Intern'
+
+
+def is_employee_item(item):
+    """
+    True for a stored EmployeeTable item that is an employee, not an intern.
+
+    The two functions are deliberately not opposites of each other in code -
+    each names its own check against `entityType` - so a third entityType
+    value added later fails both rather than one of them silently claiming
+    the other's territory.
+    """
+    return item.get('entityType') == 'Employee'
+
+
+def unpromote_window_open(onboarded_at, now):
+    """
+    True while a promoted record is still inside the UNPROMOTE_WINDOW_DAYS
+    undo window, measured from the ISO8601 `onboardedAt` timestamp every
+    promoted record carries.
+
+    `now` is a parameter rather than datetime.now() called inside this function,
+    so a test can pin both ends of the boundary instead of racing the clock.
+    """
+    onboarded = datetime.fromisoformat(onboarded_at.replace('Z', '+00:00'))
+    return now - onboarded <= timedelta(days=UNPROMOTE_WINDOW_DAYS)
+
+
+# Every profile attribute a staff (employee or intern) item carries, once the
+# onboarding-only fields are set aside. Same PROFILE_FIELDS as an onboarding
+# record - the profile shape does not change on promotion, only where the
+# checklist and the archive stamp live.
+_STAFF_PROFILE_FIELDS = PROFILE_FIELDS
+
+
+def to_api_staff_employee(item):
+    """
+    One EmployeeTable item, entityType 'Employee' -> the object the tracking
+    dashboard renders. Callers pick this translator over to_api_intern by
+    checking is_employee_item()/is_intern_item() on the raw item first - the
+    two are never applied to the same item.
+
+    `interns` is surfaced as [] when the attribute is absent - the attribute
+    itself stays sparse in storage (see promoted_item() and the intern-link
+    handlers), but a caller reading the API object should not have to
+    distinguish "no interns" from "the key is missing", the same reasoning
+    to_api_employee already applies to a checklist comment.
+    """
+    if not item:
+        return None
+
+    checklist = [to_api_checklist_item(entry) for entry in item.get('onboardingChecklist', [])]
+
+    employee = {'id': employee_id_from_pk(item[KEY_ATTRIBUTE])}
+    for field in _STAFF_PROFILE_FIELDS:
+        employee[field] = item.get(field, '')
+
+    employee['checklist'] = checklist
+    employee['status'] = derive_status(checklist)
+    employee['progress'] = progress(checklist)
+    employee['onboardedAt'] = item.get('onboardedAt') or ''
+    employee['joinedOn'] = item.get('joinedOn') or ''
+    employee['interns'] = list(item.get('interns') or [])
+    # A staff record can never be archived - that is an onboarding-table
+    # concept - but own_profile_view() reads these three keys unconditionally
+    # off every record it trims, onboarding or not, so they have to exist here
+    # too. False/'' is not a placeholder, it is the honest answer.
+    employee['archived'] = False
+    employee['archivedAs'] = ''
+    employee['archivedAt'] = ''
+    return employee
+
+
+def to_api_intern(item):
+    """
+    One EmployeeTable item, entityType 'Intern' -> the object the interns
+    dashboard renders. Same table and same key attribute as
+    to_api_staff_employee - the two differ only in which fields they surface,
+    not in where the item lives.
+    """
+    if not item:
+        return None
+
+    checklist = [to_api_checklist_item(entry) for entry in item.get('onboardingChecklist', [])]
+
+    intern = {'id': employee_id_from_pk(item[KEY_ATTRIBUTE])}
+    for field in _STAFF_PROFILE_FIELDS:
+        intern[field] = item.get(field, '')
+
+    intern['checklist'] = checklist
+    intern['status'] = derive_status(checklist)
+    intern['progress'] = progress(checklist)
+    intern['onboardedAt'] = item.get('onboardedAt') or ''
+    intern['joinedOn'] = item.get('joinedOn') or ''
+    intern['reportingManagerId'] = item.get('reportingManagerId') or ''
+    # Same reasoning as to_api_staff_employee: own_profile_view() needs these
+    # three keys on every record it trims, and an intern can never be archived.
+    intern['archived'] = False
+    intern['archivedAs'] = ''
+    intern['archivedAt'] = ''
+    return intern
+
+
+def promoted_item(employee, now, reporting_manager_id=None):
+    """
+    The onboarding-record-shaped dict handed in -> the attributes to PutItem
+    into EmployeeTable. Does not set `employeeKey` itself - both
+    promote_to_employee.py and promote_to_intern.py add that from the same
+    common.keys.pk(), since an employee and an intern share one key shape.
+
+    `entityType` is the one line that decides which of the two this becomes -
+    'Intern' when a reporting_manager_id was passed, 'Employee' otherwise -
+    and it is the only thing that does: is_intern_item()/is_employee_item()
+    read it back on the way out, and every handler that must not treat one
+    kind as the other (the reporting-manager checks in promote_to_intern.py
+    and set_intern_manager.py, the two staff-delete handlers) checks it too.
+
+    The whole checklist moves across under the new name `onboardingChecklist`,
+    frozen history rather than something PATCH .../checklist can still reach -
+    see the rename note in src/common/keys.py's sibling comment in
+    set_checklist_item.py.
+
+    `employee` is the already-translated API object (from load_employee), not
+    the raw item - so this reads PROFILE_FIELDS off it the same way the wire
+    format already does, rather than re-deriving from a DynamoDB Item.
+    """
+    stamp = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+    item = {field: employee.get(field, '') for field in _STAFF_PROFILE_FIELDS}
+    item.update({
+        'entityType': 'Intern' if reporting_manager_id is not None else 'Employee',
+        'employeeId': employee['id'],
+        'onboardingChecklist': [
+            {
+                'itemId': entry['id'],
+                'label': entry['label'],
+                'owner': entry['owner'],
+                'done': entry['done'],
+                'comment': entry.get('comment', ''),
+            }
+            for entry in employee['checklist']
+        ],
+        'onboardedAt': stamp,
+        'joinedOn': employee.get('startDate', ''),
+        'createdAt': stamp,
+        'updatedAt': stamp,
+    })
+    if reporting_manager_id is not None:
+        item['reportingManagerId'] = reporting_manager_id
+    return item
+
+
+def restored_item(staff_record, now):
+    """
+    The reverse of promoted_item(): a staff (employee or intern) API object ->
+    the attributes to PutItem back into OnboardingTable, checklist and every
+    comment on it intact.
+
+    Deliberately drops onboardedAt, joinedOn, interns and reportingManagerId -
+    none of those are onboarding-table attributes, and carrying one across would
+    be exactly the kind of leftover field a stale read could later mistake for
+    something meaningful.
+    """
+    stamp = now.isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+    item = {field: staff_record.get(field, '') for field in PROFILE_FIELDS}
+    item.update({
+        'entityType': 'Employee',
+        'employeeId': staff_record['id'],
+        'checklist': [
+            {
+                'itemId': entry['id'],
+                'label': entry['label'],
+                'owner': entry['owner'],
+                'done': entry['done'],
+                'comment': entry.get('comment', ''),
+            }
+            for entry in staff_record['checklist']
+        ],
+        'createdAt': stamp,
+        'updatedAt': stamp,
+    })
+    return item

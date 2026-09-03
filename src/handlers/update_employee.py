@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import table
+from common.db import onboarding_table
 from common.handler import (
     api_handler,
     employee_id_param,
@@ -94,7 +94,7 @@ def lambda_handler(event, context):
     expression, names, values_map = _profile_update(values, now)
 
     try:
-        table.update_item(
+        onboarding_table.update_item(
             Key=key(employee_id),
             UpdateExpression=expression,
             ExpressionAttributeNames=names,

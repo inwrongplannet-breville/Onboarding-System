@@ -76,15 +76,25 @@ Routes are linkable and the back button works:
 ```
 #/login                          sign in
 #/me                             employee role - their own record, and only theirs
-#/employees                      officials - employee list
-#/employees/new                  add form
-#/employees/:id/edit             edit form
-#/employees/:id/checklist        onboarding checklist
+#/dashboard                      officials - HR dashboard, and their landing page
+#/interns                        officials - onboarded interns, each linked to a manager
+#/tracking                       officials - onboarded, non-intern employees
+#/onboarding                     officials - people whose onboarding is not finished
+#/onboarding/new                 add form
+#/onboarding/:id/edit            edit form
+#/onboarding/:id/checklist       onboarding checklist, and the "Move to..." promote control
 ```
 
 An employee reaches exactly one of those and is redirected out of the rest; an official is
 redirected out of `#/me`. The guard doing it is a convenience - see
 [Auth](#auth-two-roles-enforced-server-side).
+
+`#/interns` and `#/tracking` were scaffolds with no data behind them; they are now both backed by
+`EmployeeTable` - employees and interns side by side, told apart by `entityType` - populated by an
+explicit HR action on the checklist screen rather than by anything automatic. See
+[database-design.md#two-tables-not-one](database-design.md#two-tables-not-one) for the full
+model and [database-design.md#promotion](database-design.md#promotion) for how a record moves
+between them.
 
 ---
 
@@ -449,7 +459,7 @@ including the ones easy to get wrong:
 
 Rendering was verified from the returned DOM: six rows with employee numbers `E1001`–`E1006`, all
 three status badges, progress bars at 100/63/75/25/0/0%, and a deep-link straight to
-`#/employees/E1003/checklist` resolving correctly. The ids are readable and typeable now, which
+`#/onboarding/E1003/checklist` resolving correctly. The ids are readable and typeable now, which
 is a smaller router test than the UUID one it replaces and a much better one for a person
 holding a payroll export.
 

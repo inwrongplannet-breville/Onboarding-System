@@ -1,5 +1,5 @@
 """
-An in-memory DynamoDB (moto) with the real table schema, so the handlers can be
+An in-memory DynamoDB (moto) with the real table schemas, so the handlers can be
 exercised end to end without AWS.
 
 This does NOT replace testing against a deployed stack. moto emulates the API,
@@ -15,17 +15,20 @@ import sys
 
 import pytest
 
-TABLE_NAME = 'onboarding-test'
+ONBOARDING_TABLE_NAME = 'onboarding-test'
+# Holds employees AND interns, told apart by entityType - see the merge note
+# in template.yaml's EmployeeTable resource.
+EMPLOYEE_TABLE_NAME = 'employee-test'
 
-# The document store. Same shape of decision as TABLE_NAME above: common/documents
+# The document store. Same shape of decision as the table names above: common/documents
 # builds its S3 client at module scope, so this has to exist before any handler
 # that imports it is imported.
 BUCKET_NAME = 'onboarding-test-documents'
 
-# Set before any handler module is imported - common/db.py reads TABLE_NAME and
-# builds its boto3 clients at import time, and fake credentials keep botocore
-# from picking up a real profile.
-os.environ.setdefault('TABLE_NAME', TABLE_NAME)
+# Set before any handler module is imported - common/db.py reads these at import
+# time, and fake credentials keep botocore from picking up a real profile.
+os.environ.setdefault('ONBOARDING_TABLE_NAME', ONBOARDING_TABLE_NAME)
+os.environ.setdefault('EMPLOYEE_TABLE_NAME', EMPLOYEE_TABLE_NAME)
 os.environ.setdefault('BUCKET_NAME', BUCKET_NAME)
 os.environ.setdefault('AWS_DEFAULT_REGION', 'ap-southeast-2')
 os.environ.setdefault('AWS_ACCESS_KEY_ID', 'testing')
@@ -85,13 +88,28 @@ HANDLER_MODULES = (
     'handlers.request_document_upload',
     'handlers.login',
     'handlers.authorizer',
+    # The promote / un-promote / reassign / staff-list routes. Each is its own
+    # Lambda, matching the one-function-per-route convention the rest of this
+    # stack already follows - see template.yaml.
+    'handlers.promote_to_employee',
+    'handlers.promote_to_intern',
+    'handlers.add_manager_intern',
+    'handlers.remove_manager_intern',
+    'handlers.set_intern_manager',
+    'handlers.delete_onboarding_record',
+    'handlers.restore_onboarding',
+    'handlers.delete_staff_employee',
+    'handlers.delete_staff_intern',
+    'handlers.list_staff_employees',
+    'handlers.list_interns',
 )
 
 
 @pytest.fixture
 def handlers():
     """
-    A fresh table plus freshly imported handlers, per test.
+    Fresh tables (two, not three - EmployeeTable holds employees and interns
+    both) plus freshly imported handlers, per test.
 
     The reimport matters: common/db.py caches its boto3 clients at module scope
     (deliberately - that is how a warm Lambda reuses connections), so those
@@ -102,7 +120,7 @@ def handlers():
 
     with mock_aws():
         boto3.client('dynamodb').create_table(
-            TableName=TABLE_NAME,
+            TableName=ONBOARDING_TABLE_NAME,
             BillingMode='PAY_PER_REQUEST',
             # The partition key only. One item per employee, so there is nothing to
             # sort within a partition - and an AttributeDefinition no key refers to
@@ -117,6 +135,34 @@ def handlers():
             ],
             KeySchema=[
                 {'AttributeName': 'employeeKey', 'KeyType': 'HASH'},
+            ],
+        )
+
+        boto3.client('dynamodb').create_table(
+            TableName=EMPLOYEE_TABLE_NAME,
+            BillingMode='PAY_PER_REQUEST',
+            # employeeKey is the table's own partition key - shared by
+            # employees and interns alike, told apart by entityType, not by
+            # key. reportingManagerId is declared here only because the
+            # ByReportingManager GSI needs it in AttributeDefinitions -
+            # DynamoDB requires every key attribute of every index to be
+            # declared at the table level, even though only intern items ever
+            # carry it.
+            AttributeDefinitions=[
+                {'AttributeName': 'employeeKey', 'AttributeType': 'S'},
+                {'AttributeName': 'reportingManagerId', 'AttributeType': 'S'},
+            ],
+            KeySchema=[
+                {'AttributeName': 'employeeKey', 'KeyType': 'HASH'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'ByReportingManager',
+                    'KeySchema': [
+                        {'AttributeName': 'reportingManagerId', 'KeyType': 'HASH'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                },
             ],
         )
 

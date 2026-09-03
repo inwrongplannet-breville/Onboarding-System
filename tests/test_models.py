@@ -541,3 +541,87 @@ def test_the_self_fields_round_trip_as_empty_when_absent():
     employee = to_api_employee(_item())
     assert employee['personalEmail'] == ''
     assert employee['address'] == ''
+
+
+# ------------------------------------------------------- promotion / restore
+
+from datetime import datetime, timezone
+
+from common.models import (
+    UNPROMOTE_WINDOW_DAYS,
+    is_intern,
+    promoted_item,
+    restored_item,
+    to_api_intern,
+    to_api_staff_employee,
+    unpromote_window_open,
+)
+
+
+def test_is_intern_reads_the_employment_type():
+    assert is_intern(to_api_employee(_item(employee_id='E2001', done_ids=()))) is False
+    intern_item = dict(_item(employee_id='E2002'), employmentType='Intern')
+    assert is_intern(to_api_employee(intern_item)) is True
+
+
+def test_promoted_item_carries_the_whole_checklist_as_history():
+    employee = to_api_employee(_item(done_ids=[i['id'] for i in CHECKLIST_TEMPLATE]))
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    item = promoted_item(employee, now)
+
+    assert item['entityType'] == 'Employee'
+    assert item['onboardedAt'] == '2026-09-01T00:00:00Z'
+    assert item['joinedOn'] == employee['startDate']
+    assert len(item['onboardingChecklist']) == len(CHECKLIST_TEMPLATE)
+    assert 'reportingManagerId' not in item
+    # The wire shape a staff dashboard reads back.
+    staff_employee = to_api_staff_employee(dict(item, employeeKey=pk(employee['id'])))
+    assert staff_employee['status'] == 'Onboarded'
+    assert staff_employee['interns'] == []
+    assert staff_employee['archived'] is False
+
+
+def test_promoted_item_with_a_manager_becomes_an_intern_record():
+    employee = to_api_employee(_item(employee_id='E2003',
+                                      done_ids=[i['id'] for i in CHECKLIST_TEMPLATE]))
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    item = promoted_item(employee, now, reporting_manager_id='E1001')
+
+    assert item['entityType'] == 'Intern'
+    assert item['reportingManagerId'] == 'E1001'
+    # Same key attribute and pk() as an employee - EmployeeTable holds both,
+    # told apart by entityType alone.
+    intern = to_api_intern(dict(item, employeeKey=pk(employee['id'])))
+    assert intern['reportingManagerId'] == 'E1001'
+    assert 'interns' not in intern
+
+
+def test_restored_item_round_trips_the_checklist_and_comments():
+    employee = to_api_employee(_item(done_ids=[i['id'] for i in CHECKLIST_TEMPLATE]))
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    staff_item = promoted_item(employee, now)
+    staff_item['employeeKey'] = pk(employee['id'])
+    staff_item['onboardingChecklist'][0]['comment'] = 'chased payroll twice'
+
+    staff_record = to_api_staff_employee(staff_item)
+    restored = restored_item(staff_record, now)
+
+    assert restored['entityType'] == 'Employee'
+    assert 'onboardedAt' not in restored
+    assert 'joinedOn' not in restored
+    assert restored['checklist'][0]['comment'] == 'chased payroll twice'
+
+
+@pytest.mark.parametrize('days_elapsed,expected', [
+    (0, True),
+    (UNPROMOTE_WINDOW_DAYS - 1, True),
+    (UNPROMOTE_WINDOW_DAYS, True),
+    (UNPROMOTE_WINDOW_DAYS + 1, False),
+])
+def test_unpromote_window_boundaries(days_elapsed, expected):
+    from datetime import timedelta
+    onboarded_at = '2026-09-01T00:00:00Z'
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(days=days_elapsed)
+    assert unpromote_window_open(onboarded_at, now) is expected

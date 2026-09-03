@@ -4,10 +4,13 @@
  * Routes (hash-based, so views are linkable and the back button works):
  *   #/login
  *   #/me                         employee role - their own record, and only theirs
- *   #/employees                  officials role - the four routes below
- *   #/employees/new
- *   #/employees/:id/edit
- *   #/employees/:id/checklist
+ *   #/dashboard                  officials role - the HR dashboard, and their landing page
+ *   #/interns                    officials role - interns sub-dashboard (scaffold)
+ *   #/tracking                   officials role - employee tracking sub-dashboard (dummy data)
+ *   #/onboarding                 officials role - the three routes below
+ *   #/onboarding/new
+ *   #/onboarding/:id/edit
+ *   #/onboarding/:id/checklist
  *
  * Every route but #/login is behind guard(), which is a convenience and not a
  * control. The control is server-side: an employee who edits their way past the
@@ -156,7 +159,7 @@ window.App = window.App || {};
   }
 
   /**
-   * The form routes need the facets, and a deep link to #/employees/new lands
+   * The form routes need the facets, and a deep link to #/onboarding/new lands
    * without the list ever having been fetched. Cached, because these are only
    * the dropdown values - the list view itself always refetches.
    */
@@ -480,18 +483,21 @@ window.App = window.App || {};
     var raw = window.location.hash.replace(/^#\/?/, '');
     var segments = raw.split('/').filter(Boolean).map(decodeURIComponent);
 
-    // Both of these are matched before the fallthrough below, which sends
-    // everything it does not recognise to the officials list. A route added
+    // All of these are matched before the fallthrough below, which sends
+    // everything it does not recognise to the dashboard. A route added
     // after that line is a route that never matches.
     if (segments[0] === 'login') return { name: 'login' };
     if (segments[0] === 'me') return { name: 'profile' };
+    if (segments[0] === 'dashboard') return { name: 'dashboard' };
+    if (segments[0] === 'interns') return { name: 'interns' };
+    if (segments[0] === 'tracking') return { name: 'tracking' };
 
-    if (segments[0] !== 'employees') return { name: 'list' };
+    if (segments[0] !== 'onboarding') return { name: 'dashboard' };
     if (segments.length === 1) return { name: 'list' };
     if (segments[1] === 'new') return { name: 'new' };
     if (segments.length === 3 && segments[2] === 'edit') return { name: 'edit', id: segments[1] };
     if (segments.length === 3 && segments[2] === 'checklist') return { name: 'checklist', id: segments[1] };
-    return { name: 'list' };
+    return { name: 'dashboard' };
   }
 
   function navigate(hash) {
@@ -514,7 +520,7 @@ window.App = window.App || {};
    *   no session          -> the login page, whatever they asked for
    *   session, on login   -> their home, so a reload does not re-ask
    *   employee, elsewhere -> their own profile
-   *   official, on profile -> the employee list
+   *   official, on profile -> the HR dashboard
    *
    * Worth being clear about what this is: a way of keeping people out of
    * screens that would not work for them, not a security boundary. Nothing here
@@ -540,7 +546,7 @@ window.App = window.App || {};
     }
 
     if (auth.isOfficial() && route.name === 'profile') {
-      navigate('#/employees');
+      navigate('#/dashboard');
       return true;
     }
 
@@ -566,6 +572,9 @@ window.App = window.App || {};
 
     if (route.name === 'login') return renderLogin();
     if (route.name === 'profile') return renderProfile();
+    if (route.name === 'dashboard') return renderDashboard();
+    if (route.name === 'interns') return renderInterns();
+    if (route.name === 'tracking') return renderTracking();
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
     if (route.name === 'edit') return renderForm(route.id);
@@ -645,6 +654,160 @@ window.App = window.App || {};
   }
 
   /* ---------------------------------------------------------- profile view */
+
+  /* --------------------------------------------------------- HR dashboard */
+
+  /*
+   * The official's landing page. No fetch - it is three links, not a report -
+   * so this follows renderLogin's shape rather than renderList's: bump the
+   * generation for the same reason renderLogin does (a stale fetch elsewhere
+   * must not paint over whichever of these three screens is current), then
+   * paint synchronously.
+   */
+  function renderDashboard() {
+    renderGeneration++;
+    setTitle('HR Dashboard');
+    paint(ui.dashboardView());
+    focusHeading();
+  }
+
+  /*
+   * The Interns dashboard - GET /staff/interns and GET /staff/employees
+   * together, the second for the "Reassign manager" picker on each card.
+   * Same shape as renderList: bump the generation, show a loading state,
+   * fetch, repaint, wire the delegated click handler.
+   */
+  function renderInterns() {
+    var myGeneration = ++renderGeneration;
+    showLoading();
+
+    Promise.all([store.listInterns(), store.listStaffEmployees()]).then(function (results) {
+      if (myGeneration !== renderGeneration) return;
+
+      var interns = results[0];
+      var employees = results[1];
+
+      setTitle('Interns');
+      paint(ui.internsView(interns, employees));
+      focusHeading();
+      wireInternsActions(interns, employees);
+    }, failLoad('Could not load interns.', myGeneration));
+  }
+
+  function wireInternsActions(interns, employees) {
+    var list = document.getElementById('intern-cards');
+    if (!list) return;
+
+    list.addEventListener('click', function (event) {
+      var card = event.target.closest('[data-id]');
+      if (!card) return;
+      var id = card.getAttribute('data-id');
+      var intern = interns.filter(function (item) { return item.id === id; })[0];
+      if (!intern) return;
+
+      var unpromoteButton = event.target.closest('[data-action="unpromote"]');
+      if (unpromoteButton) {
+        return runUnpromote(unpromoteButton, intern);
+      }
+
+      var reassignButton = event.target.closest('[data-action="reassign"]');
+      if (reassignButton) {
+        var select = card.querySelector('[data-role="reassign-manager"]');
+        var newManagerId = select ? select.value : '';
+        if (!newManagerId) {
+          showError({ message: 'Pick a manager before reassigning.' });
+          return;
+        }
+        var manager = employees.filter(function (e) { return e.id === newManagerId; })[0];
+        if (!window.confirm('Reassign ' + ui.fullName(intern) + ' to ' +
+            (manager ? ui.fullName(manager) : newManagerId) + '?')) return;
+
+        clearError();
+        reassignButton.disabled = true;
+
+        store.reassignManager(intern, newManagerId).then(function () {
+          notify(ui.fullName(intern) + ' now reports to ' +
+            (manager ? ui.fullName(manager) : newManagerId) + '.');
+          renderInterns();
+        }, function (error) {
+          reassignButton.disabled = false;
+          showError(sequenceError(error));
+        });
+      }
+    });
+  }
+
+  /*
+   * The Employee Tracking dashboard - onboarded, non-intern staff.
+   */
+  function renderTracking() {
+    var myGeneration = ++renderGeneration;
+    showLoading();
+
+    store.listStaffEmployees().then(function (employees) {
+      if (myGeneration !== renderGeneration) return;
+
+      setTitle('Employee Tracking');
+      paint(ui.trackingView(employees));
+      focusHeading();
+      wireTrackingActions(employees);
+    }, failLoad('Could not load employees.', myGeneration));
+  }
+
+  function wireTrackingActions(employees) {
+    var list = document.getElementById('staff-employee-cards');
+    if (!list) return;
+
+    list.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-action="unpromote"]');
+      if (!button) return;
+      var card = button.closest('[data-id]');
+      var id = card.getAttribute('data-id');
+      var employee = employees.filter(function (item) { return item.id === id; })[0];
+      if (!employee) return;
+
+      runUnpromote(button, employee);
+    });
+  }
+
+  /*
+   * Shared by both staff dashboards' "Undo move" button. Confirms, disables,
+   * runs the un-promote sequence, and repaints whichever dashboard the
+   * caller is currently on.
+   */
+  function runUnpromote(button, staffRecord) {
+    var isIntern = staffRecord.employmentType === 'Intern';
+
+    if (!window.confirm('Move ' + ui.fullName(staffRecord) + ' back to the onboarding ' +
+        'dashboard? Their checklist and every HR note on it come back exactly as they were.')) {
+      return;
+    }
+
+    clearError();
+    button.disabled = true;
+
+    store.unpromote(staffRecord).then(function () {
+      notify(ui.fullName(staffRecord) + ' is back on the onboarding dashboard.');
+      if (isIntern) renderInterns(); else renderTracking();
+    }, function (error) {
+      button.disabled = false;
+      showError(sequenceError(error));
+    });
+  }
+
+  /*
+   * A rejection from one of store.promote/unpromote/reassignManager carries
+   * `error.step` naming which call in the sequence failed. Every step is
+   * idempotent and the destructive one is always last, so the honest thing
+   * to tell HR is which part is done and that trying again is safe - not
+   * just "something went wrong".
+   */
+  function sequenceError(error) {
+    if (!error.step) return error;
+    error.message = error.message + ' (failed at the "' + error.step + '" step - ' +
+      'nothing was lost; trying again will pick up from where it stopped.)';
+    return error;
+  }
 
   /*
    * The employee's own record. The whole employee side of the app.
@@ -1023,7 +1186,7 @@ window.App = window.App || {};
 
         save.then(function () {
           notify(employee ? 'Changes saved.' : 'Employee added.');
-          navigate('#/employees');   // nothing to restore; navigating discards this DOM
+          navigate('#/onboarding');   // nothing to restore; navigating discards this DOM
         }, function (error) {
           submitting = false;
           submitButton.disabled = false;
@@ -1044,7 +1207,7 @@ window.App = window.App || {};
           store.archiveEmployee(employee.id).then(function (archived) {
             notify(ui.fullName(employee) + ' was removed from the list and marked ' +
               archived.archivedAs + '.');
-            navigate('#/employees');
+            navigate('#/onboarding');
           }, function (error) {
             // The form is still filled in and still valid; keep it usable.
             deleteButton.disabled = false;
@@ -1345,8 +1508,19 @@ window.App = window.App || {};
    * `focus` says what to put the cursor back on after the repaint:
    * { kind: 'checkbox' | 'button' | 'editor', itemId }, or null for the heading.
    */
-  function paintChecklist(employee, focus) {
-    paint(ui.checklistView(employee, commentEditor, loadedDocuments));
+  /**
+   * True only when the checklist screen needs a reporting-manager picker to
+   * render its promote control: an intern, finished, not archived. Every
+   * other case (not finished, not an intern, already archived) has enough
+   * information in `employee` alone.
+   */
+  function needsManagerPicker(employee) {
+    return !employee.archived && employee.employmentType === 'Intern' &&
+      employee.status === 'Onboarded';
+  }
+
+  function paintChecklist(employee, focus, managers) {
+    paint(ui.checklistView(employee, commentEditor, loadedDocuments, managers));
 
     /*
      * A tick replaces the whole view, which throws away the control the user is
@@ -1356,6 +1530,23 @@ window.App = window.App || {};
      */
     restoreFocus(focus);
     wireComments(employee);
+    wirePromoteSection(employee);
+
+    // The manager picker needs a second fetch, and most checklist views never
+    // need it - not finished yet, or not an intern. Only kick it off when the
+    // caller has not already supplied `managers` (paintChecklist's own
+    // recursive call below does supply it, so this does not loop) and the
+    // screen just painted actually has a picker to fill in.
+    if (managers === undefined && needsManagerPicker(employee)) {
+      var myGeneration = renderGeneration;
+      store.listStaffEmployees().then(function (loadedManagers) {
+        if (myGeneration !== renderGeneration) return;
+        paintChecklist(employee, null, loadedManagers);
+      }, function () {
+        if (myGeneration !== renderGeneration) return;
+        paintChecklist(employee, null, []);
+      });
+    }
 
     document.getElementById('checklist').addEventListener('change', function (event) {
       var checkbox = event.target;
@@ -1389,6 +1580,52 @@ window.App = window.App || {};
         announce('Could not save that change. ' +
           (label ? label.textContent : 'That item') + ' was left as it was.');
         showError(error);
+      });
+    });
+  }
+
+  /*
+   * The "Move to main employee dashboard" / "Move to intern dashboard"
+   * button on the checklist screen. Absent from the DOM whenever
+   * promoteSection() decided there is nothing to click - not finished,
+   * archived, or (for an intern) no manager to pick from yet - so this is a
+   * no-op in every one of those cases.
+   */
+  function wirePromoteSection(employee) {
+    var section = document.getElementById('promote-section');
+    if (!section) return;
+
+    section.addEventListener('click', function (event) {
+      var isIntern = !!event.target.closest('[data-action="promote-intern"]');
+      var isEmployee = !!event.target.closest('[data-action="promote-employee"]');
+      if (!isIntern && !isEmployee) return;
+
+      var reportingManagerId = null;
+      if (isIntern) {
+        var select = document.getElementById('reporting-manager');
+        reportingManagerId = select ? select.value : '';
+        if (!reportingManagerId) {
+          showError({ message: 'Pick a reporting manager before moving this intern.' });
+          return;
+        }
+      }
+
+      var destination = isIntern ? 'the intern dashboard' : 'the main employee dashboard';
+      if (!window.confirm('Move ' + ui.fullName(employee) + ' to ' + destination +
+          '? Their onboarding checklist moves with them as history.')) {
+        return;
+      }
+
+      var button = event.target.closest('button');
+      clearError();
+      button.disabled = true;
+
+      store.promote(employee, reportingManagerId).then(function () {
+        notify(ui.fullName(employee) + ' was moved to ' + destination + '.');
+        navigate('#/onboarding');
+      }, function (error) {
+        button.disabled = false;
+        showError(sequenceError(error));
       });
     });
   }
@@ -1585,7 +1822,7 @@ window.App = window.App || {};
   paintSession();
 
   if (!window.location.hash) {
-    // Not '#/employees' any more. A signed-in official ends up there anyway,
+    // Not '#/dashboard' any more. A signed-in official ends up there anyway,
     // via the guard; a signed-out visitor would have landed on a view that
     // immediately redirected, painting the list heading on the way past.
     window.location.hash = auth.session() ? auth.home() : '#/login';

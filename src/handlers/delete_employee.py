@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import table
+from common.db import onboarding_table
 from common.handler import (
     api_handler,
     employee_id_param,
@@ -72,7 +72,7 @@ def _stamp(employee_id, state):
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
 
     try:
-        table.update_item(
+        onboarding_table.update_item(
             Key=key(employee_id),
             UpdateExpression=('SET #archivedAs = :archivedAs, #archivedAt = :archivedAt, '
                               '#updatedAt = :updatedAt'),
