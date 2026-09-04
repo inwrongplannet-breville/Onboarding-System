@@ -201,7 +201,7 @@ def test_the_supplied_employee_id_becomes_the_records_id(handlers):
 
 
 def test_the_employee_id_is_the_partition_key(handlers):
-    from common.db import table
+    from common.db import onboarding_table as table
 
     create(handlers, employeeId='E1024')
     assert table.get_item(Key={'employeeKey': 'EMP#E1024'}).get('Item') is not None
@@ -286,7 +286,7 @@ def test_an_employee_id_cannot_be_changed_by_an_update(handlers):
     # Not a whitelist nicety: DynamoDB cannot move an item between partition
     # keys, so a PUT that appeared to rename would have upserted a second
     # employee and left the first one behind.
-    from common.db import table
+    from common.db import onboarding_table as table
 
     create(handlers, employeeId='E1024')
     assert put(handlers, 'E1024', dict(VALID, employeeId='E2048'))['statusCode'] == 200
@@ -526,7 +526,7 @@ def test_a_comment_can_be_cleared(handlers, cleared):
 
 def test_clearing_a_comment_removes_the_attribute_rather_than_storing_empty(handlers):
     from common.checklist_template import CHECKLIST_INDEX
-    from common.db import table
+    from common.db import onboarding_table as table
     from common.keys import key
 
     employee_id = create(handlers)['id']
@@ -562,7 +562,7 @@ def test_a_tick_on_a_drifted_checklist_fails_instead_of_landing_on_the_wrong_ite
     # list index APPENDS rather than failing - so without the itemId condition
     # this would either tick the wrong box or grow a bogus ninth entry. Simulate
     # the drift by deleting an element out from under the index.
-    from common.db import table
+    from common.db import onboarding_table as table
     from common.keys import key
 
     employee_id = create(handlers)['id']
@@ -640,7 +640,7 @@ def test_delete_returns_200_with_the_archived_record(handlers):
 
 
 def test_delete_takes_nothing_away(handlers):
-    from common.db import table
+    from common.db import onboarding_table as table
 
     employee_id = create(handlers)['id']
     before = len(table.scan()['Items'])
@@ -795,7 +795,7 @@ def test_a_second_delete_cannot_relabel_an_archived_record(handlers):
     # Belt and braces on the above. Even with the checklist moved underneath it,
     # the stamp is a record of a decision someone made and is not recomputed.
     from common.checklist_template import CHECKLIST_INDEX
-    from common.db import table
+    from common.db import onboarding_table as table
     from common.keys import key
 
     employee_id = create(handlers)['id']

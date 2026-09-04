@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import table
+from common.db import onboarding_table
 from common.handler import api_handler, is_condition_failure, parse_body, require_official
 from common.keys import KEY_ATTRIBUTE, NOT_EXISTS, pk
 from common.models import (
@@ -75,7 +75,7 @@ def lambda_handler(event, context):
     })
 
     try:
-        table.put_item(
+        onboarding_table.put_item(
             Item=item,
             # The uniqueness guarantee, and the reason the id belongs in the key.
             # PutItem overwrites by default, so without this a second hire typed

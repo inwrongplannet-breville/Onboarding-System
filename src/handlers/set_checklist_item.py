@@ -37,7 +37,7 @@ from botocore.exceptions import ClientError
 
 from common import responses
 from common.checklist_template import CHECKLIST_INDEX, VALID_ITEM_IDS
-from common.db import table
+from common.db import onboarding_table
 from common.handler import (
     BadRequest,
     api_handler,
@@ -168,7 +168,7 @@ def lambda_handler(event, context):
         expression += ' REMOVE ' + ', '.join(removals)
 
     try:
-        table.update_item(
+        onboarding_table.update_item(
             Key=key(employee_id),
             UpdateExpression=expression,
             ExpressionAttributeNames=names,

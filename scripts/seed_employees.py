@@ -1,19 +1,29 @@
 """
-Reset the dev employee table: hard-wipe it, repopulate it through the public API.
+Reset the three dev tables: hard-wipe them, repopulate them through the public
+API - onboarding, then a manager or two promoted to EmployeeTable, then interns
+promoted to InternTable pointing at those managers.
 
-These six people were the Phase 1 mock data in js/data.js. They moved here when the
-UI was wired to the backend: the frontend now has no employee records in it at all,
-so the fixtures live on the side of the wire that actually stores them.
+The first six people were the Phase 1 mock data in js/data.js. They moved here when
+the UI was wired to the backend: the frontend now has no employee records in it at
+all, so the fixtures live on the side of the wire that actually stores them. Two
+more (E1007, E1008) were added with the three-table split, so the two managers each
+end up with more than one intern - enough to give the promote sequences and the
+reporting-manager mapping something worth looking at.
 
 Seeding deliberately drives the REST API rather than boto3 against DynamoDB, so it
-exercises the same validation, the same create and the same checklist handling the
-browser will - a broken seed is then a broken API rather than a mystery.
+exercises the same validation, the same create, the same checklist handling and the
+same promote sequences the browser will - a broken seed is then a broken API rather
+than a mystery. That matters especially here: promotion is a sequence of small
+endpoints (see docs/database-design.md#promotion), and running that sequence
+through the same client the UI uses is the cheapest end-to-end test of the ordering
+it depends on.
 
-Wiping cannot. DELETE /employees/{id} archives: it stamps the record and leaves it
-in the table. Wiping through the API would appear to work - the employees do leave
-GET /employees - and then every reseed would pile a fresh set of records on top of
-the archived ones, growing the table on every cycle with no way to ever clear it.
-So --wipe goes straight at the table and really does delete.
+Wiping cannot go through the API. DELETE /employees/{id} archives: it stamps the
+record and leaves it in the table. Wiping through the API would appear to work -
+the employees do leave GET /employees - and then every reseed would pile a fresh
+set of records on top of the archived ones, growing the table on every cycle with
+no way to ever clear it. So --wipe goes straight at both tables and really
+does delete.
 
 That asymmetry is the design working as intended, not a hole in it: the API has no
 hard delete because employee history should not be destroyable over HTTP. Resetting
@@ -51,7 +61,8 @@ Usage:
 
 Base URL resolution, in order: --base-url, $API_BASE_URL, then the ApiBaseUrl output
 of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolves
-the table name the same way, from the stack's TableName output.
+both table names the same way, from the stack's OnboardingTableName /
+EmployeeTableName outputs.
 """
 import argparse
 import io
@@ -74,16 +85,26 @@ REGION = 'eu-north-1'
 DEFAULT_USERNAME = 'hr.admin'
 DEFAULT_PASSWORD = 'onboard-2026'
 
-# (employee, [checklist item ids to tick]) - the varied progress from Phase 1, which
-# is what makes the list view's status filter and progress bars worth looking at.
+# One dict per hire. `promote` says which sequence to run once the checklist is
+# ticked: None leaves them in OnboardingTable (varied progress, which is what
+# makes the list view's status filter and progress bars worth looking at);
+# 'employee' promotes them into EmployeeTable; 'intern' promotes them into
+# InternTable reporting to `manager`.
 #
-# `employeeId` is now supplied rather than assigned: it is the partition key, so
-# these six numbers are the fixtures' identity. Keeping them stable and
-# contiguous means a reseed lands the same people on the same ids every time, and
-# a hand-written URL like #/employees/E1003 keeps working across resets.
+# Order is load-bearing. Every 'intern' entry's `manager` must name an
+# 'employee' entry that appears earlier in this list - promote_to_intern.py
+# refuses a manager who is not already a live EmployeeTable record, and this
+# script runs the sequences in list order (see seed() below), the same way an
+# HR user would have to: promote the manager before promoting anyone who
+# reports to them.
+#
+# `employeeId` is supplied rather than assigned: it is the partition key, so
+# these numbers are the fixtures' identity. Keeping them stable and contiguous
+# means a reseed lands the same people on the same ids every time, and a
+# hand-written URL like #/employees/E1003 keeps working across resets.
 FIXTURES = [
-    (
-        {
+    {
+        'profile': {
             'employeeId': 'E1001',
             'firstName': 'Priya', 'lastName': 'Sharma',
             'email': 'priya.sharma@breville.com', 'phone': '+61 412 883 016',
@@ -91,22 +112,24 @@ FIXTURES = [
             'manager': 'Santosh Kumar', 'startDate': '2026-07-06',
             'employmentType': 'Full-time',
         },
-        ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-         'email-account', 'access-card', 'induction', 'policy-ack'],   # Onboarded
-    ),
-    (
-        {
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
+                 'email-account', 'access-card', 'induction', 'policy-ack'],
+        'promote': 'employee',  # a manager - two interns report to her below
+    },
+    {
+        'profile': {
             'employeeId': 'E1002',
             'firstName': 'Daniel', 'lastName': 'Okafor',
             'email': 'daniel.okafor@breville.com', 'phone': '+61 431 507 224',
             'department': 'Engineering', 'jobTitle': 'QA Engineer',
-            'manager': 'Santosh Kumar', 'startDate': '2026-08-10',
+            'manager': 'Priya Sharma', 'startDate': '2026-08-10',
             'employmentType': 'Full-time',
         },
-        ['offer-letter', 'id-proof', 'bank-details', 'laptop', 'email-account'],
-    ),
-    (
-        {
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop', 'email-account'],
+        'promote': None,  # left mid-onboarding, on purpose - 5/8
+    },
+    {
+        'profile': {
             'employeeId': 'E1003',
             'firstName': 'Mei Lin', 'lastName': 'Tan',
             'email': 'meilin.tan@breville.com', 'phone': '+61 402 119 763',
@@ -114,10 +137,11 @@ FIXTURES = [
             'manager': 'Rachel Adams', 'startDate': '2026-08-24',
             'employmentType': 'Full-time',
         },
-        ['offer-letter', 'id-proof'],
-    ),
-    (
-        {
+        'done': ['offer-letter', 'id-proof'],
+        'promote': None,  # 2/8
+    },
+    {
+        'profile': {
             'employeeId': 'E1004',
             'firstName': 'Arjun', 'lastName': 'Nair',
             'email': 'arjun.nair@breville.com', 'phone': '+61 448 620 195',
@@ -125,10 +149,11 @@ FIXTURES = [
             'manager': 'Grace Whitmore', 'startDate': '2026-09-01',
             'employmentType': 'Contract',
         },
-        [],                                                            # Pending
-    ),
-    (
-        {
+        'done': [],
+        'promote': None,  # Pending - 0/8
+    },
+    {
+        'profile': {
             'employeeId': 'E1005',
             'firstName': 'Sofia', 'lastName': 'Marchetti',
             'email': 'sofia.marchetti@breville.com', 'phone': '+61 423 774 508',
@@ -136,20 +161,52 @@ FIXTURES = [
             'manager': 'Grace Whitmore', 'startDate': '2026-08-17',
             'employmentType': 'Full-time',
         },
-        ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-         'email-account', 'access-card'],
-    ),
-    (
-        {
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
+                  'email-account', 'access-card', 'induction', 'policy-ack'],
+        'promote': 'employee',  # a second manager, with one intern below
+    },
+    {
+        'profile': {
             'employeeId': 'E1006',
             'firstName': 'Liam', 'lastName': 'Byrne',
             'email': 'liam.byrne@breville.com', 'phone': '+61 437 285 941',
             'department': 'Engineering', 'jobTitle': 'Data Engineering Intern',
-            'manager': 'Santosh Kumar', 'startDate': '2026-09-14',
+            'manager': 'Priya Sharma', 'startDate': '2026-09-14',
             'employmentType': 'Intern',
         },
-        [],
-    ),
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
+                  'email-account', 'access-card', 'induction', 'policy-ack'],
+        'promote': 'intern', 'manager': 'E1001',
+    },
+    {
+        'profile': {
+            'employeeId': 'E1007',
+            'firstName': 'Aiden', 'lastName': 'Clarke',
+            'email': 'aiden.clarke@breville.com', 'phone': '+61 455 902 317',
+            'department': 'Engineering', 'jobTitle': 'Frontend Engineering Intern',
+            'manager': 'Priya Sharma', 'startDate': '2026-09-14',
+            'employmentType': 'Intern',
+        },
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
+                  'email-account', 'access-card', 'induction', 'policy-ack'],
+        # A second intern reporting to E1001 - exercises the `interns` list
+        # actually holding more than one entry, and the ByReportingManager GSI
+        # returning more than one row for a manager.
+        'promote': 'intern', 'manager': 'E1001',
+    },
+    {
+        'profile': {
+            'employeeId': 'E1008',
+            'firstName': 'Zara', 'lastName': 'Ahmed',
+            'email': 'zara.ahmed@breville.com', 'phone': '+61 460 118 774',
+            'department': 'HR', 'jobTitle': 'HR Intern',
+            'manager': 'Sofia Marchetti', 'startDate': '2026-09-14',
+            'employmentType': 'Intern',
+        },
+        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
+                  'email-account', 'access-card', 'induction', 'policy-ack'],
+        'promote': 'intern', 'manager': 'E1005',
+    },
 ]
 
 
@@ -249,17 +306,30 @@ def stack_output(key):
     return output
 
 
-def resolve_table_name(explicit):
-    """Same resolution order as the base URL, off the stack's other output."""
+# Which table each source resolves through: (--flag value, env var, stack
+# output key, key attribute, id prefix). Two sources, not three - employees
+# and interns share EmployeeTable now, told apart by entityType, so a single
+# --wipe pass over 'employee' already clears both.
+_TABLE_SOURCES = {
+    'onboarding': ('table_onboarding', 'ONBOARDING_TABLE_NAME', 'OnboardingTableName', 'employeeKey', 'EMP#'),
+    'employee': ('table_employee', 'EMPLOYEE_TABLE_NAME', 'EmployeeTableName', 'employeeKey', 'EMP#'),
+}
+
+
+def resolve_table_name(source, explicit_by_source):
+    """Same resolution order as the base URL, off the stack's other outputs."""
+    flag_attr, env_var, output_key, _, _ = _TABLE_SOURCES[source]
+    explicit = explicit_by_source.get(flag_attr)
     if explicit:
         return explicit
 
-    from_env = os.environ.get('TABLE_NAME')
+    from_env = os.environ.get(env_var)
     if from_env:
         return from_env
 
-    print('No --table or $TABLE_NAME; reading it from the {} stack...'.format(STACK_NAME))
-    return stack_output('TableName')
+    print('No --{} or ${}; reading it from the {} stack...'.format(
+        flag_attr.replace('_', '-'), env_var, STACK_NAME))
+    return stack_output(output_key)
 
 
 def aws_json(args, payloads=None):
@@ -292,64 +362,66 @@ def aws_json(args, payloads=None):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def scan_keys(table_name):
+def scan_keys(table_name, key_attribute):
     """
     Every key in the table, following pagination.
 
-    The partition key only - the table has no sort key, and a DeleteRequest
-    carrying an SK the table does not have would fail the whole batch.
+    The partition key only - neither table has a sort key, and a
+    DeleteRequest carrying an SK the table does not have would fail the whole
+    batch.
 
-    The attribute is `employeeKey`, spelled out rather than imported from
-    common.keys: this script drives the AWS CLI rather than the handler package,
-    and is run from a checkout that need not have src/ importable.
+    `key_attribute` is spelled out by the caller rather than imported from
+    common.keys: this script drives the AWS CLI rather than the handler
+    package, and is run from a checkout that need not have src/ importable.
     """
     keys = []
     start_key = None
 
     while True:
         args = ['dynamodb', 'scan', '--table-name', table_name,
-                '--region', REGION, '--projection-expression', 'employeeKey',
+                '--region', REGION, '--projection-expression', key_attribute,
                 '--output', 'json']
         payloads = {}
         if start_key:
             payloads['--exclusive-start-key'] = start_key
 
         result = aws_json(args, payloads)
-        keys.extend({'employeeKey': i['employeeKey']} for i in result.get('Items', []))
+        keys.extend({key_attribute: i[key_attribute]} for i in result.get('Items', []))
 
         start_key = result.get('LastEvaluatedKey')
         if not start_key:
             return keys
 
 
-def wipe(table_name, assume_yes):
+def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
     """
-    Delete every item in the table. One item per employee, so one delete each.
+    Delete every item in one table. One item per record, so one delete each.
 
-    A Scan rather than GET /employees, because the API cannot see archived
-    employees and those are exactly the ones a reseed would silently duplicate.
-    Scan reaches everything; the list endpoint reaches what is live.
+    A Scan rather than a GET route, because the officials list endpoints hide
+    archived onboarding records and interruption leftovers respectively, and
+    both of those are exactly what a reseed would otherwise silently duplicate.
+    Scan reaches everything.
     """
-    keys = scan_keys(table_name)
+    keys = scan_keys(table_name, key_attribute)
 
     if not keys:
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    employees = {k['employeeKey']['S'] for k in keys
-                 if k['employeeKey']['S'].startswith('EMP#')}
-    others = len(keys) - len(employees)
+    matching = {k[key_attribute]['S'] for k in keys
+                if k[key_attribute]['S'].startswith(id_prefix)}
+    others = len(keys) - len(matching)
 
     print('\nAbout to hard-delete {} item(s) from {}:'.format(len(keys), table_name))
-    print('  {} employee(s), archived ones included'.format(len(employees)))
+    print('  {} {}(s)'.format(len(matching), noun))
     if others:
-        # Nothing should ever land here - employees are the only kind of item the
-        # handlers write. Worth saying out loud rather than deleting in silence.
-        print('  {} item(s) that are not employees'.format(others))
+        # Nothing should ever land here - each table holds exactly one kind of
+        # item. Worth saying out loud rather than deleting in silence.
+        print('  {} item(s) that are not {}s'.format(others, noun))
 
     if not assume_yes:
-        # Irreversible, and unlike the API it really does destroy the history -
-        # so make someone type the word.
+        # Irreversible, and unlike the API's archive-in-place DELETE it really
+        # does destroy the history - so make someone type the word.
         if input('\nType "delete" to confirm: ').strip().lower() != 'delete':
             raise SystemExit('Aborted.')
 
@@ -374,44 +446,104 @@ def wipe(table_name, assume_yes):
         else:
             raise SystemExit('Gave up with {} item(s) still undeleted.'.format(len(pending)))
 
-    print('Wiped {} item(s).'.format(deleted))
+    print('Wiped {} item(s) from {}.'.format(deleted, table_name))
+
+
+def wipe(table_names, assume_yes):
+    """
+    Wipe both tables. Order does not matter - each is independent.
+
+    One pass over 'employee' clears employees and interns together now - they
+    share EmployeeTable, told apart only by entityType, which the AWS-CLI Scan
+    this drives does not read at all.
+    """
+    wipe_table(table_names['onboarding'], 'employeeKey', 'EMP#', 'onboarding record', assume_yes)
+    wipe_table(table_names['employee'], 'employeeKey', 'EMP#', 'employee/intern', assume_yes)
+
+
+def _promote(base_url, token, fixture, employee_id):
+    """
+    Run the one or two-step promote sequence for one fixture, through the same
+    endpoints the frontend calls - see docs/database-design.md#promotion. This
+    is deliberately not a single call: it is the cheapest end-to-end proof that
+    the sequence's ordering (destination written before the onboarding row is
+    deleted) actually works against a real deployment.
+    """
+    kind = fixture['promote']
+    if kind is None:
+        return None
+
+    if kind == 'employee':
+        # /staff/employees is a collection route - the id travels in the body,
+        # not the path. See handlers/promote_to_employee.py.
+        call(base_url, 'POST', '/staff/employees', {'employeeId': employee_id}, token=token)
+        return None
+
+    manager_id = fixture['manager']
+    call(base_url, 'POST', '/staff/interns',
+         {'employeeId': employee_id, 'reportingManagerId': manager_id}, token=token)
+    call(base_url, 'POST', '/staff/employees/{}/interns'.format(manager_id),
+         {'internId': employee_id}, token=token)
+    return manager_id
 
 
 def seed(base_url, token):
-    print('\nSeeding {} employees...'.format(len(FIXTURES)))
+    print('\nSeeding {} people...'.format(len(FIXTURES)))
 
-    for profile, done_items in FIXTURES:
+    onboarding_count = 0
+    promoted = {'employee': 0, 'intern': 0}
+
+    for fixture in FIXTURES:
+        profile = fixture['profile']
         created = call(base_url, 'POST', '/employees', profile, token=token)
         employee_id = created['id']
 
-        for item_id in done_items:
+        for item_id in fixture['done']:
             created = call(
                 base_url, 'PATCH',
                 '/employees/{}/checklist/{}'.format(employee_id, item_id),
                 {'done': True}, token=token,
             )
 
-        print('  {}  {:<18} {:<12} {}/{} {}'.format(
-            employee_id,
-            profile['firstName'] + ' ' + profile['lastName'],
-            profile['department'],
-            created['progress']['done'], created['progress']['total'],
-            created['status'],
-        ))
+        kind = fixture['promote']
+        if kind is None:
+            onboarding_count += 1
+            where = '{}/{} {} - still onboarding'.format(
+                created['progress']['done'], created['progress']['total'], created['status'])
+        else:
+            manager_id = _promote(base_url, token, fixture, employee_id)
+            # The destructive last step of the sequence - see
+            # handlers/delete_onboarding_record.py. Run only after the copy
+            # above has already succeeded.
+            call(base_url, 'DELETE', '/onboarding/{}'.format(employee_id), token=token)
+            promoted[kind] += 1
+            where = ('moved to employee dashboard' if kind == 'employee'
+                     else 'moved to intern dashboard, reports to {}'.format(manager_id))
 
-    total = call(base_url, 'GET', '/employees', token=token)['count']
-    print('\nDone. Table now holds {} employee(s).'.format(total))
+        print('  {}  {:<18} {:<12} {}'.format(
+            employee_id, profile['firstName'] + ' ' + profile['lastName'],
+            profile['department'], where))
+
+    onboarding_total = call(base_url, 'GET', '/employees', token=token)['count']
+    employee_total = call(base_url, 'GET', '/staff/employees', token=token)['count']
+    intern_total = call(base_url, 'GET', '/staff/interns', token=token)['count']
+    print('\nDone.')
+    print('  Onboarding table: {} record(s)'.format(onboarding_total))
+    # Employee and intern here are two views of one table, not two tables -
+    # employee_total + intern_total is every row in EmployeeTable.
+    print('  Employee table:   {} employee(s), {} intern(s)'.format(employee_total, intern_total))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--wipe', action='store_true',
-                        help='hard-delete every row in the table first, archived ones included')
-    parser.add_argument('--seed', action='store_true', help='create the six fixture employees')
-    parser.add_argument('--yes', action='store_true', help='skip the wipe confirmation prompt')
+                        help='hard-delete every row in both tables first')
+    parser.add_argument('--seed', action='store_true', help='create the fixture people')
+    parser.add_argument('--yes', action='store_true', help='skip the wipe confirmation prompts')
     parser.add_argument('--base-url', help='API base URL, e.g. https://xxxx.execute-api.../dev')
-    parser.add_argument('--table', help='DynamoDB table name, for --wipe')
+    parser.add_argument('--table-onboarding', help='OnboardingTable name, for --wipe')
+    parser.add_argument('--table-employee', help='EmployeeTable name (employees and interns both), for --wipe')
     parser.add_argument('--username', help='officials username for --seed')
     parser.add_argument('--password', help='password for --username')
     args = parser.parse_args()
@@ -421,9 +553,15 @@ def main():
 
     try:
         if args.wipe:
-            table_name = resolve_table_name(args.table)
-            print('Table: {}'.format(table_name))
-            wipe(table_name, args.yes)
+            explicit = {
+                'table_onboarding': args.table_onboarding,
+                'table_employee': args.table_employee,
+            }
+            table_names = {source: resolve_table_name(source, explicit)
+                           for source in _TABLE_SOURCES}
+            print('Tables: onboarding={} employee={}'.format(
+                table_names['onboarding'], table_names['employee']))
+            wipe(table_names, args.yes)
 
         if args.seed:
             base_url = resolve_base_url(args.base_url)

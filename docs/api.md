@@ -1,4 +1,7 @@
-# API reference — Phase 2
+# API reference
+
+This reference describes the current API declared in `template.yaml`. It covers all 21 routes,
+their authorization rules, request and response shapes, and the multi-step promotion workflows.
 
 Currently deployed at:
 
@@ -22,11 +25,12 @@ All requests and responses are JSON.
 Every route except `POST /login` sits behind a Lambda authorizer and needs a bearer token:
 
 ```bash
-export TOKEN=$(curl -s -X POST $BASE_URL/login \
+export OFFICIAL_TOKEN=$(curl -s -X POST "$BASE_URL/login" \
   -H 'Content-Type: application/json' \
   -d '{"username":"hr.admin","password":"onboard-2026"}' | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+export OFFICIAL_AUTH="Authorization: Bearer $OFFICIAL_TOKEN"
 
-curl -s $BASE_URL/employees -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE_URL/employees" -H "$OFFICIAL_AUTH"
 ```
 
 `POST /login` takes `{username, password}` and returns:
@@ -41,12 +45,21 @@ Wrong credentials are `401` with one generic message, whether the username exist
 verifies against one shared password, and the number becomes the token's `sub`:
 
 ```bash
-curl -s -X POST $BASE_URL/login -H 'Content-Type: application/json' \
+curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' \
   -d '{"username":"E1001","password":"welcome-2026"}'
 ```
 
 ```json
 { "token": "eyJhbGci...", "role": "employee", "displayName": "E1001", "expiresIn": 28800 }
+```
+
+For the employee-authenticated examples below:
+
+```bash
+export EMPLOYEE_TOKEN=$(curl -s -X POST "$BASE_URL/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"E1001","password":"welcome-2026"}' | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+export EMPLOYEE_AUTH="Authorization: Bearer $EMPLOYEE_TOKEN"
 ```
 
 `e1001` works too — the number is trimmed and upper-cased into the token so it matches the partition
@@ -62,7 +75,8 @@ Two, carried as a claim inside the signed token — see `src/common/accounts.py`
 |---|---|---|
 | `GET /employees` | the whole list | `403 Forbidden` |
 | `GET /employees/{id}` | any employee, in full | **their own record only**, in full; `403` for anyone else's |
-| `POST`, `PUT`, `DELETE`, `PATCH …/checklist/…` | allowed | `403 Forbidden` |
+| Onboarding and staff mutations | allowed | `403 Forbidden`, except the own-contact and upload routes below |
+| `GET /staff/employees`, `GET /staff/interns` | the whole list | `403 Forbidden` |
 | `PATCH /employees/{id}/contact` | `403 Forbidden` | **their own record only** |
 | `GET /employees/{id}/documents` | any employee's | **their own record only** |
 | `POST /employees/{id}/documents/{slot}` | `403 Forbidden` | **their own record only** |
@@ -107,6 +121,32 @@ The distinction is load-bearing for the frontend: `js/store.js` signs the user o
 passes a 403 through to the caller. Don't collapse them.
 
 Don't put real employee data in this stack — the credentials above are in a public repo.
+
+### Route summary
+
+| Method and path | Access | Success |
+|---|---|---|
+| `POST /login` | Public | `200` token |
+| `GET /employees` | Official | `200` onboarding list |
+| `POST /employees` | Official | `201` created record |
+| `GET /employees/{id}` | Official, or that employee | `200` record |
+| `PUT /employees/{id}` | Official | `200` updated record |
+| `DELETE /employees/{id}` | Official | `200` archived record |
+| `PATCH /employees/{id}/contact` | That employee only | `200` own-profile view |
+| `GET /employees/{id}/documents` | Official, or that employee | `200` document slots |
+| `POST /employees/{id}/documents/{slot}` | That employee only | `200` S3 upload ticket |
+| `PATCH /employees/{id}/checklist/{itemId}` | Official | `200` updated record |
+| `GET /staff/employees` | Official | `200` employee list |
+| `POST /staff/employees` | Official | `201` promoted employee |
+| `DELETE /staff/employees/{id}` | Official | `200` removed staff copy |
+| `POST /staff/employees/{id}/interns` | Official | `200` updated manager |
+| `DELETE /staff/employees/{id}/interns/{internId}` | Official | `200` updated manager |
+| `GET /staff/interns` | Official | `200` intern list |
+| `POST /staff/interns` | Official | `201` promoted intern |
+| `PUT /staff/interns/{id}/manager` | Official | `200` updated intern |
+| `DELETE /staff/interns/{id}` | Official | `200` removed staff copy |
+| `DELETE /onboarding/{id}` | Official | `200` removed onboarding copy |
+| `POST /onboarding/restore` | Official | `201` restored onboarding record |
 
 ## Employee object
 
@@ -164,11 +204,26 @@ somebody fills them in.
 `employeeId` on anything but `POST`. Send them and they're silently dropped, matching `pickEditable`
 in `js/store.js`.
 
+### The promoted shape
+
+`GET /staff/employees` and `GET /staff/interns` both read the same underlying table
+(`EmployeeTable`, filtered by `entityType`) and return objects built the same way, with the same
+profile fields, but three differences from an onboarding object: `checklist` is built from
+the stored `onboardingChecklist` history; `archived`/`archivedAs`/`archivedAt` are always
+`false`/`""`/`""` (a promoted record can never be archived — that is an onboarding-table concept);
+and there are new fields — `onboardedAt`, `joinedOn`, `interns` (employee objects only, `[]` when
+there are none) and `reportingManagerId` (intern objects only). See
+[Promotion, un-promotion and manager reassignment](#promotion-un-promotion-and-manager-reassignment).
+
+`onboardingChecklist` and `entityType` are storage attributes and are **not** returned by the API.
+The wire format continues to use `checklist`, which keeps `GET /employees/{id}` and both staff-list
+responses consistent.
+
 ### Field rules
 
 | Field | Required | Rule |
 |---|---|---|
-| `employeeId` | on `POST` only | `^[A-Z0-9][A-Z0-9-]{1,19}$` after trimming and upper-casing — 2–20 characters of letters, digits and hyphens. Unique; a duplicate is a `409`. Ignored on `PUT` |
+| `employeeId` | on `POST` only | `^[A-Z0-9][A-Z0-9-]{1,19}$` after trimming and upper-casing — 2–20 characters of letters, digits and hyphens. Unique within the onboarding table; a duplicate there is a `409`. Ignored on `PUT` |
 | `firstName`, `lastName`, `jobTitle` | yes | non-empty |
 | `email` | yes | `^[^\s@]+@[^\s@]+\.[^\s@]+$`. **Not** unique — see below |
 | `department` | yes | `Engineering` \| `HR` \| `Finance` \| `Operations` |
@@ -181,7 +236,7 @@ in `js/store.js`.
 `comment` on a checklist item is HR's free-text note about that one step — "chased payroll twice,
 still no bank details". Always a string, `""` when nobody has written anything, capped at **500
 characters**. There is one note per item, not a thread — see
-[design.md](design.md#comments-on-checklist-items) for why. Employees never see comments at all,
+[design.md](design.md#checklist-comments) for why. Employees never see comments at all,
 including on their own record — the field is absent from the response, not blanked.
 
 ## Errors
@@ -196,8 +251,8 @@ including on their own record — the field is absent from the response, not bla
 |---|---|
 | `400` `ValidationError` | malformed JSON, missing required field, bad enum or date, non-boolean `done`, non-text or over-long `comment` or `address`, a non-text contact field, or a PATCH body asking for nothing |
 | `403` `Forbidden` | the caller's role does not permit this route, or an employee asking about a record that is not theirs |
-| `404` `NotFound` | unknown employee id or checklist item id |
-| `409` `Conflict` | a `POST` under an `employeeId` that is already taken (carries `fields.employeeId`); a `PUT`, `PATCH` or document upload against an **archived** employee |
+| `404` `NotFound` | unknown employee, intern or checklist item; a promoted record used with an onboarding-only write route; or the wrong staff-record kind used with a staff delete route |
+| `409` `Conflict` | an onboarding `employeeId` collision; a write against an **archived** onboarding record; an incomplete or duplicate promotion; a promotion step called out of order; or an un-promotion outside its seven-day window |
 | `500` `InternalError` | anything unhandled — details are in CloudWatch, never in the response |
 
 ---
@@ -213,7 +268,7 @@ Returns every **active** employee, each with their full checklist. Archived empl
 this endpoint is what decides they are "removed", and there is no flag to include them.
 
 ```bash
-curl -s "$BASE_URL/employees"
+curl -s "$BASE_URL/employees" -H "$OFFICIAL_AUTH"
 ```
 
 ```json
@@ -233,6 +288,7 @@ with the created employee and a `Location` header.
 
 ```bash
 curl -s -X POST "$BASE_URL/employees" \
+  -H "$OFFICIAL_AUTH" \
   -H 'Content-Type: application/json' \
   -d '{
     "employeeId": "E1024",
@@ -248,7 +304,7 @@ curl -s -X POST "$BASE_URL/employees" \
   }'
 ```
 
-`employeeId` is **required and unique**. It is trimmed and upper-cased, then becomes the record's
+`employeeId` is **required and unique in `OnboardingTable`**. It is trimmed and upper-cased, then becomes the record's
 `id` and its partition key, so `e1024` and `E1024` are the same employee. Posting under a number
 that already exists — including one belonging to an **archived** employee, whose item is still in
 the table — returns `409` with `fields.employeeId` set:
@@ -261,7 +317,11 @@ the table — returns `409` with `fields.employeeId` set:
 
 That guarantee comes from DynamoDB itself: the write is a conditional `PutItem` on
 `attribute_not_exists(employeeKey)`, so there is no read-then-write race to lose and no way for a duplicate
-to slip through under load.
+to slip through under load **in that table**. Promotion moves the durable record to `EmployeeTable`
+and the final step deletes its onboarding row. After that, this route can create a new onboarding
+row with the same id; the later promotion attempt is refused because `EmployeeTable` still owns the
+staff copy. During a promotion sequence, the same id deliberately exists in both tables until
+`DELETE /onboarding/{id}` completes.
 
 **Work emails, by contrast, are not unique.** Posting an address another employee already holds
 succeeds. DynamoDB can only enforce uniqueness on a partition key, that key is the employee number,
@@ -271,20 +331,22 @@ per employee. Callers that care have to check for themselves.
 ### `GET /employees/{id}`
 
 ```bash
-curl -s "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
 ```
 
-One GetItem on the partition key returns the whole employee, checklist included — see
-[database-design.md](database-design.md). `404` if the id is unknown.
+Returns the whole record, checklist included, wherever it currently lives. The lookup checks
+`OnboardingTable` first and then `EmployeeTable`; the second table holds promoted employees and
+interns side by side. It therefore takes one `GetItem` for an onboarding record and at most two for
+a promoted or unknown id. `404` only if neither table contains the id.
 
 An **employee** token may call this for their own number only, and gets the whole record minus the
 checklist comments. Any other id is a `403`, identical whether or not the record exists.
 
 ```bash
 # as E1001
-curl -s "$BASE_URL/employees/E1001" -H "Authorization: Bearer $TOKEN"   # 200, whole record
-curl -s "$BASE_URL/employees/E1002" -H "Authorization: Bearer $TOKEN"   # 403
-curl -s "$BASE_URL/employees/E9999" -H "Authorization: Bearer $TOKEN"   # 403, same body
+curl -s "$BASE_URL/employees/E1001" -H "$EMPLOYEE_AUTH"   # 200, whole record
+curl -s "$BASE_URL/employees/E1002" -H "$EMPLOYEE_AUTH"   # 403
+curl -s "$BASE_URL/employees/E9999" -H "$EMPLOYEE_AUTH"   # 403, same body
 ```
 
 The `{id}` in the path is the employee number, and it is trimmed and upper-cased before the lookup on
@@ -297,12 +359,16 @@ Full replace of the editable fields. **Checklist progress is preserved** — the
 attribute of the same item, and the `SET` clause is built from a whitelist that never names it.
 `409` if the employee is archived.
 
+This is an **onboarding-only** write. Once the record has been promoted out of `OnboardingTable`,
+this route returns `404`; officials cannot edit a promoted profile through the current API.
+
 **There is no rename.** `employeeId` is not on that whitelist, so sending one is silently dropped
 rather than honoured or rejected. DynamoDB cannot move an item between partition keys: a `PUT` that
 appeared to rename would have upserted a second employee and left the first one in place.
 
 ```bash
 curl -s -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" \
+  -H "$OFFICIAL_AUTH" \
   -H 'Content-Type: application/json' \
   -d '{ "firstName": "Priya", "lastName": "Sharma",
         "email": "priya.sharma@breville.com", "phone": "+61 400 000 000",
@@ -339,7 +405,7 @@ Present-key semantics, matching the checklist `PATCH`:
 
 ```bash
 curl -s -X PATCH "$BASE_URL/employees/E1001/contact" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H "$EMPLOYEE_AUTH" -H 'Content-Type: application/json' \
   -d '{ "phone": "+61 400 111 222",
         "personalEmail": "priya@example.com",
         "address": "12 Smith Street, Sydney NSW 2000" }'
@@ -361,7 +427,7 @@ and gets `403` for anyone else's — **the same `403` whether or not that record
 check runs before anything is read.
 
 ```bash
-curl -s "$BASE_URL/employees/E1001/documents" -H "Authorization: Bearer $TOKEN"
+curl -s "$BASE_URL/employees/E1001/documents" -H "$EMPLOYEE_AUTH"
 ```
 
 ```json
@@ -402,7 +468,7 @@ has no record; `409` if the record is archived.
 
 ```bash
 curl -s -X POST "$BASE_URL/employees/E1001/documents/resume" \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H "$EMPLOYEE_AUTH" -H 'Content-Type: application/json' \
   -d '{ "filename": "Priya Sharma CV.pdf", "contentType": "application/pdf" }'
 ```
 
@@ -449,8 +515,9 @@ history.
 
 ### `DELETE /employees/{id}`
 
-**Archives. Does not delete.** Nothing is removed from the table. The profile is stamped with a
+**Archives an onboarding record. Does not delete it.** Nothing is removed from the table. The profile is stamped with a
 terminal state, the employee drops out of `GET /employees`, and the record stops accepting writes.
+For a record already moved to a staff dashboard, this onboarding-only route returns `404`.
 
 Which state depends on where the checklist had got to at that moment:
 
@@ -463,7 +530,7 @@ Returns `200` with the archived employee — not the old `204` — so the caller
 it landed in without re-deriving the rule. `404` if the id is unknown.
 
 ```bash
-curl -s -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
+curl -s -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
 ```
 
 ```json
@@ -502,19 +569,19 @@ enough for both: a comment does not disturb the tick, and a tick does not distur
 ```bash
 # tick it
 curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" \
-  -H 'Content-Type: application/json' -d '{"done": true}'
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"done": true}'
 
 # leave the tick alone, add a note
 curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/bank-details" \
-  -H 'Content-Type: application/json' -d '{"comment": "Chased payroll twice."}'
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"comment": "Chased payroll twice."}'
 
 # both at once
 curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/laptop" \
-  -H 'Content-Type: application/json' -d '{"done": true, "comment": "Dell XPS, collected Friday."}'
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"done": true, "comment": "Dell XPS, collected Friday."}'
 
 # clear the note
 curl -s -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/laptop" \
-  -H 'Content-Type: application/json' -d '{"comment": ""}'
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"comment": ""}'
 ```
 
 | Body | Result |
@@ -532,9 +599,193 @@ Valid `itemId` values: `offer-letter`, `id-proof`, `bank-details`, `laptop`, `em
 
 ---
 
-## Acceptance run
+## Promotion, un-promotion and manager reassignment
 
-The sequence that proves Phase 2 is done. Every line should print the status code on the right.
+Officials only, all eleven routes. Each is its own endpoint, individually callable, rather than one
+atomic call — see [docs/database-design.md#promotion](database-design.md#promotion) for the full
+reasoning. The short version: every step here is idempotent, the destructive step in a sequence is
+always last, and the API refuses a destructive call whose precondition has not been met yet. That
+combination means **re-running a whole sequence after any failure is always safe** — nothing here
+needs a "did that already happen?" check before you retry it.
+
+The client performs the workflows in this order:
+
+| Workflow | Calls, in order |
+|---|---|
+| Promote employee | `POST /staff/employees` → `DELETE /onboarding/{id}` |
+| Promote intern | `POST /staff/interns` → `POST /staff/employees/{managerId}/interns` → `DELETE /onboarding/{id}` |
+| Reassign intern | `PUT /staff/interns/{id}/manager` → link to the new manager → unlink from the previous manager |
+| Undo employee promotion | `POST /onboarding/restore` → `DELETE /staff/employees/{id}` |
+| Undo intern promotion | `POST /onboarding/restore` → unlink from the manager → `DELETE /staff/interns/{id}` |
+
+### `POST /staff/employees`
+
+Step one of promoting a finished, non-intern onboarding record. Body `{"employeeId": "E1024"}`.
+
+Refuses with `409` unless the checklist is 8 of 8 ("Onboarded"). Refuses with `400` naming
+`employmentType` if the record is an intern — use `POST /staff/interns` instead. A second call for
+an id already on the employee dashboard is `409`, not an error worth treating specially.
+
+```bash
+curl -s -X POST "$BASE_URL/staff/employees" \
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"employeeId": "E1024"}'
+```
+
+Returns `201` with the promoted employee API object and `Location: /staff/employees/{id}`. It has
+every profile field, `checklist` (frozen onboarding history), `onboardedAt`, `joinedOn`, and
+`interns: []`. The underlying item stores that list as `onboardingChecklist`, but that storage name
+never appears on the wire.
+
+### `POST /staff/interns`
+
+Step one of promoting a finished intern. Body `{"employeeId": "E1024", "reportingManagerId": "E1001"}`.
+
+Same completion gate as above. `reportingManagerId` is required and must name a record that already
+exists in `EmployeeTable` **and is itself an employee, not an intern** — `400` with
+`fields.reportingManagerId` if it does not (including when the named manager is still onboarding,
+does not exist at all, or is an intern - employees and interns share `EmployeeTable`, so existence
+alone is not proof of which one a record is). A non-intern onboarding record is also a `400` under
+`fields.employmentType`; an unknown employee is `404`; an incomplete checklist or occupied staff
+id is `409`.
+
+```bash
+curl -s -X POST "$BASE_URL/staff/interns" \
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' \
+  -d '{"employeeId":"E1024","reportingManagerId":"E1001"}'
+```
+
+Returns `201` with the promoted intern API object, `reportingManagerId`, and
+`Location: /staff/interns/{id}`. Its stored `entityType` is `Intern`, but `entityType` is not an API
+field. This call alone does **not** update the manager's `interns` list — that is the next step.
+
+### `POST /staff/employees/{id}/interns`
+
+Links one intern to this manager. Body `{"internId": "E1024"}`. Idempotent: calling it twice with
+the same `internId` leaves the list with one entry, not two. Returns the manager's `EmployeeTable`
+API object with `interns` updated. A missing or non-intern `internId` is `400`; an unknown manager
+id is `404`.
+
+```bash
+curl -s -X POST "$BASE_URL/staff/employees/E1001/interns" \
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' \
+  -d '{"internId":"E1024"}'
+```
+
+### `DELETE /staff/employees/{id}/interns/{internId}`
+
+Unlinks one intern from this manager. Idempotent — already-unlinked is `200`, not `404`. Removes the
+whole stored `interns` attribute, rather than leaving `[]`, when this was the last one; the returned
+API object still reports `interns: []`. An unknown manager id is `404`.
+
+```bash
+curl -s -X DELETE "$BASE_URL/staff/employees/E1001/interns/E1024" \
+  -H "$OFFICIAL_AUTH"
+```
+
+### `PUT /staff/interns/{id}/manager`
+
+HR manually reassigns an intern's reporting manager. Body `{"reportingManagerId": "E1002"}`. The new
+manager is validated the same way `POST /staff/interns` validates one.
+
+```bash
+curl -s -X PUT "$BASE_URL/staff/interns/E1024/manager" \
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' \
+  -d '{"reportingManagerId":"E1002"}'
+```
+
+Returns `200` with the updated intern record **plus** `previousReportingManagerId` — the frontend
+needs that to know which old link to remove, since this call has already overwritten it. Reassigning
+to the manager an intern already has is a no-op `200`, not a `409`.
+
+The full reassign sequence is this call, then `POST /staff/employees/{newManagerId}/interns`, then
+`DELETE /staff/employees/{oldManagerId}/interns/{id}` — new link added before the old one is removed.
+
+### `DELETE /onboarding/{id}`
+
+The destructive last step of a promote sequence. Removes the row from `OnboardingTable` outright —
+**not** the same route as `DELETE /employees/{id}` below, which still archives in place.
+
+Refuses with `409` unless the id already exists in `EmployeeTable` — as an employee or an intern,
+either counts — called out of order, before either promote call above, it would destroy the only
+copy of someone's onboarding history. Idempotent: an id already gone from onboarding is `200`.
+
+```bash
+curl -s -X DELETE "$BASE_URL/onboarding/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
+```
+
+### `POST /onboarding/restore`
+
+"Undo move" - step one of un-promoting. Body `{"employeeId": "E1024"}`.
+
+Available for **seven days** from the promoted record's `onboardedAt`. Past that, `409` — there is
+no other way back; a mistaken promotion older than a week needs table access. Returns `201` with the
+restored onboarding record, checklist and every HR comment on it intact, plus
+`Location: /employees/{id}`. An id absent from the staff table is `404`; calling restore again after
+the onboarding copy exists is `409`.
+
+```bash
+curl -s -X POST "$BASE_URL/onboarding/restore" \
+  -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' \
+  -d '{"employeeId":"E1024"}'
+```
+
+### `DELETE /staff/employees/{id}` / `DELETE /staff/interns/{id}`
+
+The destructive last step of un-promoting. Both routes act on the same `EmployeeTable` - each
+refuses with `404` if the id names the *other* kind of record (an employee id given to the intern
+route, or vice versa), and with `409` unless **both** the onboarding row already exists again
+(`POST /onboarding/restore` ran first) and the record is still inside the seven-day window —
+checked again here even though `restore` already checked it, so a call arriving out of order
+cannot rely on a window that was open when an earlier step ran.
+
+The full un-promote sequence for an intern is: `POST /onboarding/restore`, then
+`DELETE /staff/employees/{managerId}/interns/{id}`, then `DELETE /staff/interns/{id}`. For a
+non-intern, skip the middle step.
+
+```bash
+curl -s -X DELETE "$BASE_URL/staff/employees/E1024" -H "$OFFICIAL_AUTH"
+curl -s -X DELETE "$BASE_URL/staff/interns/E1024" -H "$OFFICIAL_AUTH"
+```
+
+### `GET /staff/employees`
+
+Every onboarded, non-intern employee — the Employee Tracking dashboard. Same shape as
+`GET /employees`: `{ "employees": [...], "count": N }`, each carrying `checklist`,
+`onboardedAt`, `joinedOn` and `interns`. Sorted by `joinedOn`, then `lastName`.
+
+```bash
+curl -s "$BASE_URL/staff/employees" -H "$OFFICIAL_AUTH"
+```
+
+### `GET /staff/interns`
+
+Every onboarded intern — the Interns dashboard. `{ "interns": [...], "count": N }`. With
+`?managerId=E1001`, filters to the interns reporting to that manager via the `ByReportingManager`
+GSI (a `Query`, not a `Scan` — this is the one place the index is used directly).
+Both forms are sorted by `joinedOn`, then `lastName`. `managerId` is an exact, case-sensitive query
+value; unlike an `{id}` path parameter, this query parameter is not trimmed or upper-cased.
+
+```bash
+curl -s "$BASE_URL/staff/interns?managerId=E1001" -H "$OFFICIAL_AUTH"
+```
+
+### Known gap: no automatic compensation
+
+None of the eleven routes above roll anything back on their own, and there is no background sweep
+for a half-finished sequence or a stale `interns` entry after a reassignment. What is guaranteed
+is that every such state is visible on the dashboards and fixed by re-running the sequence from its
+first step — not that it cannot happen. Building real compensation (an idempotency key per sequence,
+a sweep, automatic retry) is deliberately deferred; see
+[docs/database-design.md#known-gap-no-server-side-compensation](database-design.md#known-gap-no-server-side-compensation).
+
+---
+
+## Core onboarding acceptance run
+
+This checks the onboarding CRUD and validation contract. It assumes `BASE_URL` and
+`OFFICIAL_AUTH` were exported as shown under [Authentication](#authentication). Every line should
+print the status code on the right. The promotion workflow is documented separately above and is
+covered by `tests/test_promotion.py`.
 
 ```bash
 # The id is ours to choose now, so there is nothing to capture from the response.
@@ -544,22 +795,22 @@ BODY='{"employeeId":"E9001","firstName":"Test","lastName":"Hire",
        "jobTitle":"Engineer","manager":"","startDate":"2026-09-01",
        "employmentType":"Full-time"}'
 
-curl -s -o /dev/null -w 'create                %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
-curl -s -o /dev/null -w 'list                  %{http_code}\n' "$BASE_URL/employees"
-curl -s -o /dev/null -w 'get                   %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
-curl -s -o /dev/null -w 'get, wrong case       %{http_code}\n' "$BASE_URL/employees/e9001"
-curl -s -o /dev/null -w 'duplicate id          %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
-curl -s -o /dev/null -w 'malformed id          %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E 900 1","firstName":"Test","lastName":"Hire","email":"x@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
-curl -s -o /dev/null -w 'tick offer-letter     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" -H 'Content-Type: application/json' -d '{"done":true}'
-curl -s -o /dev/null -w 'tick unknown item     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/not-a-thing" -H 'Content-Type: application/json' -d '{"done":true}'
-curl -s -o /dev/null -w 'bad email             %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"email":"nope"}'
-curl -s -o /dev/null -w 'impossible date       %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E9002","firstName":"Test","lastName":"Hire","email":"y@breville.com","department":"HR","jobTitle":"X","startDate":"2026-02-30","employmentType":"Intern"}'
-curl -s -o /dev/null -w 'archive               %{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID"
-curl -s -o /dev/null -w 'get after archive     %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID"
-curl -s -o /dev/null -w 'update after archive  %{http_code}\n' -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"t@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
-curl -s -o /dev/null -w 'tick after archive    %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/id-proof" -H 'Content-Type: application/json' -d '{"done":true}'
-curl -s -o /dev/null -w 'id still taken        %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d "$BODY"
-curl -s -o /dev/null -w 're-hire on same email %{http_code}\n' -X POST "$BASE_URL/employees" -H 'Content-Type: application/json' -d '{"employeeId":"E9003","firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'create                %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d "$BODY"
+curl -s -o /dev/null -w 'list                  %{http_code}\n' "$BASE_URL/employees" -H "$OFFICIAL_AUTH"
+curl -s -o /dev/null -w 'get                   %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
+curl -s -o /dev/null -w 'get, wrong case       %{http_code}\n' "$BASE_URL/employees/e9001" -H "$OFFICIAL_AUTH"
+curl -s -o /dev/null -w 'duplicate id          %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d "$BODY"
+curl -s -o /dev/null -w 'malformed id          %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"employeeId":"E 900 1","firstName":"Test","lastName":"Hire","email":"x@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'tick offer-letter     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/offer-letter" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"done":true}'
+curl -s -o /dev/null -w 'tick unknown item     %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/not-a-thing" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"done":true}'
+curl -s -o /dev/null -w 'bad email             %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"email":"nope"}'
+curl -s -o /dev/null -w 'impossible date       %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"employeeId":"E9002","firstName":"Test","lastName":"Hire","email":"y@breville.com","department":"HR","jobTitle":"X","startDate":"2026-02-30","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'archive               %{http_code}\n' -X DELETE "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
+curl -s -o /dev/null -w 'get after archive     %{http_code}\n' "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH"
+curl -s -o /dev/null -w 'update after archive  %{http_code}\n' -X PUT "$BASE_URL/employees/$EMPLOYEE_ID" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Hire","email":"t@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
+curl -s -o /dev/null -w 'tick after archive    %{http_code}\n' -X PATCH "$BASE_URL/employees/$EMPLOYEE_ID/checklist/id-proof" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"done":true}'
+curl -s -o /dev/null -w 'id still taken        %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d "$BODY"
+curl -s -o /dev/null -w 're-hire on same email %{http_code}\n' -X POST "$BASE_URL/employees" -H "$OFFICIAL_AUTH" -H 'Content-Type: application/json' -d '{"employeeId":"E9003","firstName":"Test","lastName":"Hire","email":"test.hire@breville.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'
 ```
 
 Expected:
@@ -593,7 +844,7 @@ Officials-only above. This is the other role, end to end — a fresh token, beca
 checks that prove the API and not the browser is doing the scoping.
 
 ```bash
-E_TOKEN=$(curl -s -X POST $BASE_URL/login -H 'Content-Type: application/json' \
+E_TOKEN=$(curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' \
   -d '{"username":"E1001","password":"welcome-2026"}' \
   | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
 AUTH="Authorization: Bearer $E_TOKEN"
@@ -638,3 +889,38 @@ Three more checks that curl can't make for you:
    its 8-entry `checklist` list intact.
 3. **Comments survived** — any note written on a checklist item is still on the archived record.
    That history is the reason the item is still there.
+
+## Manual verification log — 2026-09-03
+
+The following core routes were exercised against the live `onboarding-system-dev` stack (not
+`sam local`) by signing in for real and reading each response. This is a dated record, not a claim
+about the current deployment; use the acceptance run and automated tests for a fresh check.
+
+| Route | As | Result |
+|---|---|---|
+| `POST /login` | `hr.admin` / `onboard-2026` | `200`, official token |
+| `POST /login` | `hr.admin` / wrong password | `401`, generic message |
+| `GET /employees` | official | `200`, live onboarding table — 7 records, one with `employmentType: "Intern"` |
+| `GET /employees` | no token | `401 Unauthorized` |
+| `GET /employees` | garbage bearer token | `401 Unauthorized` |
+| `GET /employees` | employee (own scope) | `403 Forbidden` |
+| `POST /employees` | official, new id `ZTEST01` | `201`, fresh checklist, all 8 items `done: false` |
+| `GET /employees/{id}` | official | `200` |
+| `GET /employees/{id}` | official, unknown id | `404 NotFound` |
+| `PUT /employees/{id}` | official | `200`, edited fields updated |
+| `PATCH /employees/{id}/checklist/{itemId}` | official | `200`, `status`/`progress` recomputed (`Pending` → `In Progress`) |
+| `PATCH /employees/{id}/checklist/{itemId}` | official, unknown item id | `404 NotFound` |
+| `PATCH /employees/{id}/checklist/{itemId}` | employee | `403 Forbidden` — read-only access |
+| `GET /employees/{id}/documents` | official | `200`, all three slots `uploaded: false` |
+| `POST /login` | `ZTEST01` / `welcome-2026` | `200`, employee token — a freshly created employee is a valid login on the shared password with no separate provisioning step |
+| `GET /employees/{id}` | self | `200` |
+| `GET /employees/{id}` | self, someone else's id | `403 Forbidden` |
+| `GET /employees` | self | `403 Forbidden` — the list itself, not just other records |
+| `PATCH /employees/{id}/contact` | self | `200`, `phone`/`personalEmail`/`address` written, checklist echoed back with **no `comment` key** |
+| `GET /employees/{id}/documents` | self | `200` |
+| `POST /employees/{id}/documents/{slot}` | self, missing `filename` | `400 ValidationError`, field-scoped error |
+| `POST /employees/{id}/documents/{slot}` | self, valid request | `200`, presigned S3 POST ticket (bucket, key `employees/ZTEST01/resume`, short-lived credential) |
+| `DELETE /employees/{id}` | official | `200`, `archived: true`, `archivedAs: "Onboarding Cancelled"` — record kept, not deleted |
+
+`ZTEST01` was left in its archived state afterwards, matching the soft-delete design rather than
+being hard-removed from the table — the same state `DELETE` leaves any real employee in.

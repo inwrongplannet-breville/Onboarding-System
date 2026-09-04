@@ -28,7 +28,7 @@ rewrite is where you would stop paying it.
 from boto3.dynamodb.conditions import Attr
 
 from common import responses
-from common.db import table
+from common.db import onboarding_table
 from common.handler import api_handler, require_official
 from common.models import to_api_employee
 
@@ -47,7 +47,7 @@ def _scan_all():
     }
 
     while True:
-        result = table.scan(**kwargs)
+        result = onboarding_table.scan(**kwargs)
         items.extend(result.get('Items', []))
 
         last_key = result.get('LastEvaluatedKey')

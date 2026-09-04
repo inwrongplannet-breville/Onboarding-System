@@ -12,10 +12,10 @@ Made by Abhishek.
 ## Run the UI
 
 ```bash
-py -m http.server 8000
+py -m http.server 8001
 ```
 
-Then open **http://localhost:8000**.
+Then open **http://localhost:8001**.
 
 No install and no build step — but **don't double-click `index.html`**. A `file://` page has an
 opaque origin and sends `Origin: null` on every request, which browsers treat inconsistently; a
@@ -25,15 +25,21 @@ Everything you see comes from DynamoDB. Add someone, refresh, and they're still 
 
 ## Reset the data
 
-Wipes the table and repopulates it with six employees at varied onboarding stages:
+Wipes both tables and repopulates them with eight people: two promoted managers, three promoted
+interns reporting to them, and three left mid-onboarding at varied progress. See
+[docs/database-design.md#promotion](docs/database-design.md#promotion) for what "promoted" means
+here.
 
 ```bash
 py scripts/seed_employees.py --wipe --seed
 ```
 
-Add `--yes` to skip the confirmation prompt. Seeding drives the REST API rather than the table, so it signs in first — pass `--username`/`--password` if the stack isn't using the demo accounts. `--wipe` goes at the table directly and needs no credentials.
+Add `--yes` to skip the confirmation prompts (one per table). Seeding drives the REST API rather
+than the tables directly — including the promote sequences, so a broken seed is a broken API — and
+so it signs in first; pass `--username`/`--password` if the stack isn't using the demo accounts.
+`--wipe` goes at the tables directly and needs no credentials.
 
-The six fixtures take employee numbers `E1001`–`E1006`. Those numbers are the DynamoDB partition
+The eight fixtures take employee numbers `E1001`–`E1008`. Those numbers are the DynamoDB partition
 key, so `--seed` without `--wipe` now fails loudly with a `409` instead of quietly creating a second
 copy of everyone.
 
@@ -41,7 +47,7 @@ copy of everyone.
 
 ```bash
 py -m pip install -r requirements-dev.txt
-py -m pytest                    # 194 tests, ~30 seconds
+py -m pytest                    # 436 tests, ~60 seconds
 ```
 
 No AWS account or credentials needed — the handler tests run against an in-memory DynamoDB.
@@ -91,7 +97,7 @@ is a required second step after the *first* deploy only; redeploying afterwards 
 |---|---|
 | API | `https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev` — the `ApiBaseUrl` output |
 | Stack | `onboarding-system-dev`, `eu-north-1` |
-| Table | the `TableName` output. CloudFormation names it, because `template.yaml` deliberately sets no `TableName` — an explicit one makes a key-schema change undeployable |
+| Tables | two now, not one — the `OnboardingTableName` and `EmployeeTableName` outputs. `EmployeeTable` holds employees and interns side by side, told apart by `entityType`. CloudFormation names each, because `template.yaml` deliberately sets no `TableName` on either — an explicit one makes a key-schema change undeployable. See [docs/database-design.md#two-tables-not-one](docs/database-design.md#two-tables-not-one) |
 | Documents | the `DocumentsBucketName` output, same reasoning. **Empty it before `sam delete`** |
 
 ### Signing in
@@ -104,8 +110,9 @@ Two roles, and the split is enforced by the API rather than by the UI:
 | **your employee number**, e.g. `E1001` | `welcome-2026` | One screen: their own record in full, their own onboarding checklist, and the three contact fields they fill in themselves |
 
 An employee has no account name — **their employee number is their username**, and every number
-shares one password. So the six seeded employees, `E1001`–`E1006`, are also the six employee logins.
-`e1001` works too; the number is upper-cased into the token so it matches the partition key.
+shares one password. So the eight seeded people, `E1001`–`E1008`, are also the employee logins,
+whichever table (or which kind of record within `EmployeeTable`) they currently sit in. `e1001`
+works too; the number is upper-cased into the token so it matches the partition key.
 
 `POST /login` verifies this against PBKDF2 hashes held in Secrets Manager (seeded by
 `scripts/seed_accounts_secret.py` — see below) and returns a signed JWT carrying the role *and*
@@ -135,8 +142,8 @@ and its first read is a 404, which the UI renders as "we cannot find your record
 > password reads any record, one number at a time. Real per-employee credentials are a Cognito user
 > pool, which is [design.md](docs/design.md)'s note and not a small edit.
 
-**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8000`, matching
-`py -m http.server 8000`. Serving the UI from anywhere else means passing it:
+**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8001`, matching
+`py -m http.server 8001`. Serving the UI from anywhere else means passing it:
 
 ```bash
 sam deploy --parameter-overrides AllowedOrigin=https://onboarding.internal.example.com

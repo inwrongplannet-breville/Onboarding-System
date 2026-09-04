@@ -31,7 +31,6 @@ from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 
 from common import responses
-from common.db import table
 from common.handler import (
     api_handler,
     employee_id_param,
@@ -47,7 +46,7 @@ from common.models import (
     pick_self,
     validate_self_fields,
 )
-from common.repository import ACTIVE_GUARD, guard_failure_response, load_employee
+from common.repository import ACTIVE_GUARD, find_record, guard_failure_response, table_for
 
 # Every field named here is optional, so a body naming none of them is not a
 # cleared profile - it is a request that forgot to say what it wanted.
@@ -116,11 +115,24 @@ def lambda_handler(event, context):
     if errors:
         return responses.bad_request('Your details are not valid.', errors)
 
+    # The record can be in either table by now - onboarding is no longer the
+    # only place an employee's own profile lives, since promotion moves it.
+    # This is the read that used to be a plain load_employee(); see
+    # find_record()'s docstring in common/repository.py for why that alone
+    # would 404 a promoted employee out of their own record.
+    #
+    # Both tables share one key shape and one guard now - see the module
+    # docstring in common/repository.py - so this writes with the same key()
+    # and ACTIVE_GUARD regardless of which table `source` names.
+    _, source = find_record(employee_id, consistent=True)
+    if source is None:
+        return responses.not_found('No employee with id ' + employee_id + '.')
+
     now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
     expression, names, values_map = _contact_update(values, now)
 
     try:
-        table.update_item(
+        table_for(source).update_item(
             Key=key(employee_id),
             UpdateExpression=expression,
             ExpressionAttributeNames=names,
@@ -129,12 +141,12 @@ def lambda_handler(event, context):
         )
     except ClientError as error:
         if is_condition_failure(error):
-            return guard_failure_response(employee_id)
+            return guard_failure_response(employee_id, source)
         raise
 
     # Consistently, because the UI repaints from this response and an eventually
     # consistent read here can hand back the item as it was before the write.
-    employee = load_employee(employee_id, consistent=True)
+    employee, source = find_record(employee_id, consistent=True)
     if employee is None:
         return responses.not_found('No employee with id ' + employee_id + '.')
 

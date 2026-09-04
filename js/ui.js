@@ -101,6 +101,185 @@ window.App = window.App || {};
       '</div>';
   }
 
+  /**
+   * "3 interns" / "1 employee" - the simple case of countLabel below, for the
+   * two staff dashboards, which show every record with no filtering to report
+   * a "showing N of M" state for.
+   */
+  function recordCountLabel(count, noun) {
+    return count + ' ' + noun + (count === 1 ? '' : 's');
+  }
+
+  /** A <select> of employees for a reporting-manager picker, value = employee id. */
+  function managerOptionsHtml(employees, selectedId) {
+    return employees.map(function (employee) {
+      var isSelected = employee.id === selectedId ? ' selected' : '';
+      return '<option value="' + escapeHtml(employee.id) + '"' + isSelected + '>' +
+        escapeHtml(fullName(employee)) + ' (' + escapeHtml(employee.id) + ')</option>';
+    }).join('');
+  }
+
+  /**
+   * Days left in the seven-day undo window, or 0 once it has closed.
+   * Mirrors common.models.unpromote_window_open/UNPROMOTE_WINDOW_DAYS - see
+   * that module for why the deadline lives in exactly one place server side;
+   * this is only ever used to decide whether to show the "Undo move" button,
+   * never to enforce anything.
+   */
+  var UNPROMOTE_WINDOW_DAYS = 7;
+
+  function undoWindowDaysLeft(onboardedAt) {
+    if (!onboardedAt) return 0;
+    var elapsedMs = Date.now() - new Date(onboardedAt).getTime();
+    var daysLeft = UNPROMOTE_WINDOW_DAYS - Math.floor(elapsedMs / (24 * 60 * 60 * 1000));
+    return daysLeft > 0 ? daysLeft : 0;
+  }
+
+  /** The "Undo move" control, shared by the intern and employee tracking cards. */
+  function undoMoveControl(record) {
+    var daysLeft = undoWindowDaysLeft(record.onboardedAt);
+    if (daysLeft <= 0) {
+      return '<p class="view-note">The undo window has closed.</p>';
+    }
+    return '' +
+      '<button class="btn-link" type="button" data-action="unpromote"' +
+        ' aria-label="Undo move for ' + escapeHtml(fullName(record)) + '">' +
+        'Undo move' +
+      '</button>' +
+      '<span class="dash-card-chip">' + daysLeft + ' day' + (daysLeft === 1 ? '' : 's') +
+        ' left to undo</span>';
+  }
+
+  /** One card for the Interns dashboard - mirrors the onboarding employee card. */
+  function internCard(intern, managerOptionsHtml) {
+    var name = escapeHtml(fullName(intern));
+
+    return '' +
+      '<li class="employee-card" data-id="' + escapeHtml(intern.id) + '">' +
+        '<div class="ec-top">' +
+          '<span class="ec-id">' + escapeHtml(intern.id) + '</span>' +
+          statusBadge(intern) +
+        '</div>' +
+        '<div>' +
+          '<h3 class="ec-name">' + name + '</h3>' +
+          '<p class="ec-role">' + escapeHtml(intern.jobTitle) +
+            ' &middot; ' + escapeHtml(intern.department) + '</p>' +
+        '</div>' +
+        '<p class="ec-email">' + escapeHtml(intern.email) + '</p>' +
+        '<p><strong>Reports to:</strong> ' +
+          escapeHtml(intern.reportingManagerId || '-') + '</p>' +
+        '<p class="ec-start">' +
+          '<span class="ec-start-label">Joined</span>' +
+          escapeHtml(formatDate(intern.joinedOn)) +
+        '</p>' +
+        '<div class="ec-foot">' +
+          '<label>' +
+            '<span class="sr-only">Reassign ' + name + ' to</span>' +
+            '<select data-role="reassign-manager" aria-label="Reassign ' + name + ' to a different manager">' +
+              '<option value="">Reassign manager&hellip;</option>' +
+              managerOptionsHtml +
+            '</select>' +
+          '</label>' +
+          '<button class="btn-link" type="button" data-action="reassign"' +
+            ' aria-label="Confirm reassignment for ' + name + '">Reassign</button>' +
+        '</div>' +
+        undoMoveControl(intern) +
+      '</li>';
+  }
+
+  /** One card for the Employee Tracking dashboard. */
+  function staffEmployeeCard(employee) {
+    var name = escapeHtml(fullName(employee));
+    var internCount = (employee.interns || []).length;
+
+    return '' +
+      '<li class="employee-card" data-id="' + escapeHtml(employee.id) + '">' +
+        '<div class="ec-top">' +
+          '<span class="ec-id">' + escapeHtml(employee.id) + '</span>' +
+          statusBadge(employee) +
+        '</div>' +
+        '<div>' +
+          '<h3 class="ec-name">' + name + '</h3>' +
+          '<p class="ec-role">' + escapeHtml(employee.jobTitle) +
+            ' &middot; ' + escapeHtml(employee.department) + '</p>' +
+        '</div>' +
+        '<p class="ec-email">' + escapeHtml(employee.email) + '</p>' +
+        (internCount
+          ? '<p><strong>Interns:</strong> ' + internCount + '</p>'
+          : '') +
+        '<p class="ec-start">' +
+          '<span class="ec-start-label">Joined</span>' +
+          escapeHtml(formatDate(employee.joinedOn)) +
+        '</p>' +
+        undoMoveControl(employee) +
+      '</li>';
+  }
+
+  /**
+   * The "Move to main employee dashboard" / "Move to intern dashboard"
+   * control on the checklist screen. `managers` is:
+   *   null       still loading - only relevant for an intern, so the button
+   *              is shown disabled with a "Loading managers..." note
+   *   [] or more the employee-table list, for the reporting-manager <select>
+   *
+   * Absent entirely on an archived record - archiving already means "this
+   * onboarding is over", and promoting one would double up on that.
+   */
+  function promoteSection(employee, managers) {
+    if (employee.archived) return '';
+
+    if (employee.status !== 'Onboarded') {
+      var remaining = employee.progress.total - employee.progress.done;
+      return '' +
+        '<div class="summary-card" id="promote-section">' +
+          '<p class="view-note">Finish the checklist before moving ' +
+            escapeHtml(fullName(employee)) + ' off onboarding - ' + remaining +
+            ' item' + (remaining === 1 ? '' : 's') + ' left.</p>' +
+        '</div>';
+    }
+
+    if (employee.employmentType !== 'Intern') {
+      return '' +
+        '<div class="summary-card" id="promote-section">' +
+          '<button class="btn btn-primary" type="button" data-action="promote-employee">' +
+            'Move to main employee dashboard' +
+          '</button>' +
+        '</div>';
+    }
+
+    if (managers === null) {
+      return '' +
+        '<div class="summary-card" id="promote-section">' +
+          '<button class="btn btn-primary" type="button" disabled>' +
+            'Move to intern dashboard' +
+          '</button>' +
+          '<p class="view-note">Loading reporting managers&hellip;</p>' +
+        '</div>';
+    }
+
+    if (!managers.length) {
+      return '' +
+        '<div class="summary-card" id="promote-section">' +
+          '<p class="view-note">No one is on the employee dashboard yet, so there is no ' +
+            'reporting manager to assign. Promote a manager first.</p>' +
+        '</div>';
+    }
+
+    return '' +
+      '<div class="summary-card" id="promote-section">' +
+        '<label>' +
+          '<span>Reporting manager</span>' +
+          '<select id="reporting-manager">' +
+            '<option value="">Select&hellip;</option>' +
+            managerOptionsHtml(managers, null) +
+          '</select>' +
+        '</label>' +
+        '<button class="btn btn-primary" type="button" data-action="promote-intern">' +
+          'Move to intern dashboard' +
+        '</button>' +
+      '</div>';
+  }
+
   function options(values, selected) {
     return values.map(function (value) {
       var isSelected = value === selected ? ' selected' : '';
@@ -410,6 +589,114 @@ window.App = window.App || {};
     documentsSection: documentsSection,
 
     /**
+     * The HR landing page. Three cards, one per dashboard, each backed by its
+     * own DynamoDB table now - Onboarding (people not yet finished),
+     * Employee Tracking (promoted, non-intern staff) and Interns (promoted
+     * interns, each linked to a reporting manager). No "coming soon" chips
+     * any more - all three are live.
+     */
+    dashboardView: function () {
+      return '' +
+        '<div class="page-head">' +
+          '<div>' +
+            '<h1 tabindex="-1">HR Dashboard</h1>' +
+            '<p class="subtitle">Choose a section.</p>' +
+          '</div>' +
+        '</div>' +
+
+        '<ul class="dash-grid">' +
+          '<li>' +
+            '<a class="dash-card" href="#/onboarding">' +
+              '<h2>Onboarding</h2>' +
+              '<p>New hires, checklists and documents.</p>' +
+            '</a>' +
+          '</li>' +
+          '<li>' +
+            '<a class="dash-card" href="#/interns">' +
+              '<h2>Interns</h2>' +
+              '<p>Onboarded interns and who they report to.</p>' +
+            '</a>' +
+          '</li>' +
+          '<li>' +
+            '<a class="dash-card" href="#/tracking">' +
+              '<h2>Employee Tracking</h2>' +
+              '<p>Onboarded employees.</p>' +
+            '</a>' +
+          '</li>' +
+        '</ul>';
+    },
+
+    /**
+     * The Interns dashboard - one card per intern reporting manager, each
+     * listing their interns. `interns` and `employees` are both the full
+     * lists from GET /staff/interns and GET /staff/employees - the manager
+     * name/id for the "Reassign manager" picker comes from the latter.
+     */
+    internsView: function (interns, employees) {
+      if (!interns.length) {
+        return '' +
+          '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+          '<div class="page-head">' +
+            '<div>' +
+              '<h1 tabindex="-1">Interns</h1>' +
+              '<p class="subtitle">Onboarded interns and who they report to.</p>' +
+            '</div>' +
+          '</div>' +
+          '<p class="empty-state">No interns have been moved here yet. Promote one from ' +
+            'their checklist on the Onboarding dashboard.</p>';
+      }
+
+      var managerOptions = managerOptionsHtml(employees, null);
+
+      return '' +
+        '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+        '<div class="page-head">' +
+          '<div>' +
+            '<h1 tabindex="-1">Interns</h1>' +
+            '<p class="subtitle">' + recordCountLabel(interns.length, 'intern') + '</p>' +
+          '</div>' +
+        '</div>' +
+        '<ul class="employee-grid" id="intern-cards">' +
+          interns.map(function (intern) {
+            return internCard(intern, managerOptions);
+          }).join('') +
+        '</ul>';
+    },
+
+    /**
+     * The Employee Tracking dashboard - onboarded, non-intern staff. Reuses
+     * the same card/grid markup the onboarding list uses (css/styles.css's
+     * .employee-grid), rather than the placeholder .summary-grid this screen
+     * used to render dummy stats into.
+     */
+    trackingView: function (employees) {
+      if (!employees.length) {
+        return '' +
+          '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+          '<div class="page-head">' +
+            '<div>' +
+              '<h1 tabindex="-1">Employee Tracking</h1>' +
+              '<p class="subtitle">Onboarded employees.</p>' +
+            '</div>' +
+          '</div>' +
+          '<p class="empty-state">No one has been moved here yet. Promote a finished ' +
+            'onboarding record from the Onboarding dashboard.</p>';
+      }
+
+      return '' +
+        '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+        '<div class="page-head">' +
+          '<div>' +
+            '<h1 tabindex="-1">Employee Tracking</h1>' +
+            '<p class="subtitle">' + recordCountLabel(employees.length, 'employee') + '</p>' +
+          '</div>' +
+        '</div>' +
+        '<ul class="employee-grid" id="staff-employee-cards">' +
+          employees.map(staffEmployeeCard).join('') +
+        '</ul>';
+    },
+
+    /**
      * The sign-in screen. `error` is the message from a rejected attempt, or
      * null on first paint.
      *
@@ -597,7 +884,7 @@ window.App = window.App || {};
     /**
      * Stands in for profileView when the signed-in number has no record behind it.
      *
-     * Not notFoundView: that one offers a link back to #/employees, which the
+     * Not notFoundView: that one offers a link back to #/onboarding, which the
      * employee guard bounces straight back here - a dead end that looks like a
      * broken app. This is reachable in two ordinary ways, so it says what to do
      * about both: a mistyped employee number (POST /login cannot check one
@@ -639,13 +926,19 @@ window.App = window.App || {};
         // "Edit" six times over tells a screen-reader user nothing about which
         // record they are on, so every control in the card carries the name.
         var name = escapeHtml(fullName(employee));
-        var href = '#/employees/' + encodeURIComponent(employee.id);
+        var href = '#/onboarding/' + encodeURIComponent(employee.id);
 
         return '' +
           '<li class="employee-card" data-id="' + escapeHtml(employee.id) + '">' +
             '<div class="ec-top">' +
               '<span class="ec-id">' + escapeHtml(employee.id) + '</span>' +
               statusBadge(employee) +
+              // Onboarded and not yet promoted - a nudge to open the
+              // checklist and use the "Move to..." button there, which is
+              // the one place that control lives.
+              (employee.status === 'Onboarded'
+                ? '<span class="dash-card-chip">Ready to move</span>'
+                : '') +
             '</div>' +
 
             '<div>' +
@@ -701,6 +994,7 @@ window.App = window.App || {};
      */
     listView: function (employees, filters, facets) {
       return '' +
+        '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
         '<div class="page-head">' +
           '<div>' +
             '<h1 tabindex="-1">Employees</h1>' +
@@ -708,7 +1002,7 @@ window.App = window.App || {};
             // without cutting off whatever is being read.
             '<p class="subtitle" id="record-count" aria-live="polite"></p>' +
           '</div>' +
-          '<a class="btn btn-primary" href="#/employees/new">Add Employee</a>' +
+          '<a class="btn btn-primary" href="#/onboarding/new">Add Employee</a>' +
         '</div>' +
 
         '<div class="filters">' +
@@ -738,7 +1032,7 @@ window.App = window.App || {};
       var data = employee || {};
 
       return '' +
-        '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
+        '<a class="back-link" href="#/onboarding">&larr; Back to employees</a>' +
         '<h1 tabindex="-1">' + (isEdit ? 'Edit Employee' : 'Add Employee') + '</h1>' +
         '<p class="subtitle">' + (isEdit
           ? 'Updating ' + escapeHtml(fullName(data)) +
@@ -779,7 +1073,7 @@ window.App = window.App || {};
           '<div class="btn-row">' +
             '<button class="btn btn-primary" type="submit">' +
               (isEdit ? 'Save Changes' : 'Add Employee') + '</button>' +
-            '<a class="btn" href="#/employees">Cancel</a>' +
+            '<a class="btn" href="#/onboarding">Cancel</a>' +
             (isEdit
               ? '<button class="btn-link danger" type="button" data-action="delete" style="margin-left:auto">Delete employee</button>'
               : '') +
@@ -793,7 +1087,7 @@ window.App = window.App || {};
       * the page repaints this whole view from the server's response - and a
       * half-written comment must survive that.
       */
-    checklistView: function (employee, editing, documents) {
+    checklistView: function (employee, editing, documents, managers) {
       var p = employee.progress;
       // Archived records are frozen server side. Presenting live checkboxes over
       // one would offer the user an action that can only ever fail with a 409.
@@ -827,7 +1121,7 @@ window.App = window.App || {};
       }).join('');
 
       return '' +
-        '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
+        '<a class="back-link" href="#/onboarding">&larr; Back to employees</a>' +
         '<div class="page-head">' +
           '<div>' +
             '<h1 tabindex="-1">' + escapeHtml(fullName(employee)) + '</h1>' +
@@ -836,7 +1130,7 @@ window.App = window.App || {};
           '</div>' +
           (frozen
             ? ''
-            : '<a class="btn" href="#/employees/' + encodeURIComponent(employee.id) +
+            : '<a class="btn" href="#/onboarding/' + encodeURIComponent(employee.id) +
               '/edit">Edit details</a>') +
         '</div>' +
 
@@ -860,6 +1154,8 @@ window.App = window.App || {};
           '</dl>' +
         '</div>' +
 
+        promoteSection(employee, managers === undefined ? null : managers) +
+
         '<h2>Onboarding checklist</h2>' +
         '<ul class="checklist" id="checklist">' + items + '</ul>' +
 
@@ -875,18 +1171,18 @@ window.App = window.App || {};
      */
     archivedView: function (employee) {
       return '' +
-        '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
+        '<a class="back-link" href="#/onboarding">&larr; Back to employees</a>' +
         '<h1 tabindex="-1">' + escapeHtml(fullName(employee)) + '</h1>' +
         '<p class="subtitle">' + escapeHtml(employee.jobTitle) + ' &middot; ' +
           escapeHtml(employee.department) + '</p>' +
         archivedNotice(employee) +
-        '<p><a class="btn" href="#/employees/' + encodeURIComponent(employee.id) +
+        '<p><a class="btn" href="#/onboarding/' + encodeURIComponent(employee.id) +
           '/checklist">View onboarding record</a></p>';
     },
 
     notFoundView: function () {
       return '' +
-        '<a class="back-link" href="#/employees">&larr; Back to employees</a>' +
+        '<a class="back-link" href="#/onboarding">&larr; Back to employees</a>' +
         '<h1 tabindex="-1">Not found</h1>' +
         '<p class="subtitle">That employee record does not exist.</p>';
     },

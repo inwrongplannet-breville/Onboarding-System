@@ -6,7 +6,7 @@ and check". Takes about ten minutes.
 ## Setup
 
 ```bash
-py scripts/seed_employees.py --wipe --seed        # six employees, varied progress
+py scripts/seed_employees.py --wipe --seed        # eight people: 2 managers, 3 interns, 3 mid-onboarding
 py -m http.server 8000
 ```
 
@@ -16,6 +16,40 @@ Open `http://localhost:8000` with devtools on the **Network** tab, **Disable cac
 You land on the login page. Sign in as `hr.admin` / `onboard-2026` for everything from
 "Happy path" onwards — those sections are the officials console, unchanged. The role
 section below covers the other account.
+
+Since the HR dashboard split, `hr.admin` lands on `#/dashboard` rather than the employee list
+directly. The employee list, its form and its checklist are unchanged in every other respect —
+they now live under `#/onboarding` instead of `#/employees`. `#/interns` and `#/tracking` are live
+now, both backed by `EmployeeTable` (employees and interns side by side) - see "Promote, undo and
+reassign" below.
+
+## Promote, undo and reassign
+
+Three sequences worth walking through by hand, on top of the seeded data (E1001 and E1005 are
+already promoted managers with interns reporting to them; E1002-E1004 are left mid-onboarding).
+
+**Promote a non-intern.** Create a new hire, tick all 8 checklist items, open their checklist and
+click "Move to main employee dashboard". Confirm: they disappear from `#/onboarding` and appear on
+`#/tracking`. Try promoting an incomplete one first and check the button is disabled with a reason.
+
+**Promote an intern.** Same, but pick `Intern` as the employment type on the create form. The
+checklist screen should show a reporting-manager picker instead of a plain button once the
+checklist reaches 8/8. Pick a manager, confirm, and check the new intern appears on `#/interns`
+under that manager, and that the manager's card on `#/tracking` now shows one more intern.
+
+**Undo a move.** On `#/tracking` or `#/interns`, click "Undo move" on someone promoted within the
+last seven days. Confirm they land back on `#/onboarding` with their checklist - and any comment
+you left on it before promoting - intact.
+
+**Reassign a manager.** On `#/interns`, pick a different manager from an intern's card and click
+"Reassign". Confirm the card now shows the new manager, and that both managers' intern counts on
+`#/tracking` updated correctly.
+
+**Interrupt a sequence on purpose.** Start a promote, then reload the page before it finishes (stop
+the network tab mid-request, or throttle to Offline for a second). Confirm the person is now visible
+on *both* dashboards rather than neither, and that clicking "Move to..." again from the onboarding
+side finishes the job without creating a duplicate. This is the whole point of the decomposed
+design - see [database-design.md#promotion](database-design.md#promotion).
 
 ## Prove the mock is gone
 
@@ -42,12 +76,12 @@ browser is not the thing enforcing it.
 | # | Do this | Expect |
 |---|---|---|
 | 1 | Load `/` signed out | The login card. Not a flash of the employee list on the way past |
-| 2 | Type `#/employees`, `#/employees/new`, `#/employees/E1001/edit`, `#/employees/E1001/checklist` into the address bar, signed out | Every one lands on `#/login` |
+| 2 | Type `#/onboarding`, `#/onboarding/new`, `#/onboarding/E1001/edit`, `#/onboarding/E1001/checklist` into the address bar, signed out | Every one lands on `#/login` |
 | 3 | Sign in with a wrong password | Inline message above the fields, password cleared, focus in the password box, and the message is announced |
 | 4 | Sign in as `E1001` / `welcome-2026` | `#/me` — one person's record. Their name in the header chip (not `E1001`, which is all the login could return), their own checklist with no checkboxes, and one form of three fields |
 | 4b | Sign in as `e1001`, lower case | The same record. The number is upper-cased into the token so it matches the partition key |
 | 5 | As the employee, read the Network response for `GET /employees/E1001` | The **whole** record — `email`, `manager`, `employmentType`, `checklist` all present. Then check every checklist item: **no `comment` key at all.** Absent, not empty. This is the check that matters, because the UI not drawing a field proves nothing |
-| 5b | As the employee, type `#/employees/E1002` in the address bar | Bounced to `#/me`. Then in the console, `fetch(App.API_BASE_URL + '/employees/E1002', {headers:{Authorization:'Bearer ' + App.auth.token()}}).then(r => r.status)` → **403**. The guard sent you back; the API is what refused you |
+| 5b | As the employee, type `#/onboarding/E1002` in the address bar | Bounced to `#/me`. Then in the console, `fetch(App.API_BASE_URL + '/employees/E1002', {headers:{Authorization:'Bearer ' + App.auth.token()}}).then(r => r.status)` → **403**. The guard sent you back; the API is what refused you |
 | 5c | Same again for `/employees/E9999`, a number with no record | **403**, with a body identical to 5b. The check runs before the read, so this endpoint will not tell you which numbers are real |
 | 5d | As the employee, `fetch` `GET /employees` | **403**. There is no directory for this role any more |
 | 6 | As the employee, type the four officials hashes from step 2 | Every one lands on `#/me` |
@@ -58,7 +92,7 @@ browser is not the thing enforcing it.
 | 7f | Drop a `.exe`, then a file just outside a zone | Refused on type; and the page does **not** navigate away to render the file — that is the document-level `dragover`/`drop` guard in `app.js` |
 | 7g | Upload a file called `../../etc/passwd.pdf` | Succeeds, stored as `passwd.pdf`. In the S3 console the key is still exactly `employees/E1001/resume` — the key is built from the slot and the token, so a filename can never move it |
 | 7h | Now save your contact details | **The documents section is still populated.** Every repaint in this app is driven by a write's response, and no write response carries documents — this is the regression that check exists for |
-| 7b | Sign in as `E9999` / `welcome-2026` | Signs in fine, then "We cannot find your record". `POST /login` has no table access, so a mistyped number cannot be caught any earlier — and this screen has no link back to `#/employees`, which the guard would bounce |
+| 7b | Sign in as `E9999` / `welcome-2026` | Signs in fine, then "We cannot find your record". `POST /login` has no table access, so a mistyped number cannot be caught any earlier — and this screen has no link back to `#/onboarding`, which the guard would bounce |
 | 8 | Sign in as `hr.admin` and check any request header | `Authorization: Bearer …`, and the preflight `OPTIONS` returns 200. A failed preflight shows up here as a CORS error rather than as a 401 |
 | 9 | Reload mid-session | Still signed in |
 | 10 | Sign out, then press Back | The login page, not the app |
@@ -73,7 +107,7 @@ var s = JSON.parse(sessionStorage['onboarding.session']);
 s.role = 'official';                       // there is no such field any more
 s.employeeId = 'E1002';                    // nor this one
 sessionStorage['onboarding.session'] = JSON.stringify(s);
-location.hash = '#/employees';
+location.hash = '#/onboarding';
 ```
 
 **Nothing happens** — you stay on your own profile. The role *and* which employee you are come from
@@ -90,7 +124,7 @@ p[1] = btoa(JSON.stringify(Object.assign(
   .replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 s.token = p.join('.');
 sessionStorage['onboarding.session'] = JSON.stringify(s);
-location.hash = '#/employees';
+location.hash = '#/onboarding';
 ```
 
 Or forge the identity rather than the role, by swapping `sub` for `E1002` the same way. Same
@@ -109,10 +143,10 @@ Each step feeds the next, so run them in order.
 
 | # | Do this | Expect |
 |---|---|---|
-| 1 | Load `#/employees` | one `GET /employees` → 200, six rows. No `OPTIONS` preflight — a plain GET with no custom headers shouldn't trigger one |
+| 1 | Load `#/onboarding` | one `GET /employees` → 200, three rows - only the people still mid-onboarding; the promoted ones are on `#/tracking`/`#/interns` now. No `OPTIONS` preflight — a plain GET with no custom headers shouldn't trigger one |
 | 2 | Type in search, change both filters | **zero** new requests. Filtering is client-side |
 | 3 | Add Employee → submit blank | one `GET /employees` on open (the dropdowns are built from it), then **zero** requests on submit; client validation short-circuits |
-| 3b | Check both dropdowns on that form | Departments and employment types are the ones the six seeded employees carry, alphabetical. Nothing hardcoded produced them |
+| 3b | Check both dropdowns on that form | Departments and employment types are the ones the seeded onboarding records carry, alphabetical. Nothing hardcoded produced them |
 | 4 | Fill it in properly → submit | `POST` 201 with a `Location` header, then back to the list with the new row |
 | 5 | Edit that row, change the department, save | `PUT` 200. Check the request payload has exactly nine fields |
 | 5b | Edit it again, set the email to another employee's, save | `200`. Work emails are no longer unique, so this is accepted — two records now share the address |
@@ -127,17 +161,17 @@ Each step feeds the next, so run them in order.
 | 8 | Delete it, from the row button and from the form button | `DELETE` 200; the row leaves the list, and the item is still in the table stamped `archivedAs` |
 | 7i | Open any employee's checklist page | A **Documents** section: three columns, filename/size/date where something was uploaded, `— not uploaded —` where it wasn't. **No upload control anywhere** — there is no officials upload route to call. Download arrives under the original filename |
 | 7j | Tick a checklist box on that page | The tick lands **and the documents section stays populated** — same repaint trap as 7h |
-| 8a | Open the archived employee's URL directly (`#/employees/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
-| 8b | Open the archived employee's edit URL (`#/employees/<id>/edit`) | the read-only archived page, not the form |
+| 8a | Open the archived employee's URL directly (`#/onboarding/<id>/checklist`) | banner reads "Archived … Onboarding Cancelled"; every checkbox and comment button is disabled |
+| 8b | Open the archived employee's edit URL (`#/onboarding/<id>/edit`) | the read-only archived page, not the form |
 | 8c | Re-add someone on the archived employee's work email | `201` — nothing reserves the address any more. You now have two records on one mailbox, which is the accepted cost of dropping the guard item |
 | 8d | Re-add someone on the archived employee's **employee number** | `409`. The item is still in the table, so the number is still taken — the opposite of 8c, and the difference is exactly what the partition key can and cannot enforce |
-| 9 | Hand-type `#/employees/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
-| 10 | Deep-link `#/employees/E1003/checklist` in a fresh tab | loads directly. Employee numbers are typeable, so this is now a link someone can write by hand |
+| 9 | Hand-type `#/onboarding/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
+| 10 | Deep-link `#/onboarding/E1003/checklist` in a fresh tab | loads directly. Employee numbers are typeable, so this is now a link someone can write by hand |
 | 11 | Add someone using an employee number that already exists | `409`, and the message lands **under the Employee ID input**, not in the page banner. Nothing is created, and the existing record keeps its checklist |
 | 11a | Add someone with `e1024` while `E1024` exists | also `409` — ids are upper-cased before the write, so case cannot smuggle in a second record for one person |
 | 11b | Add someone with `E 1024` or a 30-character id | `400` under the same input, before anything is written |
 | 11c | Open an existing employee's edit form | the Employee ID box is filled, greyed and read-only, with "An employee ID cannot be changed once the record exists." under it. Saving leaves the id alone |
-| 11d | Hand-type `#/employees/e1001/checklist` in the wrong case | loads. The path id is folded before the lookup, on every route |
+| 11d | Hand-type `#/onboarding/e1001/checklist` in the wrong case | loads. The path id is folded before the lookup, on every route |
 | 11e | Search the list for `E1003` | the row appears. The id column is searchable alongside name and email |
 
 ## Failure drills
@@ -162,7 +196,7 @@ The part Phase 1 had no answer for. Each one is forceable in seconds.
 
 ## Keyboard and screen reader
 
-Tab only — no mouse — from a fresh load of `#/employees`.
+Tab only — no mouse — from a fresh load of `#/onboarding`.
 
 | # | Do this | Expect |
 |---|---|---|

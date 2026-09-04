@@ -37,8 +37,7 @@ from common.handler import (
     require_role,
     require_self,
 )
-from common.models import ARCHIVED_MESSAGE
-from common.repository import load_archive_state
+from common.repository import find_record
 
 # Deliberately does not repeat the slot the caller sent. That value is
 # attacker-controlled and this message ends up in a JSON body the UI renders, so
@@ -63,11 +62,17 @@ def lambda_handler(event, context):
     # DynamoDB call in the file. Without it S3 would happily take an object at
     # employees/E9999/resume - and E9999 *can* sign in, because POST /login has no
     # table access by design and so cannot check a number is real.
-    state = load_archive_state(employee_id)
-    if state is None:
+    #
+    # find_record(), not load_archive_state(): a promoted employee's documents
+    # live at the same S3 key as before (employees/<id>/... never moved), but
+    # their profile is no longer in the onboarding table, and load_archive_state
+    # only ever looked there. A promoted or intern record can never be archived,
+    # so the None check is the only one that still applies to those two sources.
+    employee, source = find_record(employee_id, consistent=True)
+    if employee is None:
         return responses.not_found('No employee with id ' + employee_id + '.')
-    if state['archivedAs']:
-        return responses.conflict(ARCHIVED_MESSAGE)
+    if employee.get('archived'):
+        return responses.conflict('This employee is archived. Their record is read-only.')
 
     body = parse_body(event)
     filename = clean_filename(body.get('filename'))
