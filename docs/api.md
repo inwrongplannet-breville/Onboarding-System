@@ -115,7 +115,7 @@ stage-wide ceiling rather than per-IP: it caps the bill and the guessing rate, i
 a caller.
 
 Only the origin in the stack's `AllowedOrigin` parameter may call this API from a browser
-(`http://localhost:8000` by default).
+(`http://localhost:8001` by default).
 
 The distinction is load-bearing for the frontend: `js/store.js` signs the user out on a 401 and
 passes a 403 through to the caller. Don't collapse them.
@@ -152,6 +152,10 @@ Don't put real employee data in this stack — the credentials above are in a pu
 
 The wire format is deliberately identical to the model the frontend renders, which is why Phase 3
 only had to change the bodies of the functions in `js/store.js`.
+
+The object and command snippets below are illustrative contract examples, not a listing of the
+current dev fixtures. The deterministic seed currently uses promoted employees `E1001`-`E1010`,
+promoted interns `E1011`-`E1020`, and active onboarding records `E1021`-`E1030`.
 
 ```json
 {
@@ -407,7 +411,7 @@ Present-key semantics, matching the checklist `PATCH`:
 curl -s -X PATCH "$BASE_URL/employees/E1001/contact" \
   -H "$EMPLOYEE_AUTH" -H 'Content-Type: application/json' \
   -d '{ "phone": "+61 400 111 222",
-        "personalEmail": "priya@example.com",
+        "personalEmail": "maya.chen@example.com",
         "address": "12 Smith Street, Sydney NSW 2000" }'
 ```
 
@@ -433,7 +437,7 @@ curl -s "$BASE_URL/employees/E1001/documents" -H "$EMPLOYEE_AUTH"
 ```json
 { "documents": [
     { "slot": "resume", "label": "Resume", "uploaded": true,
-      "filename": "Priya Sharma CV.pdf", "contentType": "application/pdf",
+      "filename": "Maya Chen CV.pdf", "contentType": "application/pdf",
       "size": 245760, "uploadedAt": "2026-09-12T04:11:07Z",
       "downloadUrl": "https://…s3…?X-Amz-Signature=…" },
     { "slot": "id-document", "label": "ID document", "uploaded": false },
@@ -469,15 +473,15 @@ has no record; `409` if the record is archived.
 ```bash
 curl -s -X POST "$BASE_URL/employees/E1001/documents/resume" \
   -H "$EMPLOYEE_AUTH" -H 'Content-Type: application/json' \
-  -d '{ "filename": "Priya Sharma CV.pdf", "contentType": "application/pdf" }'
+  -d '{ "filename": "Maya Chen CV.pdf", "contentType": "application/pdf" }'
 ```
 
 ```json
 { "slot": "resume",
-  "filename": "Priya Sharma CV.pdf",
+  "filename": "Maya Chen CV.pdf",
   "url": "https://<bucket>.s3.eu-north-1.amazonaws.com/",
   "fields": { "key": "employees/E1001/resume", "Content-Type": "application/pdf",
-              "x-amz-meta-filename": "Priya Sharma CV.pdf", "policy": "…",
+              "x-amz-meta-filename": "Maya Chen CV.pdf", "policy": "…",
               "x-amz-algorithm": "…", "x-amz-credential": "…",
               "x-amz-date": "…", "x-amz-signature": "…" } }
 ```
@@ -493,10 +497,10 @@ Then post the file to `url`:
 curl -s -X POST "<url>" \
   -F key=employees/E1001/resume \
   -F Content-Type=application/pdf \
-  -F x-amz-meta-filename="Priya Sharma CV.pdf" \
+  -F x-amz-meta-filename="Maya Chen CV.pdf" \
   -F policy=… -F x-amz-algorithm=… -F x-amz-credential=… \
   -F x-amz-date=… -F x-amz-signature=… \
-  -F file=@"Priya Sharma CV.pdf"
+  -F file=@"Maya Chen CV.pdf"
 ```
 
 Three rules about that form, each a `403` from S3 if broken:
@@ -854,7 +858,7 @@ curl -s -o /dev/null -w 'own record, lowercase %{http_code}\n' "$BASE_URL/employ
 curl -s -o /dev/null -w 'a colleague           %{http_code}\n' "$BASE_URL/employees/E1002" -H "$AUTH"
 curl -s -o /dev/null -w 'a record that is not  %{http_code}\n' "$BASE_URL/employees/E9999" -H "$AUTH"
 curl -s -o /dev/null -w 'the directory         %{http_code}\n' "$BASE_URL/employees" -H "$AUTH"
-curl -s -o /dev/null -w 'own contact patch     %{http_code}\n' -X PATCH "$BASE_URL/employees/E1001/contact" -H "$AUTH" -H 'Content-Type: application/json' -d '{"phone":"+61 400 111 222","personalEmail":"priya@example.com"}'
+curl -s -o /dev/null -w 'own contact patch     %{http_code}\n' -X PATCH "$BASE_URL/employees/E1001/contact" -H "$AUTH" -H 'Content-Type: application/json' -d '{"phone":"+61 400 111 222","personalEmail":"maya.chen@example.com"}'
 curl -s -o /dev/null -w 'another record patch  %{http_code}\n' -X PATCH "$BASE_URL/employees/E1002/contact" -H "$AUTH" -H 'Content-Type: application/json' -d '{"phone":"+61 400 000 000"}'
 curl -s -o /dev/null -w 'an empty patch        %{http_code}\n' -X PATCH "$BASE_URL/employees/E1001/contact" -H "$AUTH" -H 'Content-Type: application/json' -d '{"department":"HR"}'
 curl -s -o /dev/null -w 'an officials write    %{http_code}\n' -X PUT "$BASE_URL/employees/E1001" -H "$AUTH" -H 'Content-Type: application/json' -d '{"firstName":"Priya","lastName":"Sharma","email":"p@b.com","department":"HR","jobTitle":"X","startDate":"2026-09-01","employmentType":"Intern"}'

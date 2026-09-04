@@ -227,9 +227,11 @@ What it costs:
   attach a second person's history to the first person's id.
 
 The seed fixtures use `E1001`–`E1030`, so a reseed lands the same people on the same ids and a
-hand-written link like `#/onboarding/E1003` survives a table reset.
+hand-written link like `#/onboarding/E1023` survives a table reset.
 
 ## The item
+
+This is an illustrative item shape, not the identity of the current `E1024` seed fixture.
 
 ```
 employeeKey = EMP#<employeeId>
@@ -500,7 +502,7 @@ Measured against the deployed dev table, not estimated:
 | | Before (9 items/employee) | After (1 item/employee) |
 |---|---|---|
 | Per employee | ~1,758 bytes across 9 items | **~1,200 bytes in 1 item** |
-| 6 seeded employees | 54 items / 12,461 bytes | **6 items / ~7,214 bytes** |
+| Historical 6-employee measurement | 54 items / 12,461 bytes | **6 items / ~7,214 bytes** |
 | Fraction of the 400 KB item limit | — | ~0.3%, or ~1.3% with all 8 comments at their 500-char cap |
 
 The 32%-per-employee saving is entirely overhead, not data: eight copies of the partition key
@@ -563,8 +565,8 @@ against the tables themselves.
 
 ## Verified behaviour
 
-`pytest` covers all six handlers against in-memory DynamoDB (moto) — 144 tests. moto emulates the
-API, not IAM, so the checks below were run against the deployed dev stack.
+`pytest` covers the handlers and shared modules against in-memory DynamoDB (moto) — 442 tests.
+moto emulates the API, not IAM, so the checks below were run against the deployed dev stack.
 
 **Schema.** `AttributeDefinitions` and `KeySchema` each contain `employeeKey` alone. No `SK` attribute exists
 on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry `checklist` in
@@ -587,8 +589,9 @@ on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry
 | `PATCH .../contact` on an unknown id | `404`, and **no item created** — `UpdateItem` upserts, so the condition expression is what prevents a half-employee |
 | Second `DELETE` | `200`, keeps the first stamp |
 
-**IAM.** Seeding issues one `POST` and 21 `PATCH`es through the narrowed per-function roles with no
-`AccessDenied` — the thing moto cannot tell you.
+**IAM.** A full 30-person seed issues 30 create `POST`s, 192 checklist `PATCH`es, 30
+promotion/manager-link `POST`s, 20 lifecycle `DELETE`s, and three verification `GET`s through the
+narrowed per-function roles with no `AccessDenied` — the thing moto cannot tell you.
 
 One closing note for reviewers: `describe-table` now says almost nothing about this design. The
 embedded `checklist` is invisible to it, where previously the shape could at least be inferred from

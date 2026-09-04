@@ -25,8 +25,9 @@ reassign" below.
 
 ## Promote, undo and reassign
 
-Three sequences worth walking through by hand, on top of the seeded data (E1001 and E1005 are
-already promoted managers with interns reporting to them; E1002-E1004 are left mid-onboarding).
+Three sequences worth walking through by hand, on top of the seeded data. `E1001`-`E1010` are
+promoted managers with one intern each (`E1011`-`E1020`), while `E1021`-`E1030` remain in
+onboarding with varied checklist progress.
 
 **Promote a non-intern.** Create a new hire, tick all 8 checklist items, open their checklist and
 click "Move to main employee dashboard". Confirm: they disappear from `#/onboarding` and appear on
@@ -65,8 +66,8 @@ employee *records*. The enums, the status names and the progress arithmetic all 
 `common/models.py` now. In the browser console: `App.seedEmployees` and `App.DEPARTMENTS` → both
 `undefined`.
 
-Now set Network to **Offline** and reload. The list must be **empty with an error banner**. If six
-people appear, something is still reading from local state and the phase isn't done.
+Now set Network to **Offline** and reload. The list must be **empty with an error banner**. If any
+seeded people appear, something is still reading from local state and the phase isn't done.
 
 ## Roles and the guard
 
@@ -143,7 +144,7 @@ Each step feeds the next, so run them in order.
 
 | # | Do this | Expect |
 |---|---|---|
-| 1 | Load `#/onboarding` | one `GET /employees` → 200, three rows - only the people still mid-onboarding; the promoted ones are on `#/tracking`/`#/interns` now. No `OPTIONS` preflight — a plain GET with no custom headers shouldn't trigger one |
+| 1 | Load `#/onboarding` | one `GET /employees` → 200, ten rows (`E1021`-`E1030`) - only the people still mid-onboarding; the promoted ones are on `#/tracking`/`#/interns` now. No `OPTIONS` preflight — a plain GET with no custom headers shouldn't trigger one |
 | 2 | Type in search, change both filters | **zero** new requests. Filtering is client-side |
 | 3 | Add Employee → submit blank | one `GET /employees` on open (the dropdowns are built from it), then **zero** requests on submit; client validation short-circuits |
 | 3b | Check both dropdowns on that form | Departments and employment types are the ones the seeded onboarding records carry, alphabetical. Nothing hardcoded produced them |
@@ -166,13 +167,13 @@ Each step feeds the next, so run them in order.
 | 8c | Re-add someone on the archived employee's work email | `201` — nothing reserves the address any more. You now have two records on one mailbox, which is the accepted cost of dropping the guard item |
 | 8d | Re-add someone on the archived employee's **employee number** | `409`. The item is still in the table, so the number is still taken — the opposite of 8c, and the difference is exactly what the partition key can and cannot enforce |
 | 9 | Hand-type `#/onboarding/emp-999/edit` | "Not found" view, **not** a banner — a stale bookmark isn't an error |
-| 10 | Deep-link `#/onboarding/E1003/checklist` in a fresh tab | loads directly. Employee numbers are typeable, so this is now a link someone can write by hand |
+| 10 | Deep-link `#/onboarding/E1023/checklist` in a fresh tab | loads directly. Employee numbers are typeable, so this is now a link someone can write by hand |
 | 11 | Add someone using an employee number that already exists | `409`, and the message lands **under the Employee ID input**, not in the page banner. Nothing is created, and the existing record keeps its checklist |
 | 11a | Add someone with `e1024` while `E1024` exists | also `409` — ids are upper-cased before the write, so case cannot smuggle in a second record for one person |
 | 11b | Add someone with `E 1024` or a 30-character id | `400` under the same input, before anything is written |
 | 11c | Open an existing employee's edit form | the Employee ID box is filled, greyed and read-only, with "An employee ID cannot be changed once the record exists." under it. Saving leaves the id alone |
-| 11d | Hand-type `#/onboarding/e1001/checklist` in the wrong case | loads. The path id is folded before the lookup, on every route |
-| 11e | Search the list for `E1003` | the row appears. The id column is searchable alongside name and email |
+| 11d | Hand-type `#/onboarding/e1021/checklist` in the wrong case | loads. The path id is folded before the lookup, on every route |
+| 11e | Search the list for `E1023` | the row appears. The id column is searchable alongside name and email |
 
 ## Failure drills
 
@@ -190,7 +191,7 @@ The part Phase 1 had no answer for. Each one is forceable in seconds.
 | Over-long comment | console: `App.store.setChecklistComment(id, 'laptop', 'x'.repeat(600))` | `400` with `fields.comment`. In the UI the message lands **under the box**, not in the banner, and the draft is kept |
 | Failed delete | Offline, delete a row | banner; the row is still there and the page still works |
 | Stale delete | delete a row in one tab, then delete the same row in a second tab | 200 both times — archiving is idempotent and the second call keeps the first stamp |
-| Duplicate email | add a new employee using a seeded person's address | `409` under the email input; nothing is created — the list count is unchanged |
+| Duplicate email | add a new employee using a seeded person's address | `201`; work email uniqueness is deliberately not enforced, so the new row shares the address |
 | Impossible date | console: `App.store.createEmployee({...VALID, startDate:'2026-02-30'})` | rejects with `status: 400` and `fields.startDate` |
 | Empty table | `py scripts/seed_employees.py --wipe`, then open Add Employee | department and employment type render as **text inputs**, not empty dropdowns. Typing `Engineering` / `Full-time` creates the first hire; typing `Marketing` comes back as a `400` under the input |
 
@@ -201,7 +202,7 @@ Tab only — no mouse — from a fresh load of `#/onboarding`.
 | # | Do this | Expect |
 |---|---|---|
 | 1 | Load any view | Focus is on the view's `<h1>`, and the tab title names the route. The first Tab lands inside the new content, not back at the browser chrome |
-| 2 | Tab through the list | Every row action announces the person: "Edit Priya Sharma", not "Edit". The actions column has a name |
+| 2 | Tab through the list | Every row action announces the person: "Edit Sophie King", not "Edit". The actions column has a name |
 | 3 | Type in search | The record count is announced as it changes, without cutting off what is being read |
 | 4 | Open a checklist, tick a box with Space | Focus stays **on that checkbox** after the repaint, so the next Space ticks the next item. The live region reads "Laptop issued ticked. 6 of 8 complete. In Progress." |
 | 5 | Go offline, tick a box | The box snaps back, focus is **still on it** (disabling a focused element normally dumps you on `<body>`), and the live region says it was left as it was |

@@ -441,8 +441,8 @@ instance of it.
 | Misreported `409` | Every cancelled transaction claimed "that employee id already exists". Fixed by reading `CancellationReasons`; moot now that nothing transacts |
 
 **Frontend:** run in a real browser (headless Chrome against `py -m http.server 8000`) and verified
-against the live API. Re-run after the enums were removed: all six rows render, the department and
-employment-type dropdowns build themselves from the loaded records, and the status filter orders
+against the live API. With the current 30-person seed, all ten onboarding rows render, the department
+and employment-type dropdowns build themselves from the loaded records, and the status filter orders
 itself Pending → In Progress → Onboarded. Against a stub API returning zero employees, the form
 degrades to text inputs rather than to empty dropdowns nobody can submit.
 
@@ -457,9 +457,9 @@ including the ones easy to get wrong:
   `employeeId` is sent on create only, because that is the one moment it can be set
 - the client's `computeStatus` / `progress` agree with the server's on the same record
 
-Rendering was verified from the returned DOM: six rows with employee numbers `E1001`–`E1006`, all
-three status badges, progress bars at 100/63/75/25/0/0%, and a deep-link straight to
-`#/onboarding/E1003/checklist` resolving correctly. The ids are readable and typeable now, which
+The current seed's expected DOM has ten rows with employee numbers `E1021`–`E1030`, Pending and In
+Progress badges, varied progress from 0/8 through 7/8, and a deep-link straight to
+`#/onboarding/E1023/checklist` resolving correctly. The ids are readable and typeable now, which
 is a smaller router test than the UUID one it replaces and a much better one for a person
 holding a payroll export.
 

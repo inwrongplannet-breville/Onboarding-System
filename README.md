@@ -47,7 +47,7 @@ copy of everyone.
 
 ```bash
 py -m pip install -r requirements-dev.txt
-py -m pytest                    # 436 tests, ~60 seconds
+py -m pytest                    # 442 tests, ~60 seconds
 ```
 
 No AWS account or credentials needed — the handler tests run against an in-memory DynamoDB.

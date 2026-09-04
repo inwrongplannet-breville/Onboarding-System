@@ -92,6 +92,11 @@ Route semantics that are easy to confuse:
 
 ## Data model invariants
 
+The deterministic dev seed contains 30 synthetic people: promoted employees `E1001`-`E1010`,
+promoted interns `E1011`-`E1020` (one per manager), and active onboarding records
+`E1021`-`E1030` with varied progress. Keep seed-dependent docs, tests, and artifact examples aligned
+with `scripts/seed_employees.py`; generic contract examples do not have to represent a live fixture.
+
 ### `OnboardingTable`
 
 - Holds people whose onboarding is unfinished.

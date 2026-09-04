@@ -20,6 +20,11 @@ The login form is prefilled with the real demo credentials already documented in
 
 The artifact intentionally does not use the Postman collection as its source of truth.
 
+Its displayed examples follow the deterministic dev seed: `E1001` (Maya Chen) is a promoted
+employee, `E1011` (Chloe Davis) is her promoted intern, and `E1021` (Sophie King) is still
+onboarding. Create examples start at the next unused fixture number, `E1031`, so read and update
+examples do not imply that a promoted employee can be edited through the onboarding-only `PUT`.
+
 ## Complete function map
 
 The **Every function, in call order** section documents 27 application flows, including screen loads, create/edit/archive actions, checklist updates, promotion and undo sequences, manager reassignment, employee self-service, uploads, downloads, and local-only actions. Parallel and optional requests are marked explicitly, and direct S3 traffic is distinguished from API Gateway traffic.
