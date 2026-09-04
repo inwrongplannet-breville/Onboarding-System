@@ -17,7 +17,7 @@ Parameters:
     Description: Deployment stage. Names the API Gateway stage.
   AllowedOrigin:
     Type: String
-    Default: http://localhost:8000
+    Default: http://localhost:8001
     Description: >
       The one browser origin allowed to call this API. Was '*', which let any
       page on the internet POST to /login and read the token back - a free

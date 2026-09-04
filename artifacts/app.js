@@ -277,7 +277,7 @@
         request: visibleRequest,
         response: {
           error: error.message,
-          hint: "Serve this folder at http://localhost:8000. The deployed CORS policy allows that exact origin."
+          hint: "Serve this folder at http://localhost:8001. The deployed CORS policy must allow that exact origin."
         }
       });
       timing.textContent = `Network error · ${elapsed} ms`;
@@ -308,7 +308,7 @@
       const state = $("#auth-state");
       state.className = "status-pill error";
       state.textContent = "Connection failed";
-      toast(error.message + (location.origin !== "http://localhost:8000" ? " · Use http://localhost:8000" : ""));
+      toast(error.message + (location.origin !== "http://localhost:8001" ? " · Use http://localhost:8001" : ""));
     } finally {
       button.disabled = false;
       button.querySelector("span").textContent = "Connect to AWS";

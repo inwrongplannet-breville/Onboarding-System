@@ -5,10 +5,10 @@ This artifact documents all 21 API methods declared by `template.yaml` and can s
 From the repository root, serve it on the origin allowed by the stack:
 
 ```powershell
-py -m http.server 8000 --directory artifacts
+py -m http.server 8001 --directory artifacts
 ```
 
-Then open <http://localhost:8000>. Do not open `index.html` directly and do not use `127.0.0.1`; the API and S3 CORS policies allow `http://localhost:8000` exactly.
+Then open <http://localhost:8001>. Do not open `index.html` directly and do not use `127.0.0.1`; the API and S3 CORS policies must allow `http://localhost:8001` exactly.
 
 The login form is prefilled with the real demo credentials already documented in this repository. Tokens are stored in `sessionStorage` and never written into these files. Requests that mutate live AWS data require an extra confirmation in the endpoint console.
 
