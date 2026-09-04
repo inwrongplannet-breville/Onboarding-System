@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive reference for the deployed Employee Onboarding API">
+  <title>Onboard API · Live reference</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#top" aria-label="Onboard API home">
+        <span class="brand-mark">O</span>
+        <span><strong>Onboard</strong><small>API reference</small></span>
+      </a>
+
+      <label class="search">
+        <span aria-hidden="true">⌕</span>
+        <input id="search" type="search" placeholder="Find an endpoint" autocomplete="off">
+        <kbd>/</kbd>
+      </label>
+
+      <nav id="endpoint-nav" aria-label="API endpoints"></nav>
+
+      <div class="sidebar-foot">
+        <span class="live-dot"></span>
+        <span>Deployed AWS · <strong>dev</strong></span>
+      </div>
+    </aside>
+
+    <main id="top">
+      <header class="hero">
+        <div class="eyebrow">EMPLOYEE MANAGEMENT &amp; ONBOARDING</div>
+        <h1>The API, without the guesswork.</h1>
+        <p class="hero-copy">Every deployed route, its authorization boundary, the Lambda/DynamoDB execution path, and a live request console against the AWS <code>dev</code> stage.</p>
+
+        <div class="environment-card">
+          <div>
+            <span class="field-label">BASE URL</span>
+            <code id="base-url">https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev</code>
+          </div>
+          <button class="copy-button" id="copy-base" type="button">Copy</button>
+          <span class="verified"><i></i> 21 / 21 routes live-checked</span>
+        </div>
+
+        <div class="stats" aria-label="API summary">
+          <div><strong>21</strong><span>Endpoints</span></div>
+          <div><strong>6</strong><span>Resources</span></div>
+          <div><strong>2</strong><span>Roles</span></div>
+          <div><strong>8h</strong><span>Token life</span></div>
+        </div>
+
+        <div class="dashboard-switch" role="group" aria-label="Documentation dashboard">
+          <button class="dashboard-button active" data-dashboard="api" type="button"><span>API endpoints</span><small>Main dashboard</small></button>
+          <button class="dashboard-button" data-dashboard="functions" type="button"><span>Functions dashboard</span><small>27 flows →</small></button>
+        </div>
+      </header>
+
+      <section class="section" id="authenticate">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">01 · CONNECT</span>
+            <h2>Authenticate once. Explore everything.</h2>
+          </div>
+          <span id="auth-state" class="status-pill neutral">Not connected</span>
+        </div>
+
+        <div class="auth-card">
+          <div class="auth-copy">
+            <h3>Demo credentials</h3>
+            <p>These are the deployed development credentials documented by this repository. A successful login is held only in this tab's <code>sessionStorage</code>.</p>
+            <div class="role-switch" role="tablist" aria-label="Credential role">
+              <button class="role-button active" data-role="official" type="button">Official</button>
+              <button class="role-button" data-role="employee" type="button">Employee</button>
+            </div>
+          </div>
+          <form id="login-form" class="auth-form">
+            <label><span>Username</span><input id="login-username" name="username" value="hr.admin" autocomplete="username"></label>
+            <label><span>Password</span><input id="login-password" name="password" type="password" value="onboard-2026" autocomplete="current-password"></label>
+            <button class="primary-button" id="login-button" type="submit"><span>Connect to AWS</span><b aria-hidden="true">→</b></button>
+            <p class="microcopy">Only sends credentials to the base URL shown above. This is a public demo stack—do not enter production credentials.</p>
+          </form>
+        </div>
+      </section>
+
+      <section class="section" id="architecture">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">02 · ORIENTATION</span>
+            <h2>What happens after Send</h2>
+          </div>
+        </div>
+        <div class="flow-map" aria-label="API execution architecture">
+          <div class="flow-node"><span>1</span><strong>Browser</strong><small>JSON + bearer token</small></div>
+          <i>→</i>
+          <div class="flow-node"><span>2</span><strong>API Gateway</strong><small>CORS, throttle, routing</small></div>
+          <i>→</i>
+          <div class="flow-node accent"><span>3</span><strong>Authorizer</strong><small>JWT signature + role</small></div>
+          <i>→</i>
+          <div class="flow-node"><span>4</span><strong>Route Lambda</strong><small>validation + policy</small></div>
+          <i>→</i>
+          <div class="flow-node split"><span>5</span><strong>DynamoDB / S3</strong><small>least-privilege access</small></div>
+        </div>
+        <div class="callouts">
+          <p><strong>Public exception.</strong> <code>POST /login</code> skips the authorizer and reads Secrets Manager only. It has no DynamoDB permission.</p>
+          <p><strong>Browser origin.</strong> AWS must allow <code>http://localhost:8001</code>. Serve this folder there; opening the HTML as a file will not pass CORS.</p>
+        </div>
+      </section>
+
+      <section class="section" id="workflows">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">01 · WORKFLOWS</span>
+            <h2>Multi-endpoint operations</h2>
+          </div>
+        </div>
+        <div class="workflow-grid">
+          <article class="workflow-card">
+            <span class="workflow-number">A</span><h3>Promote employee</h3>
+            <ol><li><code>POST /staff/employees</code><span>Copy completed record</span></li><li><code>DELETE /onboarding/{id}</code><span>Remove old copy, only after step 1</span></li></ol>
+          </article>
+          <article class="workflow-card">
+            <span class="workflow-number">B</span><h3>Promote intern</h3>
+            <ol><li><code>POST /staff/interns</code><span>Copy + set manager</span></li><li><code>POST /staff/employees/{id}/interns</code><span>Add manager link</span></li><li><code>DELETE /onboarding/{id}</code><span>Remove old copy last</span></li></ol>
+          </article>
+          <article class="workflow-card">
+            <span class="workflow-number">C</span><h3>Reassign intern</h3>
+            <ol><li><code>PUT /staff/interns/{id}/manager</code><span>Set new manager</span></li><li><code>POST /staff/employees/{id}/interns</code><span>Add new link</span></li><li><code>DELETE /staff/employees/{id}/interns/{internId}</code><span>Remove old link last</span></li></ol>
+          </article>
+          <article class="workflow-card">
+            <span class="workflow-number">D</span><h3>Undo promotion</h3>
+            <ol><li><code>POST /onboarding/restore</code><span>Restore durable copy first</span></li><li><code>DELETE /staff/.../{id}</code><span>Remove staff copy within 7 days</span></li></ol>
+          </article>
+        </div>
+      </section>
+
+      <section class="section function-map-section" id="function-sequences">
+        <div class="section-heading function-map-heading">
+          <div>
+            <span class="kicker">02 · COMPLETE FUNCTION MAP</span>
+            <h2>Every function, in call order.</h2>
+            <p class="section-intro">A read-only map of what the application triggers for each user action. Side-by-side calls run in parallel; faded calls are conditional; S3 calls bypass API Gateway.</p>
+          </div>
+          <div class="function-counts" aria-label="Function map totals">
+            <span><strong id="flow-count">0</strong> application flows</span>
+            <span><strong id="store-count">0</strong> store functions</span>
+          </div>
+        </div>
+        <div class="sequence-legend" aria-label="Sequence legend">
+          <span><i class="legend-line"></i> then</span>
+          <span><i class="legend-parallel"></i> parallel</span>
+          <span><i class="legend-optional"></i> optional</span>
+          <span><i class="legend-external"></i> direct AWS service</span>
+        </div>
+        <div id="function-map"></div>
+
+        <div class="primitive-heading">
+          <div><span class="kicker">LOW-LEVEL COVERAGE</span><h3>All store functions</h3></div>
+          <p>The small primitives are listed last, including the helpers composed by promotion, undo, manager reassignment, checklist updates, and direct S3 upload.</p>
+        </div>
+        <div id="store-function-index" class="store-function-index"></div>
+      </section>
+
+      <section class="section endpoint-section" id="reference">
+        <div class="section-heading">
+          <div>
+            <span class="kicker">03 · REFERENCE</span>
+            <h2>Endpoints</h2>
+          </div>
+          <span id="result-count" class="result-count">21 routes</span>
+        </div>
+        <div id="endpoint-list"></div>
+        <div id="empty-state" class="empty-state" hidden>No endpoints match that search.</div>
+      </section>
+
+      <section class="section" id="models">
+        <div class="section-heading"><div><span class="kicker">04 · SHAPES</span><h2>Core response models</h2></div></div>
+        <div class="model-tabs" role="tablist">
+          <button type="button" class="model-tab active" data-model="employee">Employee</button>
+          <button type="button" class="model-tab" data-model="error">Error</button>
+          <button type="button" class="model-tab" data-model="document">Document slot</button>
+        </div>
+        <pre id="model-code" class="code-panel"></pre>
+      </section>
+
+      <footer>
+        <span>Onboard API · dev</span>
+        <span>Contract: <code>template.yaml</code> + handlers · Routes live-checked 04 Sep 2026</span>
+      </footer>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="api-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

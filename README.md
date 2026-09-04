@@ -12,10 +12,10 @@ Made by Abhishek.
 ## Run the UI
 
 ```bash
-py -m http.server 8000
+py -m http.server 8001
 ```
 
-Then open **http://localhost:8000**.
+Then open **http://localhost:8001**.
 
 No install and no build step — but **don't double-click `index.html`**. A `file://` page has an
 opaque origin and sends `Origin: null` on every request, which browsers treat inconsistently; a
@@ -142,8 +142,8 @@ and its first read is a 404, which the UI renders as "we cannot find your record
 > password reads any record, one number at a time. Real per-employee credentials are a Cognito user
 > pool, which is [design.md](docs/design.md)'s note and not a small edit.
 
-**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8000`, matching
-`py -m http.server 8000`. Serving the UI from anywhere else means passing it:
+**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8001`, matching
+`py -m http.server 8001`. Serving the UI from anywhere else means passing it:
 
 ```bash
 sam deploy --parameter-overrides AllowedOrigin=https://onboarding.internal.example.com
