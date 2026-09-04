@@ -19,6 +19,7 @@ ONBOARDING_TABLE_NAME = 'onboarding-test'
 # Holds employees AND interns, told apart by entityType - see the merge note
 # in template.yaml's EmployeeTable resource.
 EMPLOYEE_TABLE_NAME = 'employee-test'
+ATTENDANCE_TABLE_NAME = 'attendance-test'
 
 # The document store. Same shape of decision as the table names above: common/documents
 # builds its S3 client at module scope, so this has to exist before any handler
@@ -29,6 +30,7 @@ BUCKET_NAME = 'onboarding-test-documents'
 # time, and fake credentials keep botocore from picking up a real profile.
 os.environ.setdefault('ONBOARDING_TABLE_NAME', ONBOARDING_TABLE_NAME)
 os.environ.setdefault('EMPLOYEE_TABLE_NAME', EMPLOYEE_TABLE_NAME)
+os.environ.setdefault('ATTENDANCE_TABLE_NAME', ATTENDANCE_TABLE_NAME)
 os.environ.setdefault('BUCKET_NAME', BUCKET_NAME)
 os.environ.setdefault('AWS_DEFAULT_REGION', 'ap-southeast-2')
 os.environ.setdefault('AWS_ACCESS_KEY_ID', 'testing')
@@ -102,14 +104,19 @@ HANDLER_MODULES = (
     'handlers.delete_staff_intern',
     'handlers.list_staff_employees',
     'handlers.list_interns',
+    'handlers.upsert_own_attendance',
+    'handlers.get_own_attendance',
+    'handlers.get_attendance_sheet',
+    'handlers.download_attendance_csv',
+    'handlers.update_employee_attendance',
 )
 
 
 @pytest.fixture
 def handlers():
     """
-    Fresh tables (two, not three - EmployeeTable holds employees and interns
-    both) plus freshly imported handlers, per test.
+    Fresh onboarding, staff and attendance tables plus freshly imported
+    handlers, per test. EmployeeTable still holds employees and interns both.
 
     The reimport matters: common/db.py caches its boto3 clients at module scope
     (deliberately - that is how a warm Lambda reuses connections), so those
@@ -166,6 +173,31 @@ def handlers():
             ],
         )
 
+        boto3.client('dynamodb').create_table(
+            TableName=ATTENDANCE_TABLE_NAME,
+            BillingMode='PAY_PER_REQUEST',
+            AttributeDefinitions=[
+                {'AttributeName': 'employeeKey', 'AttributeType': 'S'},
+                {'AttributeName': 'attendanceDate', 'AttributeType': 'S'},
+                {'AttributeName': 'attendanceMonth', 'AttributeType': 'S'},
+                {'AttributeName': 'dateEmployeeKey', 'AttributeType': 'S'},
+            ],
+            KeySchema=[
+                {'AttributeName': 'employeeKey', 'KeyType': 'HASH'},
+                {'AttributeName': 'attendanceDate', 'KeyType': 'RANGE'},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    'IndexName': 'AttendanceByMonth',
+                    'KeySchema': [
+                        {'AttributeName': 'attendanceMonth', 'KeyType': 'HASH'},
+                        {'AttributeName': 'dateEmployeeKey', 'KeyType': 'RANGE'},
+                    ],
+                    'Projection': {'ProjectionType': 'ALL'},
+                },
+            ],
+        )
+
         boto3.client('s3').create_bucket(
             Bucket=BUCKET_NAME,
             # Required in every region but us-east-1, and this file sets
@@ -176,7 +208,12 @@ def handlers():
             },
         )
 
-        for name in ('common.db', 'common.documents') + HANDLER_MODULES:
+        shared_modules = (
+            'common.db',
+            'common.documents',
+            'common.attendance_repository',
+        )
+        for name in shared_modules + HANDLER_MODULES:
             sys.modules.pop(name, None)
 
         loaded = {}
@@ -186,5 +223,5 @@ def handlers():
 
         yield loaded
 
-        for name in ('common.db', 'common.documents') + HANDLER_MODULES:
+        for name in shared_modules + HANDLER_MODULES:
             sys.modules.pop(name, None)

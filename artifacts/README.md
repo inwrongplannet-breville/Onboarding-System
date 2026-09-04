@@ -1,6 +1,6 @@
 # Interactive API reference
 
-This artifact documents all 21 API methods declared by `template.yaml` and can send requests to the deployed AWS `dev` stage.
+This artifact documents all 26 API methods declared by `template.yaml` and can send requests to the deployed AWS `dev` stage.
 
 From the repository root, serve it on the origin allowed by the stack:
 
@@ -29,10 +29,10 @@ examples do not imply that a promoted employee can be edited through the onboard
 
 The **Every function, in call order** section documents 27 application flows, including screen loads, create/edit/archive actions, checklist updates, promotion and undo sequences, manager reassignment, employee self-service, uploads, downloads, and local-only actions. Parallel and optional requests are marked explicitly, and direct S3 traffic is distinguished from API Gateway traffic.
 
-The low-level index at the end of that section maps all 28 functions exported by `App.store` to their endpoint or composed sequence. All 21 API routes appear in at least one flow.
+The low-level index at the end of that section maps all 33 functions exported by `App.store` to their endpoint or composed sequence. All 26 API routes appear in at least one flow.
 
 The API endpoint reference is the default dashboard. Use the **Functions dashboard** button in the header to show the function map on its own; switching dashboards hides the other view so the page stays focused.
 
 ## Live verification
 
-On 4 September 2026, all 21 method/path pairs were probed at the base URL without credentials. `POST /login` reached its Lambda and returned its expected validation response; all 20 protected methods reached the Lambda authorizer and returned `401`. This distinguishes each deployed method from API Gateway's missing-route behavior without reading or changing employee data.
+On 4 September 2026, the pre-attendance set of 21 method/path pairs was probed at the base URL without credentials. `POST /login` reached its Lambda and returned its expected validation response; all 20 protected methods reached the Lambda authorizer and returned `401`. This is a dated deployment record; the five attendance routes require a fresh probe after deployment.

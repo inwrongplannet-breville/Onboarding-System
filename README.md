@@ -25,7 +25,7 @@ Everything you see comes from DynamoDB. Add someone, refresh, and they're still 
 
 ## Reset the data
 
-Wipes both tables and repopulates them with 30 synthetic people: 10 promoted employees, 10 promoted
+Wipes all three tables and repopulates the profile tables with 30 synthetic people: 10 promoted employees, 10 promoted
 interns reporting to them, and 10 left mid-onboarding at varied progress. See
 [docs/database-design.md#promotion](docs/database-design.md#promotion) for what "promoted" means
 here.
@@ -97,7 +97,7 @@ is a required second step after the *first* deploy only; redeploying afterwards 
 |---|---|
 | API | `https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev` — the `ApiBaseUrl` output |
 | Stack | `onboarding-system-dev`, `eu-north-1` |
-| Tables | two now, not one — the `OnboardingTableName` and `EmployeeTableName` outputs. `EmployeeTable` holds employees and interns side by side, told apart by `entityType`. CloudFormation names each, because `template.yaml` deliberately sets no `TableName` on either — an explicit one makes a key-schema change undeployable. See [docs/database-design.md#two-tables-not-one](docs/database-design.md#two-tables-not-one) |
+| Tables | Template outputs `OnboardingTableName`, `EmployeeTableName`, and `AttendanceTableName` (the attendance output appears after deploying this build). `EmployeeTable` holds employees and interns side by side; `AttendanceTable` holds one declaration per employee/date. See [docs/database-design.md](docs/database-design.md) |
 | Documents | the `DocumentsBucketName` output, same reasoning. **Empty it before `sam delete`** |
 
 ### Signing in

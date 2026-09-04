@@ -581,6 +581,115 @@ window.App = window.App || {};
       '</div>';
   }
 
+  var ATTENDANCE_STATUSES = [
+    { value: 'present', label: 'Present', short: 'P' },
+    { value: 'work_from_home', label: 'Work from home', short: 'WFH' },
+    { value: 'leave', label: 'Leave', short: 'L' },
+    { value: 'absent', label: 'Absent', short: 'A' }
+  ];
+
+  function uniqueAttendanceValues(values) {
+    var seen = {};
+    return values.filter(function (value) {
+      if (!value || seen[value]) return false;
+      seen[value] = true;
+      return true;
+    });
+  }
+
+  function attendanceLabel(status) {
+    var match = ATTENDANCE_STATUSES.filter(function (entry) {
+      return entry.value === status;
+    })[0];
+    return match ? match.label : 'Upcoming';
+  }
+
+  function attendanceOptions(selected, includeBlank) {
+    var html = includeBlank ? '<option value="">Upcoming</option>' : '';
+    return html + ATTENDANCE_STATUSES.map(function (entry) {
+      return '<option value="' + entry.value + '"' +
+        (entry.value === selected ? ' selected' : '') + '>' +
+        entry.label + '</option>';
+    }).join('');
+  }
+
+  function ownAttendanceSection(payload, frozen) {
+    if (!payload || !payload.employee) {
+      return '' +
+        '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
+          '<h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
+          '<p class="view-note">Attendance could not be loaded right now.</p>' +
+        '</section>';
+    }
+
+    var employee = payload.employee;
+    var today = payload.window.today;
+    var todayEntry = employee.days.filter(function (day) { return day.date === today; })[0] || {};
+    var canEdit = payload.window.isOpen && !frozen;
+    var selected = todayEntry.status || 'present';
+    var history = employee.days.filter(function (day) {
+      return day.status !== null && day.date <= today;
+    }).reverse();
+
+    var form = canEdit
+      ? '<form id="attendance-form" class="attendance-form">' +
+          '<div class="field">' +
+            '<label for="attendance-status">Today&rsquo;s status</label>' +
+            '<select id="attendance-status" name="status">' +
+              attendanceOptions(selected, false) +
+            '</select>' +
+          '</div>' +
+          '<div class="field attendance-note-field">' +
+            '<label for="attendance-note">Note <span class="optional">optional</span></label>' +
+            '<input id="attendance-note" name="note" maxlength="300" value="' +
+              escapeHtml(todayEntry.note || '') + '">' +
+          '</div>' +
+          '<button class="btn btn-primary" type="submit">' +
+            (todayEntry.stored ? 'Update attendance' : 'Mark attendance') +
+          '</button>' +
+        '</form>'
+      : '<p class="attendance-locked">' + (frozen
+          ? 'This archived record cannot mark attendance.'
+          : 'Attendance changes are available daily from 8:30 AM to 6:00 PM Asia/Kolkata.') +
+        '</p>';
+
+    var historyRows = history.length
+      ? history.map(function (day) {
+          return '<tr>' +
+            '<th scope="row">' + escapeHtml(formatDate(day.date)) + '</th>' +
+            '<td><span class="attendance-status status-' + escapeHtml(day.status) + '">' +
+              escapeHtml(attendanceLabel(day.status)) + '</span></td>' +
+            '<td>' + escapeHtml(day.note || '-') + '</td>' +
+          '</tr>';
+        }).join('')
+      : '<tr><td colspan="3" class="table-empty">No attendance dates yet.</td></tr>';
+
+    return '' +
+      '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
+        '<div class="attendance-heading-row">' +
+          '<div><h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
+            '<p>Mark once and update any time between 8:30 AM and 6:00 PM.</p></div>' +
+          '<span class="attendance-status status-' + escapeHtml(todayEntry.status || 'upcoming') + '">' +
+            escapeHtml(attendanceLabel(todayEntry.status)) + '</span>' +
+        '</div>' +
+        form +
+        '<div class="attendance-totals" aria-label="Monthly attendance totals">' +
+          '<span><strong>' + employee.totals.present + '</strong> Present</span>' +
+          '<span><strong>' + employee.totals.work_from_home + '</strong> WFH</span>' +
+          '<span><strong>' + employee.totals.leave + '</strong> Leave</span>' +
+          '<span><strong>' + employee.totals.absent + '</strong> Absent</span>' +
+        '</div>' +
+        '<details class="attendance-history">' +
+          '<summary>View ' + escapeHtml(payload.month) + ' history</summary>' +
+          '<div class="attendance-history-scroll"><table>' +
+            '<thead><tr><th scope="col">Date</th><th scope="col">Status</th>' +
+              '<th scope="col">Note</th></tr></thead>' +
+            '<tbody>' + historyRows + '</tbody>' +
+          '</table></div>' +
+        '</details>' +
+      '</section>';
+  }
+
   App.ui = {
     escapeHtml: escapeHtml,
     fullName: fullName,
@@ -589,7 +698,7 @@ window.App = window.App || {};
     documentsSection: documentsSection,
 
     /**
-     * The HR landing page. Three cards, one per dashboard, each backed by its
+     * The HR landing page. One card per operational dashboard.
      * own DynamoDB table now - Onboarding (people not yet finished),
      * Employee Tracking (promoted, non-intern staff) and Interns (promoted
      * interns, each linked to a reporting manager). No "coming soon" chips
@@ -623,7 +732,104 @@ window.App = window.App || {};
               '<p>Onboarded employees.</p>' +
             '</a>' +
           '</li>' +
+          '<li>' +
+            '<a class="dash-card" href="#/attendance">' +
+              '<h2>Attendance</h2>' +
+              '<p>Monthly register, corrections and CSV download.</p>' +
+            '</a>' +
+          '</li>' +
         '</ul>';
+    },
+
+    attendanceSheetView: function (sheet) {
+      var departments = uniqueAttendanceValues(sheet.employees.map(function (employee) {
+        return employee.department;
+      })).sort();
+      var roles = uniqueAttendanceValues(sheet.employees.map(function (employee) {
+        return employee.employeeRole;
+      })).sort();
+
+      function filterOptions(values) {
+        return '<option value="">All</option>' + values.map(function (value) {
+          return '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
+        }).join('');
+      }
+
+      var dayHeaders = sheet.days.map(function (day) {
+        return '<th scope="col" class="attendance-day-heading" title="' +
+          escapeHtml(formatDate(day)) + '">' + escapeHtml(String(Number(day.slice(8)))) + '</th>';
+      }).join('');
+
+      var rows = sheet.employees.map(function (employee) {
+        var dayCells = employee.days.map(function (day) {
+          var status = day.status || '';
+          return '<td class="attendance-cell status-' + escapeHtml(status || 'upcoming') + '">' +
+            '<label class="sr-only" for="attendance-' + escapeHtml(employee.employeeId) + '-' +
+              escapeHtml(day.date) + '">' + escapeHtml(employee.employeeName + ', ' + day.date) +
+            '</label>' +
+            '<select id="attendance-' + escapeHtml(employee.employeeId) + '-' +
+              escapeHtml(day.date) + '" data-action="edit-attendance" data-employee-id="' +
+              escapeHtml(employee.employeeId) + '" data-date="' + escapeHtml(day.date) +
+              '" aria-label="' + escapeHtml(employee.employeeName + ', ' + day.date) + '">' +
+              attendanceOptions(status, !status) +
+            '</select>' +
+          '</td>';
+        }).join('');
+
+        return '<tr data-attendance-row data-search="' +
+          escapeHtml((employee.employeeId + ' ' + employee.employeeName).toLowerCase()) +
+          '" data-department="' + escapeHtml(employee.department) +
+          '" data-role="' + escapeHtml(employee.employeeRole) + '">' +
+          '<th scope="row" class="attendance-id">' + escapeHtml(employee.employeeId) + '</th>' +
+          '<td class="attendance-name">' + escapeHtml(employee.employeeName) + '</td>' +
+          '<td class="attendance-role">' + escapeHtml(employee.employeeRole || '-') + '</td>' +
+          '<td class="attendance-department">' + escapeHtml(employee.department || '-') + '</td>' +
+          dayCells +
+          '<td class="attendance-total">' + employee.totals.present + '</td>' +
+          '<td class="attendance-total">' + employee.totals.work_from_home + '</td>' +
+          '<td class="attendance-total">' + employee.totals.leave + '</td>' +
+          '<td class="attendance-total">' + employee.totals.absent + '</td>' +
+        '</tr>';
+      }).join('');
+
+      return '' +
+        '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+        '<div class="page-head attendance-page-head">' +
+          '<div><h1 tabindex="-1">Attendance</h1>' +
+            '<p class="subtitle"><span id="attendance-visible-count">' + sheet.count + '</span> ' +
+              'employees &middot; Asia/Kolkata</p></div>' +
+          '<button class="btn" type="button" id="attendance-download">Download CSV</button>' +
+        '</div>' +
+        '<div class="attendance-filters" aria-label="Attendance filters">' +
+          '<div class="field"><label for="attendance-month">Month</label>' +
+            '<input type="month" id="attendance-month" value="' + escapeHtml(sheet.month) + '"></div>' +
+          '<div class="field"><label for="attendance-search">Employee</label>' +
+            '<input type="search" id="attendance-search" placeholder="Name or ID"></div>' +
+          '<div class="field"><label for="attendance-department-filter">Department</label>' +
+            '<select id="attendance-department-filter">' + filterOptions(departments) + '</select></div>' +
+          '<div class="field"><label for="attendance-role-filter">Role</label>' +
+            '<select id="attendance-role-filter">' + filterOptions(roles) + '</select></div>' +
+        '</div>' +
+        '<p class="attendance-legend"><span class="status-present">P Present</span>' +
+          '<span class="status-work_from_home">WFH Work from home</span>' +
+          '<span class="status-leave">L Leave</span><span class="status-absent">A Absent</span></p>' +
+        '<div class="attendance-table-wrap" tabindex="0" aria-label="Scrollable attendance sheet">' +
+          '<table class="attendance-table">' +
+            '<caption>Attendance sheet for ' + escapeHtml(sheet.month) +
+              '. Select any status cell to make an HR correction.</caption>' +
+            '<thead><tr>' +
+              '<th scope="col" class="attendance-id">ID</th>' +
+              '<th scope="col" class="attendance-name">Employee</th>' +
+              '<th scope="col" class="attendance-role">Role</th>' +
+              '<th scope="col" class="attendance-department">Department</th>' +
+              dayHeaders +
+              '<th scope="col">P</th><th scope="col">WFH</th>' +
+              '<th scope="col">L</th><th scope="col">A</th>' +
+            '</tr></thead>' +
+            '<tbody>' + (rows || '<tr><td colspan="40" class="table-empty">No employees found.</td></tr>') +
+            '</tbody>' +
+          '</table>' +
+        '</div>';
     },
 
     /**
@@ -769,7 +975,7 @@ window.App = window.App || {};
      * I, what does the company have on file, what is outstanding, and what do you
      * need from me.
      */
-    profileView: function (employee, documents) {
+    profileView: function (employee, documents, attendance) {
       var p = employee.progress;
       // Archived records are frozen server side. Offering live inputs over one
       // would present an action that can only ever fail with a 409.
@@ -830,6 +1036,8 @@ window.App = window.App || {};
             'of it needs correcting &mdash; an employee number can never be ' +
             'changed at all.</p>' +
         '</div>' +
+
+        ownAttendanceSection(attendance, frozen) +
 
         '<h2>Your onboarding checklist</h2>' +
         '<p class="view-note">HR and IT tick these off as they go. The owner ' +

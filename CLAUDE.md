@@ -10,7 +10,7 @@ Breville employee management and onboarding system:
 - Vanilla JavaScript frontend with no build step or npm dependency.
 - Python 3.13 Lambda handlers behind Amazon API Gateway.
 - AWS SAM stack `onboarding-system-dev` in `eu-north-1`.
-- Two DynamoDB tables: onboarding records and completed staff records.
+- Three DynamoDB tables: onboarding records, completed staff records, and daily attendance.
 - S3 document storage through presigned POST uploads.
 - HS256 JWT authentication with `official` and `employee` roles.
 - A standalone interactive API reference in `artifacts/`.
@@ -66,7 +66,7 @@ deployed. Before deleting the stack, empty the S3 bucket named by the `Documents
 
 ## API and artifact
 
-`template.yaml` currently declares 21 API method/path pairs. The artifact provides two views:
+`template.yaml` currently declares 26 API method/path pairs. The artifact provides two views:
 
 - **API dashboard:** every route, request schema, authentication requirement, and a live request
   console pointed at the deployed dev API.
@@ -109,6 +109,14 @@ with `scripts/seed_employees.py`; generic contract examples do not have to repre
 - Holds completed employees and interns together.
 - `entityType` distinguishes `Employee` from `Intern`.
 - Only interns carry `reportingManagerId`, making `ByReportingManager` a sparse GSI.
+
+### `AttendanceTable`
+
+- Holds at most one daily declaration per employee, keyed by `employeeKey` and `attendanceDate`.
+- `AttendanceByMonth` supports HR's all-employee monthly sheet.
+- Missing applicable declarations are calculated as absent; do not bulk-write absence rows.
+- Employee writes are limited to 08:30 inclusive through 18:00 exclusive Asia/Kolkata.
+- Official attendance corrections are not constrained by the employee window.
 
 Never add a separate intern key shape or concatenate `EMP#` outside `common/keys.py`. Employee IDs
 are immutable. When reading `EmployeeTable`, existence alone does not prove the record is an

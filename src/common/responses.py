@@ -62,6 +62,17 @@ def ok(body):
     return _response(200, body)
 
 
+def csv_download(text, filename):
+    """A UTF-8 CSV attachment for an authenticated browser download."""
+    headers = dict(_HEADERS)
+    headers.update({
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="' + filename + '"',
+        'Access-Control-Expose-Headers': 'Content-Disposition',
+    })
+    return {'statusCode': 200, 'headers': headers, 'body': text}
+
+
 def created(body, location):
     return _response(201, body, {'Location': location})
 

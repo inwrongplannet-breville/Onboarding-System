@@ -48,7 +48,7 @@ js/
   ui.js             pure render functions (state in, HTML string out)
   app.js            hash router, event wiring, validation, error handling
 
-template.yaml       SAM: DynamoDB table, nine Lambdas, API Gateway
+template.yaml       SAM: three DynamoDB tables, 27 Lambdas, API Gateway
 samconfig.toml       committed, so `sam deploy` needs no arguments
 src/
   common/           keys, db clients, validation, reads, response helpers, checklist template
@@ -79,6 +79,7 @@ Routes are linkable and the back button works:
 #/dashboard                      officials - HR dashboard, and their landing page
 #/interns                        officials - onboarded interns, each linked to a manager
 #/tracking                       officials - onboarded, non-intern employees
+#/attendance                     officials - editable monthly attendance sheet and CSV
 #/onboarding                     officials - people whose onboarding is not finished
 #/onboarding/new                 add form
 #/onboarding/:id/edit            edit form
@@ -95,6 +96,13 @@ explicit HR action on the checklist screen rather than by anything automatic. Se
 [database-design.md#two-tables-not-one](database-design.md#two-tables-not-one) for the full
 model and [database-design.md#promotion](database-design.md#promotion) for how a record moves
 between them.
+
+Attendance adds a daily declaration card to `#/me` and a dedicated `#/attendance` HR screen. The
+employee card loads alongside the profile and documents and is editable only from 08:30 to 18:00
+Asia/Kolkata. The HR screen renders a semantic monthly table with sticky identity columns,
+status/date cells that officials can correct directly, name/department/role filters, totals, and an
+authenticated CSV download. The frontend displays the report returned by the API; absence and
+totals are calculated once in the backend rather than independently in JavaScript.
 
 ---
 

@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
   Employee Management & Onboarding System.
-  Two DynamoDB tables - onboarding, and employees-plus-interns told apart by
-  entityType - + twenty-two Lambdas behind API Gateway, wired to the UI.
+  Three DynamoDB tables - onboarding, employees-plus-interns, and daily
+  attendance - + twenty-seven Lambdas behind API Gateway, wired to the UI.
   DELETE /employees/{id} archives rather than erases - see
   src/handlers/delete_employee.py. Promotion between tables is a sequence of
   small endpoints, not one cross-table transaction - see
@@ -34,13 +34,14 @@ Globals:
     CodeUri: src/
     Environment:
       Variables:
-        # Two tables, not one - see common/db.py. There is deliberately no
+        # Three tables, not one - see common/db.py. There is deliberately no
         # single TABLE_NAME any more: a handler still importing that name fails
         # to import instead of quietly reading or writing the wrong table.
         # EmployeeTable holds employees and interns both, told apart by
-        # entityType - there is no third table name to set.
+        # entityType; AttendanceTable holds their independent daily register.
         ONBOARDING_TABLE_NAME: !Ref OnboardingTable
         EMPLOYEE_TABLE_NAME: !Ref EmployeeTable
+        ATTENDANCE_TABLE_NAME: !Ref AttendanceTable
         # Read by common/responses.py for the CORS header on every response.
         ALLOWED_ORIGIN: !Ref AllowedOrigin
         # The `aud` claim tokens are minted for and checked against, so a dev
@@ -136,6 +137,44 @@ Resources:
           # ALL, not KEYS_ONLY: the interns dashboard renders the whole record,
           # and a keys-only projection would turn one Query into a Query plus N
           # GetItems.
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      Tags:
+        - Key: Project
+          Value: onboarding-system
+
+  # ---------------------------------------------------------- attendance table
+  # One declaration per employee per business date. The base key serves an
+  # employee's monthly history; the GSI serves HR's all-employee month sheet.
+  AttendanceTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: employeeKey
+          AttributeType: S
+        - AttributeName: attendanceDate
+          AttributeType: S
+        - AttributeName: attendanceMonth
+          AttributeType: S
+        - AttributeName: dateEmployeeKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: employeeKey
+          KeyType: HASH
+        - AttributeName: attendanceDate
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: AttendanceByMonth
+          KeySchema:
+            - AttributeName: attendanceMonth
+              KeyType: HASH
+            - AttributeName: dateEmployeeKey
+              KeyType: RANGE
           Projection:
             ProjectionType: ALL
       PointInTimeRecoverySpecification:
@@ -1004,6 +1043,123 @@ Resources:
             Path: /staff/interns
             Method: GET
 
+  UpsertOwnAttendanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.upsert_own_attendance.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
+                - !GetAtt AttendanceTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt AttendanceTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /attendance/me/today
+            Method: PUT
+
+  GetOwnAttendanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.get_own_attendance.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !GetAtt AttendanceTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /attendance/me
+            Method: GET
+
+  GetAttendanceSheetFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.get_attendance_sheet.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${AttendanceTable.Arn}/index/AttendanceByMonth'
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /attendance/sheet
+            Method: GET
+
+  DownloadAttendanceCsvFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.download_attendance_csv.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${AttendanceTable.Arn}/index/AttendanceByMonth'
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /attendance/sheet.csv
+            Method: GET
+
+  UpdateEmployeeAttendanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers.update_employee_attendance.lambda_handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource:
+                - !GetAtt OnboardingTable.Arn
+                - !GetAtt EmployeeTable.Arn
+                - !GetAtt AttendanceTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt AttendanceTable.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OnboardingApi
+            Path: /attendance/{employeeId}/{date}
+            Method: PUT
+
 Outputs:
   ApiBaseUrl:
     Description: Base URL for the API. This is the value Phase 3 drops into js/store.js.
@@ -1014,6 +1170,9 @@ Outputs:
   EmployeeTableName:
     Description: DynamoDB table name - onboarded staff, employees and interns alike.
     Value: !Ref EmployeeTable
+  AttendanceTableName:
+    Description: DynamoDB table name - one daily declaration per employee.
+    Value: !Ref AttendanceTable
   DocumentsBucketName:
     Description: >
       Employee document store. This bucket must be EMPTIED BY HAND before

@@ -5,8 +5,8 @@ One client, the resource-level API: it marshals plain Python types for you, so
 get/scan/update/put read cleanly and an embedded checklist comes back as a plain
 list of dicts rather than AttributeValue envelopes.
 
-Two tables now, not one - OnboardingTable and EmployeeTable - each its own
-`Table` resource from its own env var. EmployeeTable holds both onboarded
+Three tables now: OnboardingTable, EmployeeTable and AttendanceTable, each its
+own `Table` resource from its own env var. EmployeeTable holds both onboarded
 employees and onboarded interns, told apart by `entityType`
 (common/models.py) rather than by a table of their own - see the module
 docstring in common/keys.py for why one shared key works for both.
@@ -37,8 +37,10 @@ import boto3
 
 ONBOARDING_TABLE_NAME = os.environ['ONBOARDING_TABLE_NAME']
 EMPLOYEE_TABLE_NAME = os.environ['EMPLOYEE_TABLE_NAME']
+ATTENDANCE_TABLE_NAME = os.environ['ATTENDANCE_TABLE_NAME']
 
 _resource = boto3.resource('dynamodb')
 
 onboarding_table = _resource.Table(ONBOARDING_TABLE_NAME)
 employee_table = _resource.Table(EMPLOYEE_TABLE_NAME)
+attendance_table = _resource.Table(ATTENDANCE_TABLE_NAME)

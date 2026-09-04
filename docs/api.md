@@ -1,6 +1,6 @@
 # API reference
 
-This reference describes the current API declared in `template.yaml`. It covers all 21 routes,
+This reference describes the current API declared in `template.yaml`. It covers all 26 routes,
 their authorization rules, request and response shapes, and the multi-step promotion workflows.
 
 Currently deployed at:
@@ -10,6 +10,9 @@ https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev
 ```
 
 Stack `onboarding-system-dev`, region `eu-north-1`. Or read it back from the stack output:
+
+The five attendance routes in this reference are part of the current source tree and require the
+updated SAM template to be deployed before they exist at the URL above.
 
 ```bash
 export BASE_URL=$(aws cloudformation describe-stacks \
@@ -147,6 +150,11 @@ Don't put real employee data in this stack — the credentials above are in a pu
 | `DELETE /staff/interns/{id}` | Official | `200` removed staff copy |
 | `DELETE /onboarding/{id}` | Official | `200` removed onboarding copy |
 | `POST /onboarding/restore` | Official | `201` restored onboarding record |
+| `PUT /attendance/me/today` | Employee | `200` daily attendance |
+| `GET /attendance/me` | Employee | `200` personal monthly attendance |
+| `GET /attendance/sheet` | Official | `200` all-employee monthly sheet |
+| `GET /attendance/sheet.csv` | Official | `200` CSV attachment |
+| `PUT /attendance/{employeeId}/{date}` | Official | `200` corrected attendance |
 
 ## Employee object
 
@@ -783,6 +791,48 @@ a sweep, automatic retry) is deliberately deferred; see
 [docs/database-design.md#known-gap-no-server-side-compensation](database-design.md#known-gap-no-server-side-compensation).
 
 ---
+
+## Attendance
+
+Attendance is a daily declaration rather than a time clock. The only stored statuses are
+`present`, `work_from_home`, `leave` and `absent`; there are no punches, work durations, device
+details or locations. Business time is Asia/Kolkata. Employee writes open at 08:30 inclusive and
+close at 18:00 exclusive every day. Official corrections are not constrained by that window.
+
+One `AttendanceTable` item is keyed by `employeeKey` plus `attendanceDate`. It carries snapshots of
+the employee name, job title as `employeeRole`, and department. The `AttendanceByMonth` index uses
+`attendanceMonth` plus `dateEmployeeKey`. A missing applicable item is calculated as absent; today
+is upcoming before 08:30 and future dates remain blank.
+
+### `PUT /attendance/me/today`
+
+Employee only. The employee ID and current date come from the verified identity and server clock.
+The employee sends `status` and an optional `note` of at most 300 characters. Repeating the call on
+the same date replaces that one item. Returns `409` outside 08:30-18:00 or for an archived record.
+
+### `GET /attendance/me?month=YYYY-MM`
+
+Employee only. Returns the selected month, the employee row with one entry per calendar date,
+status totals, and the current marking-window state. The month defaults to the current
+Asia/Kolkata month.
+
+### `GET /attendance/sheet?month=YYYY-MM`
+
+Official only. Combines active onboarding records and promoted staff, collapses lifecycle
+duplicates by employee ID, queries `AttendanceByMonth`, and returns a matrix containing every
+employee and date plus status totals.
+
+### `GET /attendance/sheet.csv?month=YYYY-MM`
+
+Official only. Uses the same sheet builder as the JSON route and returns `text/csv` with a
+`Content-Disposition` attachment filename. Columns include employee ID, name, role, department,
+each date, and totals. Text fields that could be interpreted as spreadsheet formulas are escaped.
+
+### `PUT /attendance/{employeeId}/{date}`
+
+Official only. HR parent access can create or change any existing employee's attendance for any
+valid date at any time. A status-only edit preserves an existing note. The response records the HR
+username in `updatedBy` and `official` in `updatedByRole`.
 
 ## Core onboarding acceptance run
 

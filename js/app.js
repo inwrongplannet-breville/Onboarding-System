@@ -7,6 +7,7 @@
  *   #/dashboard                  officials role - the HR dashboard, and their landing page
  *   #/interns                    officials role - interns sub-dashboard (scaffold)
  *   #/tracking                   officials role - employee tracking sub-dashboard (dummy data)
+ *   #/attendance                 officials role - monthly attendance sheet
  *   #/onboarding                 officials role - the three routes below
  *   #/onboarding/new
  *   #/onboarding/:id/edit
@@ -424,6 +425,7 @@ window.App = window.App || {};
    * once per render, passed through on every repaint after that.
    */
   var loadedDocuments = null;
+  var loadedAttendance = null;
 
   /*
    * Documents by employee id, so list -> checklist -> back -> same checklist does
@@ -463,6 +465,7 @@ window.App = window.App || {};
   function forgetDocuments() {
     documentsCache = {};
     loadedDocuments = null;
+    loadedAttendance = null;
   }
 
   // Mirrors ALLOWED_CONTENT_TYPES and MAX_UPLOAD_BYTES in common/documents.py.
@@ -491,6 +494,7 @@ window.App = window.App || {};
     if (segments[0] === 'dashboard') return { name: 'dashboard' };
     if (segments[0] === 'interns') return { name: 'interns' };
     if (segments[0] === 'tracking') return { name: 'tracking' };
+    if (segments[0] === 'attendance') return { name: 'attendance' };
 
     if (segments[0] !== 'onboarding') return { name: 'dashboard' };
     if (segments.length === 1) return { name: 'list' };
@@ -575,6 +579,7 @@ window.App = window.App || {};
     if (route.name === 'dashboard') return renderDashboard();
     if (route.name === 'interns') return renderInterns();
     if (route.name === 'tracking') return renderTracking();
+    if (route.name === 'attendance') return renderAttendanceSheet();
     if (route.name === 'list') return renderList();
     if (route.name === 'new') return renderForm(null);
     if (route.name === 'edit') return renderForm(route.id);
@@ -669,6 +674,104 @@ window.App = window.App || {};
     setTitle('HR Dashboard');
     paint(ui.dashboardView());
     focusHeading();
+  }
+
+  var attendanceMonth = '';
+
+  function currentKolkataMonth() {
+    var parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit'
+    }).formatToParts(new Date());
+    var year = parts.filter(function (part) { return part.type === 'year'; })[0];
+    var month = parts.filter(function (part) { return part.type === 'month'; })[0];
+    return year.value + '-' + month.value;
+  }
+
+  function renderAttendanceSheet() {
+    var myGeneration = ++renderGeneration;
+    if (!attendanceMonth) attendanceMonth = currentKolkataMonth();
+    showLoading();
+
+    store.getAttendanceSheet(attendanceMonth).then(function (sheet) {
+      if (myGeneration !== renderGeneration) return;
+      setTitle('Attendance');
+      paint(ui.attendanceSheetView(sheet));
+      focusHeading();
+      wireAttendanceSheet(sheet);
+    }, failLoad('Could not load the attendance sheet.', myGeneration));
+  }
+
+  function wireAttendanceSheet(sheet) {
+    var monthInput = document.getElementById('attendance-month');
+    var searchInput = document.getElementById('attendance-search');
+    var departmentInput = document.getElementById('attendance-department-filter');
+    var roleInput = document.getElementById('attendance-role-filter');
+    var downloadButton = document.getElementById('attendance-download');
+    var table = document.querySelector('.attendance-table');
+
+    function applyAttendanceFilters() {
+      var term = (searchInput.value || '').trim().toLowerCase();
+      var department = departmentInput.value;
+      var role = roleInput.value;
+      var visible = 0;
+
+      Array.prototype.forEach.call(document.querySelectorAll('[data-attendance-row]'), function (row) {
+        var show = (!term || row.getAttribute('data-search').indexOf(term) !== -1) &&
+          (!department || row.getAttribute('data-department') === department) &&
+          (!role || row.getAttribute('data-role') === role);
+        row.hidden = !show;
+        if (show) visible += 1;
+      });
+      document.getElementById('attendance-visible-count').textContent = visible;
+    }
+
+    monthInput.addEventListener('change', function () {
+      if (!monthInput.value || monthInput.value === attendanceMonth) return;
+      attendanceMonth = monthInput.value;
+      renderAttendanceSheet();
+    });
+    searchInput.addEventListener('input', applyAttendanceFilters);
+    departmentInput.addEventListener('change', applyAttendanceFilters);
+    roleInput.addEventListener('change', applyAttendanceFilters);
+
+    table.addEventListener('change', function (event) {
+      var select = event.target.closest('[data-action="edit-attendance"]');
+      if (!select || !select.value) return;
+      clearError();
+      select.disabled = true;
+
+      store.updateEmployeeAttendance(
+        select.getAttribute('data-employee-id'),
+        select.getAttribute('data-date'),
+        { status: select.value }
+      ).then(function () {
+        notify('Attendance updated by HR.');
+        renderAttendanceSheet();
+      }, function (error) {
+        select.disabled = false;
+        showError(error);
+      });
+    });
+
+    downloadButton.addEventListener('click', function () {
+      downloadButton.disabled = true;
+      clearError();
+      store.downloadAttendanceCsv(sheet.month).then(function (download) {
+        var url = window.URL.createObjectURL(download.blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = 'attendance-' + sheet.month + '.csv';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+        downloadButton.disabled = false;
+        notify('Attendance CSV downloaded.');
+      }, function (error) {
+        downloadButton.disabled = false;
+        showError(error);
+      });
+    });
   }
 
   /*
@@ -828,13 +931,15 @@ window.App = window.App || {};
       store.getOwnProfile(),
       // [] and not null: documentsSection reads null as "still loading" now, so
       // a failure here has to be an empty answer rather than an absent one.
-      store.getOwnDocuments().catch(function () { return []; })
+      store.getOwnDocuments().catch(function () { return []; }),
+      store.getOwnAttendance().catch(function () { return null; })
     ]).then(function (results) {
       // Still the current screen - see renderGeneration.
       if (myGeneration !== renderGeneration) return;
 
       var employee = results[0];
       loadedDocuments = results[1];
+      loadedAttendance = results[2];
       // null, not an error. POST /login does not check that an employee number
       // exists - it has no table access, deliberately - so a mistyped number
       // reaches this screen with a perfectly valid session. So does a session
@@ -862,13 +967,14 @@ window.App = window.App || {};
     paintSession();
 
     setTitle('My profile');
-    paint(ui.profileView(employee, loadedDocuments));
+    paint(ui.profileView(employee, loadedDocuments, loadedAttendance));
     focusHeading();
 
     // Wired before the contact form, because an archived record has drop zones
     // that are absent and a contact form that is absent too - neither wiring
     // depends on the other.
     wireDropZones(employee);
+    wireOwnAttendance();
 
     var form = document.getElementById('contact-form');
     // Absent on an archived record - it is read-only server side, so there is no
@@ -904,6 +1010,36 @@ window.App = window.App || {};
         submitButton.disabled = false;
         submitButton.textContent = submitLabel;
         showSaveError(form, error);
+      });
+    });
+  }
+
+  function wireOwnAttendance() {
+    var form = document.getElementById('attendance-form');
+    if (!form) return;
+    var submitting = false;
+
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (submitting) return;
+      var button = form.querySelector('[type="submit"]');
+      var label = button.textContent;
+      submitting = true;
+      button.disabled = true;
+      button.textContent = 'Saving…';
+      clearError();
+
+      store.markOwnAttendance({
+        status: form.elements.status.value,
+        note: form.elements.note.value.trim()
+      }).then(function () {
+        notify('Today\'s attendance was saved.');
+        renderProfile();
+      }, function (error) {
+        submitting = false;
+        button.disabled = false;
+        button.textContent = label;
+        showError(error);
       });
     });
   }
