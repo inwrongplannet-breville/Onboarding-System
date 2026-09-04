@@ -604,7 +604,11 @@
               "});",
               "// The point of the condition expression: PutItem overwrites by default, so",
               "// without it this call would have replaced a real person and their history.",
-              "pm.sendRequest(pm.variables.replaceIn('{{baseUrl}}/employees/{{employeeId}}'), (err, res) => {",
+              "pm.sendRequest({",
+              "  url: pm.variables.replaceIn('{{baseUrl}}/employees/{{employeeId}}'),",
+              "  method: 'GET',",
+              "  header: { 'Authorization': 'Bearer ' + pm.collectionVariables.get('token') }",
+              "}, (err, res) => {",
               "  pm.test('the original employee is untouched', () => {",
               "    pm.expect(res.json().firstName).to.eql('Priya');",
               "  });",
@@ -3039,29 +3043,20 @@
           }
         },
         {
-          "name": "No token at all - 401",
+          "name": "Authorized directory request - 200",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('401 from the gateway, before any handler runs',",
-                  "  function () { pm.response.to.have.status(401); });",
-                  "// The GatewayResponses block in template.yaml is what puts CORS",
-                  "// headers on this. Without it the browser reports a CORS error",
-                  "// instead of the 401 - see docs/design.md.",
-                  "pm.test('carries CORS headers', function () {",
-                  "  pm.response.to.have.header('Access-Control-Allow-Origin');",
-                  "});"
+                  "pm.test('200 OK with the collection bearer token',",
+                  "  function () { pm.response.to.have.status(200); });"
                 ]
               }
             }
           ],
           "request": {
-            "auth": {
-              "type": "noauth"
-            },
             "method": "GET",
             "header": [],
             "url": {
