@@ -268,11 +268,11 @@ The dropdowns are built from the values the loaded employees actually carry (`se
 an empty table the form falls back to text inputs so the first hire is still creatable. The server
 validates against the real enum in every case and names the bad field in its `400`.
 
-The Phase 1 fixtures still exist — as `scripts/seed_employees.py`, which POSTs the same six people
-*into DynamoDB* over the real API. Same test data, other side of the wire.
+The fixture dataset now lives in `scripts/seed_employees.py`, which POSTs 30 deterministic people
+*into DynamoDB* over the real API: 10 onboarding, 10 promoted employees and 10 promoted interns.
 
 The check that this actually holds: turn the network off and reload. The list must be empty with an
-error on it. If six people appear, something is still reading from local state.
+error on it. If any people appear, something is still reading from local state.
 
 ### Checklist comments
 

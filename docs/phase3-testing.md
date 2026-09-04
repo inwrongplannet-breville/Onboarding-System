@@ -6,11 +6,11 @@ and check". Takes about ten minutes.
 ## Setup
 
 ```bash
-py scripts/seed_employees.py --wipe --seed        # eight people: 2 managers, 3 interns, 3 mid-onboarding
-py -m http.server 8000
+py scripts/seed_employees.py --wipe --seed        # 30 people: 10 onboarding, 10 employees, 10 interns
+py -m http.server 8001
 ```
 
-Open `http://localhost:8000` with devtools on the **Network** tab, **Disable cache** and
+Open `http://localhost:8001` with devtools on the **Network** tab, **Disable cache** and
 **Preserve log** both ticked.
 
 You land on the login page. Sign in as `hr.admin` / `onboard-2026` for everything from

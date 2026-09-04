@@ -226,7 +226,7 @@ What it costs:
   occupied and re-hiring requires a new number. That is the honest outcome; reusing a number would
   attach a second person's history to the first person's id.
 
-The seed fixtures use `E1001`–`E1006`, so a reseed lands the same people on the same ids and a
+The seed fixtures use `E1001`–`E1030`, so a reseed lands the same people on the same ids and a
 hand-written link like `#/onboarding/E1003` survives a table reset.
 
 ## The item

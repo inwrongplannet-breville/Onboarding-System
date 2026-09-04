@@ -25,8 +25,8 @@ Everything you see comes from DynamoDB. Add someone, refresh, and they're still 
 
 ## Reset the data
 
-Wipes both tables and repopulates them with eight people: two promoted managers, three promoted
-interns reporting to them, and three left mid-onboarding at varied progress. See
+Wipes both tables and repopulates them with 30 synthetic people: 10 promoted employees, 10 promoted
+interns reporting to them, and 10 left mid-onboarding at varied progress. See
 [docs/database-design.md#promotion](docs/database-design.md#promotion) for what "promoted" means
 here.
 
@@ -39,7 +39,7 @@ than the tables directly — including the promote sequences, so a broken seed i
 so it signs in first; pass `--username`/`--password` if the stack isn't using the demo accounts.
 `--wipe` goes at the tables directly and needs no credentials.
 
-The eight fixtures take employee numbers `E1001`–`E1008`. Those numbers are the DynamoDB partition
+The 30 fixtures take employee numbers `E1001`–`E1030`. Those numbers are the DynamoDB partition
 key, so `--seed` without `--wipe` now fails loudly with a `409` instead of quietly creating a second
 copy of everyone.
 
@@ -110,7 +110,7 @@ Two roles, and the split is enforced by the API rather than by the UI:
 | **your employee number**, e.g. `E1001` | `welcome-2026` | One screen: their own record in full, their own onboarding checklist, and the three contact fields they fill in themselves |
 
 An employee has no account name — **their employee number is their username**, and every number
-shares one password. So the eight seeded people, `E1001`–`E1008`, are also the employee logins,
+shares one password. So the 30 seeded people, `E1001`–`E1030`, are also the employee logins,
 whichever table (or which kind of record within `EmployeeTable`) they currently sit in. `e1001`
 works too; the number is upper-cased into the token so it matches the partition key.
 
