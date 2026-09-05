@@ -85,6 +85,9 @@ def test_missing_attendance_is_leave_from_start_time(handlers, monkeypatch):
     assert statuses['2026-09-05'] is None
     assert set(row['totals']) == {'present', 'leave'}
 
+    table = boto3.resource('dynamodb').Table(ATTENDANCE_TABLE_NAME)
+    assert table.scan()['Items'] == []
+
 
 def test_today_is_upcoming_before_the_window_opens(handlers, monkeypatch):
     create(handlers, employeeId='E1001')
@@ -92,6 +95,47 @@ def test_today_is_upcoming_before_the_window_opens(handlers, monkeypatch):
     row = body(sheet(handlers))['employees'][0]
     today = next(day for day in row['days'] if day['date'] == '2026-09-04')
     assert today['status'] is None
+
+
+@pytest.mark.parametrize('month', ['2026-9', '2026-13', 'not-a-month'])
+def test_attendance_reads_reject_invalid_months(handlers, monkeypatch, month):
+    create(handlers, employeeId='E1001')
+    set_clock(monkeypatch, at_ist(10, 0))
+
+    own = handlers['get_own_attendance'](signed_in({
+        'queryStringParameters': {'month': month},
+    }, as_employee('E1001')), None)
+    csv_response = handlers['download_attendance_csv'](signed_in({
+        'queryStringParameters': {'month': month},
+    }), None)
+
+    assert own['statusCode'] == 400
+    assert sheet(handlers, month)['statusCode'] == 400
+    assert csv_response['statusCode'] == 400
+
+
+@pytest.mark.parametrize('date_value', ['2026-9-04', '2026-02-30', 'tomorrow'])
+def test_hr_update_rejects_invalid_dates(handlers, date_value):
+    create(handlers, employeeId='E1001')
+    response = handlers['update_employee_attendance'](signed_in({
+        'pathParameters': {'employeeId': 'E1001', 'date': date_value},
+        'body': json.dumps({'status': 'present'}),
+    }), None)
+    assert response['statusCode'] == 400
+
+
+def test_missing_employee_attendance_routes_return_not_found(handlers, monkeypatch):
+    set_clock(monkeypatch, at_ist(10, 0))
+    own = handlers['get_own_attendance'](signed_in({}, as_employee('E1999')), None)
+    mark_missing = mark(handlers, context=as_employee('E1999'))
+    hr_update = handlers['update_employee_attendance'](signed_in({
+        'pathParameters': {'employeeId': 'E1999', 'date': '2026-09-04'},
+        'body': json.dumps({'status': 'present'}),
+    }), None)
+
+    assert own['statusCode'] == 404
+    assert mark_missing['statusCode'] == 404
+    assert hr_update['statusCode'] == 404
 
 
 def test_hr_can_create_and_change_any_date_after_eod(handlers, monkeypatch):
