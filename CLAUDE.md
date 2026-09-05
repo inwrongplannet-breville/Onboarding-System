@@ -10,10 +10,9 @@ Breville employee management and onboarding system:
 - Vanilla JavaScript frontend with no build step or npm dependency.
 - Python 3.13 Lambda handlers behind Amazon API Gateway.
 - AWS SAM stack `onboarding-system-dev` in `eu-north-1`.
-- Two DynamoDB tables: onboarding records and completed staff records.
+- Three DynamoDB tables: onboarding records, completed staff records, and daily attendance.
 - S3 document storage through presigned POST uploads.
 - HS256 JWT authentication with `official` and `employee` roles.
-- A standalone interactive API reference in `artifacts/`.
 
 ## Sources of truth
 
@@ -24,20 +23,15 @@ Breville employee management and onboarding system:
 | `docs/api.md` | Human-readable endpoint contract and examples |
 | `docs/database-design.md` | Data model, invariants, access patterns, and promotion sequences |
 | `docs/design.md` | Frontend architecture and decision history |
-| `artifacts/README.md` | Interactive API reference usage and synchronization rules |
 
-Do not treat the Postman collection or artifact metadata as the primary route inventory. Derive
-routes from `template.yaml`, then confirm behavior in the handlers.
+Do not treat the Postman collection as the primary route inventory. Derive routes from
+`template.yaml`, then confirm behavior in the handlers.
 
 ## Common commands
 
 ```powershell
-# Main frontend. Open http://localhost:8001.
-py -m http.server 8001
-
-# Interactive API reference. Open http://localhost:8001.
-# Run this instead of the main frontend server, not at the same time.
-py -m http.server 8001 --directory artifacts
+# Main frontend. Open http://localhost:8000/.
+py -m http.server 8000
 
 # Tests; moto provides in-memory AWS services.
 py -m pip install -r requirements-dev.txt
@@ -60,27 +54,9 @@ sam sync --watch
 Deploys confirm the change set by default. Use `--no-confirm-changeset` only for an intentional
 non-interactive deployment.
 
-The browser origin is exact: `http://localhost:8001`. Do not use `file://` or `127.0.0.1` for live
-requests. Changing `AllowedOrigin` in `template.yaml` has no effect on AWS until the stack is
+The main application's browser origin is exact: `http://localhost:8000`. Do not use `file://` or
+`127.0.0.1` for live requests. Changing `AllowedOrigins` in `template.yaml` has no effect until AWS is
 deployed. Before deleting the stack, empty the S3 bucket named by the `DocumentsBucketName` output.
-
-## API and artifact
-
-`template.yaml` currently declares 21 API method/path pairs. The artifact provides two views:
-
-- **API dashboard:** every route, request schema, authentication requirement, and a live request
-  console pointed at the deployed dev API.
-- **Functions dashboard:** application workflows showing endpoint call order, including optional,
-  parallel, and direct-to-S3 steps.
-
-The artifact is static and has no AWS stack of its own. It stores tokens only in `sessionStorage`
-and asks for confirmation before mutating live data. When routes change, update these together:
-
-1. `template.yaml` and the relevant handler.
-2. Tests.
-3. `docs/api.md`.
-4. `docs/Employee-Onboarding.postman_collection.json`.
-5. `artifacts/api-data.js` and any affected workflow in `artifacts/app.js`.
 
 Route semantics that are easy to confuse:
 
@@ -94,7 +70,7 @@ Route semantics that are easy to confuse:
 
 The deterministic dev seed contains 30 synthetic people: promoted employees `E1001`-`E1010`,
 promoted interns `E1011`-`E1020` (one per manager), and active onboarding records
-`E1021`-`E1030` with varied progress. Keep seed-dependent docs, tests, and artifact examples aligned
+`E1021`-`E1030` with varied progress. Keep seed-dependent docs and tests aligned
 with `scripts/seed_employees.py`; generic contract examples do not have to represent a live fixture.
 
 ### `OnboardingTable`
@@ -109,6 +85,14 @@ with `scripts/seed_employees.py`; generic contract examples do not have to repre
 - Holds completed employees and interns together.
 - `entityType` distinguishes `Employee` from `Intern`.
 - Only interns carry `reportingManagerId`, making `ByReportingManager` a sparse GSI.
+
+### `AttendanceTable`
+
+- Holds at most one daily declaration per employee, keyed by `employeeKey` and `attendanceDate`.
+- `AttendanceByMonth` supports HR's all-employee monthly sheet.
+- Missing applicable declarations are calculated as leave; do not bulk-write leave rows.
+- Employee writes are limited to 08:30 inclusive through 18:00 exclusive Asia/Kolkata.
+- Official attendance corrections are not constrained by the employee window.
 
 Never add a separate intern key shape or concatenate `EMP#` outside `common/keys.py`. Employee IDs
 are immutable. When reading `EmployeeTable`, existence alone does not prove the record is an
@@ -162,15 +146,9 @@ Before handing off a change:
 
 1. Run focused tests, then the full suite when behavior changed broadly.
 2. Run `sam validate --lint --region eu-north-1` after template changes.
-3. Keep route documentation, Postman, and artifact metadata synchronized.
+3. Keep route documentation and Postman synchronized.
 4. Verify both roles and negative authorization paths for protected endpoints.
 5. Confirm conditional-write, archive, and promotion invariants still hold.
-6. Run JavaScript syntax checks for artifact changes:
-
-   ```powershell
-   node --check artifacts/app.js
-   node --check artifacts/api-data.js
-   ```
 
 ## Known deferred work
 

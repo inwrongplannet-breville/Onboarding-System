@@ -46,6 +46,11 @@
       "type": "string"
     },
     {
+      "key": "attendanceMonth",
+      "value": "2026-09",
+      "type": "string"
+    },
+    {
       "key": "gateId",
       "value": ""
     },
@@ -3068,6 +3073,56 @@
                 "employees"
               ]
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attendance",
+      "description": "Daily declaration routes. Employee marking is available only from 08:30 through 17:59 Asia/Kolkata; HR reads and corrections have no time-window restriction.",
+      "item": [
+        {
+          "name": "Employee - mark today",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{employeeToken}}", "type": "string" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"present\",\n  \"note\": \"\"\n}" },
+            "url": { "raw": "{{baseUrl}}/attendance/me/today", "host": ["{{baseUrl}}"], "path": ["attendance", "me", "today"] }
+          }
+        },
+        {
+          "name": "Employee - own month",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{employeeToken}}", "type": "string" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/attendance/me?month={{attendanceMonth}}", "host": ["{{baseUrl}}"], "path": ["attendance", "me"], "query": [{ "key": "month", "value": "{{attendanceMonth}}" }] }
+          }
+        },
+        {
+          "name": "HR - monthly sheet",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/attendance/sheet?month={{attendanceMonth}}", "host": ["{{baseUrl}}"], "path": ["attendance", "sheet"], "query": [{ "key": "month", "value": "{{attendanceMonth}}" }] }
+          }
+        },
+        {
+          "name": "HR - download CSV",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/attendance/sheet.csv?month={{attendanceMonth}}", "host": ["{{baseUrl}}"], "path": ["attendance", "sheet.csv"], "query": [{ "key": "month", "value": "{{attendanceMonth}}" }] }
+          }
+        },
+        {
+          "name": "HR - correct employee attendance",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"leave\",\n  \"note\": \"Approved leave\"\n}" },
+            "url": { "raw": "{{baseUrl}}/attendance/E1001/2026-09-04", "host": ["{{baseUrl}}"], "path": ["attendance", "E1001", "2026-09-04"] }
           }
         }
       ]

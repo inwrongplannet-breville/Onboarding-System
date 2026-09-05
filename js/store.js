@@ -53,7 +53,7 @@ window.App = window.App || {};
    * happily on a 500, and response.json() rejects on an empty body - which is
    * exactly what a 204 from DELETE is.
    */
-  function request(method, path, body, anonymous) {
+  function request(method, path, body, anonymous, responseType) {
     var options = { method: method, headers: {} };
 
     if (body !== undefined) {
@@ -71,6 +71,15 @@ window.App = window.App || {};
 
     return fetch(App.API_BASE_URL + path, options).then(function (response) {
       if (response.status === 204) return null;
+
+      if (response.ok && responseType === 'blob') {
+        return response.blob().then(function (blob) {
+          return {
+            blob: blob,
+            disposition: response.headers.get('Content-Disposition') || ''
+          };
+        });
+      }
 
       return response.text().then(function (text) {
         var payload = null;
@@ -406,6 +415,34 @@ window.App = window.App || {};
       return request('GET', '/staff/employees').then(function (payload) {
         return payload.employees;
       });
+    },
+
+    markOwnAttendance: function (values) {
+      return request('PUT', '/attendance/me/today', values);
+    },
+
+    getOwnAttendance: function (month) {
+      var path = '/attendance/me';
+      if (month) path += '?month=' + encodeURIComponent(month);
+      return request('GET', path).catch(function (error) {
+        if (error.status === 404) return null;
+        throw error;
+      });
+    },
+
+    getAttendanceSheet: function (month) {
+      return request('GET', '/attendance/sheet?month=' + encodeURIComponent(month));
+    },
+
+    updateEmployeeAttendance: function (employeeId, date, values) {
+      return request('PUT',
+        '/attendance/' + encodeURIComponent(employeeId) + '/' + encodeURIComponent(date),
+        values);
+    },
+
+    downloadAttendanceCsv: function (month) {
+      return request('GET', '/attendance/sheet.csv?month=' + encodeURIComponent(month),
+        undefined, false, 'blob');
     },
 
     /** All interns, or - with managerId - only the ones reporting to them. */

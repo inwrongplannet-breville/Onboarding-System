@@ -55,3 +55,18 @@ def test_every_intern_points_to_an_earlier_promoted_employee():
 
     assert {entry['manager'] for entry in seed.FIXTURES
             if entry['promote'] == 'intern'} == promoted_employees
+
+
+def test_wipe_includes_attendance_with_its_complete_composite_key(monkeypatch):
+    calls = []
+    monkeypatch.setattr(seed, 'wipe_table', lambda *args: calls.append(args))
+
+    seed.wipe({
+        'onboarding': 'onboarding-table',
+        'employee': 'employee-table',
+        'attendance': 'attendance-table',
+    }, True)
+
+    assert calls[2][0] == 'attendance-table'
+    assert calls[2][1] == ('employeeKey', 'attendanceDate')
+    assert calls[2][2] == 'employeeKey'

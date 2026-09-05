@@ -91,3 +91,11 @@ def key(employee_id):
     'Intern' instead of 'Employee' - see common/models.py.
     """
     return {KEY_ATTRIBUTE: pk(employee_id)}
+
+
+def attendance_key(employee_id, attendance_date):
+    """Composite key for one employee's attendance on one business date."""
+    return {
+        KEY_ATTRIBUTE: pk(employee_id),
+        'attendanceDate': attendance_date,
+    }

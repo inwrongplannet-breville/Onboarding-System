@@ -581,6 +581,53 @@ window.App = window.App || {};
       '</div>';
   }
 
+  function uniqueAttendanceValues(values) {
+    var seen = {};
+    return values.filter(function (value) {
+      if (!value || seen[value]) return false;
+      seen[value] = true;
+      return true;
+    });
+  }
+
+  function ownAttendanceSection(payload, frozen) {
+    if (!payload || !payload.employee) {
+      return '' +
+        '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
+          '<h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
+          '<p class="view-note">Attendance could not be loaded right now.</p>' +
+        '</section>';
+    }
+
+    var employee = payload.employee;
+    var today = payload.window.today;
+    var todayEntry = employee.days.filter(function (day) { return day.date === today; })[0] || {};
+    var canEdit = payload.window.isOpen && !frozen;
+    var isPresent = todayEntry.status === 'present';
+
+    var form = canEdit
+      ? '<form id="attendance-form" class="attendance-form">' +
+          '<label class="attendance-checkbox-label" for="attendance-present">' +
+            '<input class="attendance-checkbox" id="attendance-present" name="present" ' +
+              'type="checkbox"' + (isPresent ? ' checked' : '') + '>' +
+            '<span>Present today</span>' +
+          '</label>' +
+        '</form>'
+      : '<p class="attendance-locked">' + (frozen
+          ? 'This archived record cannot mark attendance.'
+          : 'Attendance changes are available daily from 8:30 AM to 6:00 PM Asia/Kolkata.') +
+        '</p>';
+
+    return '' +
+      '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
+        '<div class="attendance-heading-row">' +
+          '<div><h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
+            '<p>Check if present. Leave it unchecked for leave.</p></div>' +
+        '</div>' +
+        form +
+      '</section>';
+  }
+
   App.ui = {
     escapeHtml: escapeHtml,
     fullName: fullName,
@@ -589,7 +636,7 @@ window.App = window.App || {};
     documentsSection: documentsSection,
 
     /**
-     * The HR landing page. Three cards, one per dashboard, each backed by its
+     * The HR landing page. One card per operational dashboard.
      * own DynamoDB table now - Onboarding (people not yet finished),
      * Employee Tracking (promoted, non-intern staff) and Interns (promoted
      * interns, each linked to a reporting manager). No "coming soon" chips
@@ -623,7 +670,96 @@ window.App = window.App || {};
               '<p>Onboarded employees.</p>' +
             '</a>' +
           '</li>' +
+          '<li>' +
+            '<a class="dash-card" href="#/attendance">' +
+              '<h2>Attendance</h2>' +
+              '<p>Monthly register, corrections and CSV download.</p>' +
+            '</a>' +
+          '</li>' +
         '</ul>';
+    },
+
+    attendanceSheetView: function (sheet) {
+      var departments = uniqueAttendanceValues(sheet.employees.map(function (employee) {
+        return employee.department;
+      })).sort();
+      var roles = uniqueAttendanceValues(sheet.employees.map(function (employee) {
+        return employee.employeeRole;
+      })).sort();
+
+      function filterOptions(values) {
+        return '<option value="">All</option>' + values.map(function (value) {
+          return '<option value="' + escapeHtml(value) + '">' + escapeHtml(value) + '</option>';
+        }).join('');
+      }
+
+      var dayHeaders = sheet.days.map(function (day) {
+        return '<th scope="col" class="attendance-day-heading" title="' +
+          escapeHtml(formatDate(day)) + '">' + escapeHtml(String(Number(day.slice(8)))) + '</th>';
+      }).join('');
+
+      var rows = sheet.employees.map(function (employee) {
+        var dayCells = employee.days.map(function (day) {
+          var isPresent = day.status === 'present';
+          return '<td class="attendance-cell">' +
+            '<label class="sr-only" for="attendance-' + escapeHtml(employee.employeeId) + '-' +
+              escapeHtml(day.date) + '">' + escapeHtml(employee.employeeName + ', ' + day.date) +
+            '</label>' +
+            '<input class="attendance-checkbox" type="checkbox" id="attendance-' +
+              escapeHtml(employee.employeeId) + '-' +
+              escapeHtml(day.date) + '" data-action="edit-attendance" data-employee-id="' +
+              escapeHtml(employee.employeeId) + '" data-date="' + escapeHtml(day.date) +
+              '" aria-label="' + escapeHtml(employee.employeeName + ', ' + day.date) + '"' +
+              (isPresent ? ' checked' : '') + '>' +
+          '</td>';
+        }).join('');
+
+        return '<tr data-attendance-row data-search="' +
+          escapeHtml((employee.employeeId + ' ' + employee.employeeName).toLowerCase()) +
+          '" data-department="' + escapeHtml(employee.department) +
+          '" data-role="' + escapeHtml(employee.employeeRole) + '">' +
+          '<th scope="row" class="attendance-id">' + escapeHtml(employee.employeeId) + '</th>' +
+          '<td class="attendance-name">' + escapeHtml(employee.employeeName) + '</td>' +
+          '<td class="attendance-role">' + escapeHtml(employee.employeeRole || '-') + '</td>' +
+          '<td class="attendance-department">' + escapeHtml(employee.department || '-') + '</td>' +
+          dayCells +
+        '</tr>';
+      }).join('');
+
+      return '' +
+        '<a class="back-link" href="#/dashboard">&larr; Back to dashboard</a>' +
+        '<div class="page-head attendance-page-head">' +
+          '<div><h1 tabindex="-1">Attendance</h1>' +
+            '<p class="subtitle"><span id="attendance-visible-count">' + sheet.count + '</span> ' +
+              'employees &middot; Asia/Kolkata</p></div>' +
+          '<button class="btn" type="button" id="attendance-download">Download CSV</button>' +
+        '</div>' +
+        '<div class="attendance-filters" aria-label="Attendance filters">' +
+          '<div class="field"><label for="attendance-month">Month</label>' +
+            '<input type="month" id="attendance-month" value="' + escapeHtml(sheet.month) + '"></div>' +
+          '<div class="field"><label for="attendance-search">Employee</label>' +
+            '<input type="search" id="attendance-search" placeholder="Name or ID"></div>' +
+          '<div class="field"><label for="attendance-department-filter">Department</label>' +
+            '<select id="attendance-department-filter">' + filterOptions(departments) + '</select></div>' +
+          '<div class="field"><label for="attendance-role-filter">Role</label>' +
+            '<select id="attendance-role-filter">' + filterOptions(roles) + '</select></div>' +
+        '</div>' +
+        '<p class="attendance-help">Checked = present. Unchecked = leave.</p>' +
+        '<div class="attendance-table-wrap" tabindex="0" aria-label="Scrollable attendance sheet">' +
+          '<table class="attendance-table">' +
+            '<caption>Attendance sheet for ' + escapeHtml(sheet.month) +
+              '. Check or uncheck any day to make an HR correction.</caption>' +
+            '<thead><tr>' +
+              '<th scope="col" class="attendance-id">ID</th>' +
+              '<th scope="col" class="attendance-name">Employee</th>' +
+              '<th scope="col" class="attendance-role">Role</th>' +
+              '<th scope="col" class="attendance-department">Department</th>' +
+              dayHeaders +
+            '</tr></thead>' +
+            '<tbody>' + (rows || '<tr><td colspan="40" class="table-empty">No employees found.</td></tr>') +
+            '</tbody>' +
+          '</table>' +
+        '</div>';
     },
 
     /**
@@ -769,7 +905,7 @@ window.App = window.App || {};
      * I, what does the company have on file, what is outstanding, and what do you
      * need from me.
      */
-    profileView: function (employee, documents) {
+    profileView: function (employee, documents, attendance) {
       var p = employee.progress;
       // Archived records are frozen server side. Offering live inputs over one
       // would present an action that can only ever fail with a 409.
@@ -830,6 +966,8 @@ window.App = window.App || {};
             'of it needs correcting &mdash; an employee number can never be ' +
             'changed at all.</p>' +
         '</div>' +
+
+        ownAttendanceSection(attendance, frozen) +
 
         '<h2>Your onboarding checklist</h2>' +
         '<p class="view-note">HR and IT tick these off as they go. The owner ' +
@@ -1236,8 +1374,8 @@ window.App = window.App || {};
     /**
      * The visible half of a write confirmation - "Changes saved.", "Document
      * uploaded." - for the actions that have no other on-screen sign that they
-     * worked. Same shape as errorBanner so the two behave identically; only the
-     * colour and the data-action differ, so dismissing one never eats the other.
+     * worked. CSS presents this outside the page flow as an auto-dismissing
+     * toast; the separate data-action ensures dismissing it never eats an error.
      */
     successBanner: function (message) {
       return '' +

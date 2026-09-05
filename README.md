@@ -9,13 +9,16 @@ Made by Abhishek.
 
 ---
 
-## Run the UI
+## Run the main application
+
+From the repository root, start one static server:
 
 ```bash
-py -m http.server 8001
+py -m http.server 8000
 ```
 
-Then open **http://localhost:8001**.
+Open **http://localhost:8000/** for the actual employee/HR application. This is the application
+with the sign-in screen, HR dashboard, employee profiles, and attendance sheet.
 
 No install and no build step — but **don't double-click `index.html`**. A `file://` page has an
 opaque origin and sends `Origin: null` on every request, which browsers treat inconsistently; a
@@ -25,7 +28,7 @@ Everything you see comes from DynamoDB. Add someone, refresh, and they're still 
 
 ## Reset the data
 
-Wipes both tables and repopulates them with 30 synthetic people: 10 promoted employees, 10 promoted
+Wipes all three tables and repopulates the profile tables with 30 synthetic people: 10 promoted employees, 10 promoted
 interns reporting to them, and 10 left mid-onboarding at varied progress. See
 [docs/database-design.md#promotion](docs/database-design.md#promotion) for what "promoted" means
 here.
@@ -71,7 +74,7 @@ value in `js/config.js` — update that one line if you deploy your own.
 
 **Tearing down needs one step first.** CloudFormation cannot delete an S3 bucket that still holds
 objects — the stack lands in `DELETE_FAILED` and `sam delete` reports failure — and `sam delete`
-empties only its own artifacts bucket, never yours:
+empties only its own packaging bucket, never yours:
 
 ```bash
 BUCKET=$(aws cloudformation describe-stacks --stack-name onboarding-system-dev \
@@ -97,7 +100,7 @@ is a required second step after the *first* deploy only; redeploying afterwards 
 |---|---|
 | API | `https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev` — the `ApiBaseUrl` output |
 | Stack | `onboarding-system-dev`, `eu-north-1` |
-| Tables | two now, not one — the `OnboardingTableName` and `EmployeeTableName` outputs. `EmployeeTable` holds employees and interns side by side, told apart by `entityType`. CloudFormation names each, because `template.yaml` deliberately sets no `TableName` on either — an explicit one makes a key-schema change undeployable. See [docs/database-design.md#two-tables-not-one](docs/database-design.md#two-tables-not-one) |
+| Tables | Template outputs `OnboardingTableName`, `EmployeeTableName`, and `AttendanceTableName` (the attendance output appears after deploying this build). `EmployeeTable` holds employees and interns side by side; `AttendanceTable` holds one declaration per employee/date. See [docs/database-design.md](docs/database-design.md) |
 | Documents | the `DocumentsBucketName` output, same reasoning. **Empty it before `sam delete`** |
 
 ### Signing in
@@ -142,11 +145,11 @@ and its first read is a 404, which the UI renders as "we cannot find your record
 > password reads any record, one number at a time. Real per-employee credentials are a Cognito user
 > pool, which is [design.md](docs/design.md)'s note and not a small edit.
 
-**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8001`, matching
-`py -m http.server 8001`. Serving the UI from anywhere else means passing it:
+**Which origins may call the API.** `AllowedOrigins` is an explicit allowlist. Its main-application
+entry is `http://localhost:8000`, matching `py -m http.server 8000`. To deploy a different origin:
 
 ```bash
-sam deploy --parameter-overrides AllowedOrigin=https://onboarding.internal.example.com
+sam deploy --parameter-overrides AllowedOrigins=https://onboarding.internal.example.com
 ```
 
 It used to be `*`. That let any page on the internet POST to `/login` and read the token back,

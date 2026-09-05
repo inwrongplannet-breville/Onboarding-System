@@ -1,5 +1,5 @@
 """
-Reset the two dev tables: hard-wipe them, then repopulate them through the public
+Reset the three dev tables: hard-wipe them, then repopulate profiles through the public
 API with 30 deterministic people - 10 still onboarding, 10 promoted employees and
 10 promoted interns. Every intern points at one of the promoted employees.
 
@@ -19,7 +19,7 @@ Wiping cannot go through the API. DELETE /employees/{id} archives: it stamps the
 record and leaves it in the table. Wiping through the API would appear to work -
 the employees do leave GET /employees - and then every reseed would pile a fresh
 set of records on top of the archived ones, growing the table on every cycle with
-no way to ever clear it. So --wipe goes straight at both tables and really
+no way to ever clear it. So --wipe goes straight at all three tables and really
 does delete.
 
 That asymmetry is the design working as intended, not a hole in it: the API has no
@@ -58,8 +58,8 @@ Usage:
 
 Base URL resolution, in order: --base-url, $API_BASE_URL, then the ApiBaseUrl output
 of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolves
-both table names the same way, from the stack's OnboardingTableName /
-EmployeeTableName outputs.
+all table names the same way, from the stack's OnboardingTableName,
+EmployeeTableName and AttendanceTableName outputs.
 """
 import argparse
 import io
@@ -329,12 +329,13 @@ def stack_output(key):
 
 
 # Which table each source resolves through: (--flag value, env var, stack
-# output key, key attribute, id prefix). Two sources, not three - employees
-# and interns share EmployeeTable now, told apart by entityType, so a single
-# --wipe pass over 'employee' already clears both.
+# output key, key attribute, id prefix). Employees and interns share
+# EmployeeTable; attendance is independent and must be cleared when the same
+# deterministic employee IDs are reseeded.
 _TABLE_SOURCES = {
     'onboarding': ('table_onboarding', 'ONBOARDING_TABLE_NAME', 'OnboardingTableName', 'employeeKey', 'EMP#'),
     'employee': ('table_employee', 'EMPLOYEE_TABLE_NAME', 'EmployeeTableName', 'employeeKey', 'EMP#'),
+    'attendance': ('table_attendance', 'ATTENDANCE_TABLE_NAME', 'AttendanceTableName', 'employeeKey', 'EMP#'),
 }
 
 
@@ -384,38 +385,40 @@ def aws_json(args, payloads=None):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def scan_keys(table_name, key_attribute):
+def scan_keys(table_name, key_attributes):
     """
     Every key in the table, following pagination.
 
-    The partition key only - neither table has a sort key, and a
-    DeleteRequest carrying an SK the table does not have would fail the whole
-    batch.
+    Profile tables name only their partition key. Attendance also names its
+    date sort key; DynamoDB requires the complete key in every DeleteRequest.
 
     `key_attribute` is spelled out by the caller rather than imported from
     common.keys: this script drives the AWS CLI rather than the handler
     package, and is run from a checkout that need not have src/ importable.
     """
+    if isinstance(key_attributes, str):
+        key_attributes = (key_attributes,)
     keys = []
     start_key = None
 
     while True:
         args = ['dynamodb', 'scan', '--table-name', table_name,
-                '--region', REGION, '--projection-expression', key_attribute,
+                '--region', REGION, '--projection-expression', ', '.join(key_attributes),
                 '--output', 'json']
         payloads = {}
         if start_key:
             payloads['--exclusive-start-key'] = start_key
 
         result = aws_json(args, payloads)
-        keys.extend({key_attribute: i[key_attribute]} for i in result.get('Items', []))
+        keys.extend({name: item[name] for name in key_attributes}
+                    for item in result.get('Items', []))
 
         start_key = result.get('LastEvaluatedKey')
         if not start_key:
             return keys
 
 
-def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
+def wipe_table(table_name, key_attributes, id_attribute, id_prefix, noun, assume_yes):
     """
     Delete every item in one table. One item per record, so one delete each.
 
@@ -424,14 +427,13 @@ def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
     both of those are exactly what a reseed would otherwise silently duplicate.
     Scan reaches everything.
     """
-    keys = scan_keys(table_name, key_attribute)
+    keys = scan_keys(table_name, key_attributes)
 
     if not keys:
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    matching = {k[key_attribute]['S'] for k in keys
-                if k[key_attribute]['S'].startswith(id_prefix)}
+    matching = [k for k in keys if k[id_attribute]['S'].startswith(id_prefix)]
     others = len(keys) - len(matching)
 
     print('\nAbout to hard-delete {} item(s) from {}:'.format(len(keys), table_name))
@@ -473,14 +475,18 @@ def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
 
 def wipe(table_names, assume_yes):
     """
-    Wipe both tables. Order does not matter - each is independent.
+    Wipe all three tables. Order does not matter - each is independent.
 
     One pass over 'employee' clears employees and interns together now - they
     share EmployeeTable, told apart only by entityType, which the AWS-CLI Scan
     this drives does not read at all.
     """
-    wipe_table(table_names['onboarding'], 'employeeKey', 'EMP#', 'onboarding record', assume_yes)
-    wipe_table(table_names['employee'], 'employeeKey', 'EMP#', 'employee/intern', assume_yes)
+    wipe_table(table_names['onboarding'], ('employeeKey',), 'employeeKey', 'EMP#',
+               'onboarding record', assume_yes)
+    wipe_table(table_names['employee'], ('employeeKey',), 'employeeKey', 'EMP#',
+               'employee/intern', assume_yes)
+    wipe_table(table_names['attendance'], ('employeeKey', 'attendanceDate'), 'employeeKey',
+               'EMP#', 'attendance record', assume_yes)
 
 
 def _promote(base_url, token, fixture, employee_id):
@@ -575,12 +581,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--wipe', action='store_true',
-                        help='hard-delete every row in both tables first')
+                        help='hard-delete every row in all three tables first')
     parser.add_argument('--seed', action='store_true', help='create the fixture people')
     parser.add_argument('--yes', action='store_true', help='skip the wipe confirmation prompts')
     parser.add_argument('--base-url', help='API base URL, e.g. https://xxxx.execute-api.../dev')
     parser.add_argument('--table-onboarding', help='OnboardingTable name, for --wipe')
     parser.add_argument('--table-employee', help='EmployeeTable name (employees and interns both), for --wipe')
+    parser.add_argument('--table-attendance', help='AttendanceTable name, for --wipe')
     parser.add_argument('--username', help='officials username for --seed')
     parser.add_argument('--password', help='password for --username')
     args = parser.parse_args()
@@ -593,11 +600,12 @@ def main():
             explicit = {
                 'table_onboarding': args.table_onboarding,
                 'table_employee': args.table_employee,
+                'table_attendance': args.table_attendance,
             }
             table_names = {source: resolve_table_name(source, explicit)
                            for source in _TABLE_SOURCES}
-            print('Tables: onboarding={} employee={}'.format(
-                table_names['onboarding'], table_names['employee']))
+            print('Tables: onboarding={} employee={} attendance={}'.format(
+                table_names['onboarding'], table_names['employee'], table_names['attendance']))
             wipe(table_names, args.yes)
 
         if args.seed:

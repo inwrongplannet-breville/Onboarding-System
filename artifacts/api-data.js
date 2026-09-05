@@ -104,6 +104,9 @@
   const staffEmployeeId = { name: "id", in: "path", required: true, example: "E1001", description: "Promoted employee number; trimmed and upper-cased." };
   const internId = { name: "id", in: "path", required: true, example: "E1011", description: "Promoted intern number; trimmed and upper-cased." };
   const managerId = { name: "id", in: "path", required: true, example: "E1001", description: "Reporting manager's employee number." };
+  const attendanceMonth = { name: "month", in: "query", required: false, example: "2026-09", description: "Calendar month in YYYY-MM format; defaults to the current Asia/Kolkata month." };
+  const attendanceEmployeeId = { name: "employeeId", in: "path", required: true, example: "E1001", description: "Employee number HR is correcting." };
+  const attendanceDate = { name: "date", in: "path", required: true, example: "2026-09-04", description: "Attendance date in YYYY-MM-DD format." };
   const okEmployee = { 200: "Employee object", 400: "ValidationError", 403: "Forbidden", 404: "NotFound", 409: "Conflict", 500: "InternalError" };
   const official = "Official token";
   const self = "Employee (self)";
@@ -261,13 +264,51 @@
       body: { employeeId: "E1001" },
       responses: { 201: "Restored onboarding employee", 400: "ID required", 401: "Unauthorized", 403: "Forbidden", 404: "Staff record missing", 409: "Window closed/already restored", 500: "InternalError" },
       example: restoredEmployeeResponse
+    },
+    {
+      id: "put-own-attendance", tag: "Attendance", method: "PUT", path: "/attendance/me/today", summary: "Mark or update today's attendance", access: self, success: 200, mutates: true,
+      description: "Uses the employee identity from the token and the current Asia/Kolkata date. Available from 08:30 inclusive until 18:00 exclusive; the employee cannot supply identity or profile snapshots.",
+      flow: ["Authorizer", "Employee role", "08:30-18:00 window", "Load profile", "AttendanceTable PutItem"],
+      body: { status: "present", note: "" },
+      responses: { 200: "Saved attendance + window", 400: "Invalid status/note", 401: "Unauthorized", 403: "Wrong role", 404: "Employee missing", 409: "Window closed/archived", 500: "InternalError" },
+      example: { attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "present", note: "", markedAt: "2026-09-04T04:00:00Z", updatedAt: "2026-09-04T04:00:00Z", updatedBy: "E1001", updatedByRole: "employee" }, window: { timezone: "Asia/Kolkata", opensAt: "08:30", closesAt: "18:00", today: "2026-09-04", isOpen: true } }
+    },
+    {
+      id: "get-own-attendance", tag: "Attendance", method: "GET", path: "/attendance/me", summary: "View personal monthly attendance", access: self, success: 200,
+      description: "Returns the signed-in employee's month. Missing applicable dates are calculated as leave; future dates and today before 08:30 are upcoming.",
+      flow: ["Authorizer", "Employee role", "Load own profile", "AttendanceTable Query", "Calculate missing leave"],
+      params: [attendanceMonth], responses: { 200: "Monthly employee row + window", 400: "Invalid month", 401: "Unauthorized", 403: "Wrong role", 404: "Employee missing", 500: "InternalError" },
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01", "2026-09-02"], employee: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } } }
+    },
+    {
+      id: "get-attendance-sheet", tag: "Attendance", method: "GET", path: "/attendance/sheet", summary: "View all employees' monthly attendance", access: official, success: 200,
+      description: "Combines active onboarding and promoted staff with AttendanceTable records, collapses lifecycle duplicates, and calculates missing applicable declarations as leave.",
+      flow: ["Authorizer", "Official role", "Scan active roster", "Query AttendanceByMonth", "Build monthly matrix"],
+      params: [attendanceMonth], responses: { 200: "Monthly attendance sheet", 400: "Invalid month", 401: "Unauthorized", 403: "Employee role refused", 500: "InternalError" },
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01"], employees: [{ employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } }], count: 1 }
+    },
+    {
+      id: "get-attendance-csv", tag: "Attendance", method: "GET", path: "/attendance/sheet.csv", summary: "Download the monthly attendance CSV", access: official, success: 200,
+      description: "Uses the same report builder as the JSON sheet and returns a UTF-8 text/csv attachment. Profile cells are protected from spreadsheet-formula injection.",
+      flow: ["Authorizer", "Official role", "Build identical sheet", "Serialize CSV attachment"],
+      params: [attendanceMonth], responses: { 200: "text/csv attachment", 400: "Invalid month", 401: "Unauthorized", 403: "Employee role refused", 500: "InternalError" },
+      example: "Employee ID,Employee name,Employee role,Department,2026-09-01,Present total,..."
+    },
+    {
+      id: "put-employee-attendance", tag: "Attendance", method: "PUT", path: "/attendance/{employeeId}/{date}", summary: "HR corrects any employee/date", access: official, success: 200, mutates: true,
+      description: "Parent HR access: creates or replaces any employee's attendance on any valid date without the employee marking-window restriction. Existing notes survive status-only table edits.",
+      flow: ["Authorizer", "Official role", "Validate employee/date", "Load profile", "AttendanceTable PutItem"],
+      params: [attendanceEmployeeId, attendanceDate], body: { status: "leave", note: "Approved leave" },
+      responses: { 200: "Saved attendance", 400: "Invalid date/status/note", 401: "Unauthorized", 403: "Employee role refused", 404: "Employee missing", 500: "InternalError" },
+      example: { attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "leave", note: "Approved leave", updatedBy: "hr.admin", updatedByRole: "official" } }
     }
   ];
 
   const models = {
     employee: employeeResponse,
     error: { error: { code: "ValidationError", message: "Employee details are not valid.", fields: { email: "Enter a valid email address." } } },
-    document: { slot: "id-document", label: "ID document", uploaded: true, filename: "Passport.pdf", contentType: "application/pdf", size: 248031, uploadedAt: "2026-09-04T10:30:00Z", downloadUrl: "https://...five-minute-presigned-url..." }
+    document: { slot: "id-document", label: "ID document", uploaded: true, filename: "Passport.pdf", contentType: "application/pdf", size: 248031, uploadedAt: "2026-09-04T10:30:00Z", downloadUrl: "https://...five-minute-presigned-url..." },
+    attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "present", note: "", markedAt: "2026-09-04T04:00:00Z", updatedAt: "2026-09-04T04:00:00Z", updatedBy: "E1001", updatedByRole: "employee" }
   };
 
   const functionFlows = [
@@ -300,6 +341,21 @@
       category: "Access & dashboards", title: "Open interns dashboard", actor: "Official",
       description: "Intern cards and the manager choices are fetched together.",
       steps: [{ parallel: true, calls: [{ method: "GET", path: "/staff/interns", note: "Intern cards" }, { method: "GET", path: "/staff/employees", note: "Manager picker" }] }]
+    },
+    {
+      category: "Attendance", title: "Mark today's attendance", actor: "Employee",
+      description: "Load today's checkbox state beside the profile, then save and reconcile that checkbox in place without reloading the employee dashboard.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/me", note: "Checkbox state + marking window" }] }, { calls: [{ method: "PUT", path: "/attendance/me/today", note: "08:30-18:00 only" }] }, { local: "No endpoint · reconcile checkbox + floating success toast" }]
+    },
+    {
+      category: "Attendance", title: "Open and edit the HR sheet", actor: "Official",
+      description: "Load one month, then save each employee/date checkbox in place without refetching, repainting, or resetting the sheet's scroll position.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet?month={month}", note: "Monthly matrix" }] }, { optional: true, calls: [{ method: "PUT", path: "/attendance/{employeeId}/{date}", note: "HR correction" }] }, { optional: true, local: "No endpoint · reconcile one checkbox + floating success toast" }]
+    },
+    {
+      category: "Attendance", title: "Download attendance CSV", actor: "Official",
+      description: "Fetch the authenticated CSV response and download it in the browser.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet.csv?month={month}", note: "CSV attachment" }] }]
     },
     {
       category: "Onboarding records", title: "Open Add Employee form", actor: "Official",
@@ -425,6 +481,11 @@
     ["promoteToIntern", "POST /staff/interns"],
     ["addManagerIntern", "POST /staff/employees/{managerId}/interns"],
     ["listStaffEmployees", "GET /staff/employees"],
+    ["markOwnAttendance", "PUT /attendance/me/today"],
+    ["getOwnAttendance", "GET /attendance/me[?month={month}]"],
+    ["getAttendanceSheet", "GET /attendance/sheet?month={month}"],
+    ["updateEmployeeAttendance", "PUT /attendance/{employeeId}/{date}"],
+    ["downloadAttendanceCsv", "GET /attendance/sheet.csv?month={month}"],
     ["listInterns", "GET /staff/interns[?managerId={id}]"],
     ["removeManagerIntern", "DELETE /staff/employees/{managerId}/interns/{internId}"],
     ["setInternManager", "PUT /staff/interns/{id}/manager"],

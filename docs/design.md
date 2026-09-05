@@ -48,7 +48,7 @@ js/
   ui.js             pure render functions (state in, HTML string out)
   app.js            hash router, event wiring, validation, error handling
 
-template.yaml       SAM: DynamoDB table, nine Lambdas, API Gateway
+template.yaml       SAM: three DynamoDB tables, 27 Lambdas, API Gateway
 samconfig.toml       committed, so `sam deploy` needs no arguments
 src/
   common/           keys, db clients, validation, reads, response helpers, checklist template
@@ -79,6 +79,7 @@ Routes are linkable and the back button works:
 #/dashboard                      officials - HR dashboard, and their landing page
 #/interns                        officials - onboarded interns, each linked to a manager
 #/tracking                       officials - onboarded, non-intern employees
+#/attendance                     officials - editable monthly attendance sheet and CSV
 #/onboarding                     officials - people whose onboarding is not finished
 #/onboarding/new                 add form
 #/onboarding/:id/edit            edit form
@@ -95,6 +96,14 @@ explicit HR action on the checklist screen rather than by anything automatic. Se
 [database-design.md#two-tables-not-one](database-design.md#two-tables-not-one) for the full
 model and [database-design.md#promotion](database-design.md#promotion) for how a record moves
 between them.
+
+Attendance adds a daily declaration card to `#/me` and a dedicated `#/attendance` HR screen. The
+employee card loads alongside the profile and documents and is editable only from 08:30 to 18:00
+Asia/Kolkata. Attendance is binary in the UI: checked means present and unchecked means leave,
+with each change saved immediately. The HR screen renders the same checkbox per employee/date in a
+semantic monthly table with sticky identity columns, name/department/role filters, and an
+authenticated CSV download. The frontend displays the report returned by the API; leave is
+calculated once in the backend rather than independently in JavaScript.
 
 ---
 
@@ -572,7 +581,7 @@ things around the edges, all now fixed:
 |---|---|
 | `caller_role` defaulted to a role that can read everything | Returns `None`; both readers call `require_role` |
 | Signing key was a plaintext Lambda env var, readable via `lambda:GetFunctionConfiguration` | Generated into Secrets Manager, fetched per cold start, `GetSecretValue` granted to two functions |
-| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; origin is now the `AllowedOrigin` parameter |
+| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; successful responses use the explicit `AllowedOrigins` allowlist |
 | No revocation path | Rotating the secret invalidates everything within the 60s authorizer cache |
 | `api_arn()` returned `Resource: '*'` on an unparseable ARN | Raises; the request is refused |
 | No `iss`/`aud`, so a dev token worked against prod on a shared key | Both claims minted and checked |
