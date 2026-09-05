@@ -1374,8 +1374,8 @@ window.App = window.App || {};
     /**
      * The visible half of a write confirmation - "Changes saved.", "Document
      * uploaded." - for the actions that have no other on-screen sign that they
-     * worked. Same shape as errorBanner so the two behave identically; only the
-     * colour and the data-action differ, so dismissing one never eats the other.
+     * worked. CSS presents this outside the page flow as an auto-dismissing
+     * toast; the separate data-action ensures dismissing it never eats an error.
      */
     successBanner: function (message) {
       return '' +

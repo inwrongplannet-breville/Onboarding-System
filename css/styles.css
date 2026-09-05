@@ -1438,10 +1438,8 @@ input[type="checkbox"]:disabled + .item-label { opacity: 0.55; }
    Feedback - banners and notes
    ============================================================ */
 
-/*
- * .alert and .notice are the same object in two colours, and they sit outside
- * #app so they survive a view that never rendered.
- */
+/* Errors stay in the page flow. Successes use the same internal object as a
+   fixed toast, so confirming a save never moves the dashboard underneath it. */
 .alert,
 .notice {
   display: flex;
@@ -1472,6 +1470,36 @@ input[type="checkbox"]:disabled + .item-label { opacity: 0.55; }
 }
 .notice .btn-link { color: var(--ok-fg); }
 .notice .btn-link:hover { color: var(--ok); background: none; }
+
+#app-notice {
+  position: fixed;
+  top: 76px;
+  right: 20px;
+  z-index: 30;
+  width: min(380px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+#app-notice:empty { display: none; }
+#app-notice .notice {
+  margin: 0;
+  box-shadow: var(--shadow-lg);
+  pointer-events: auto;
+  animation: toast-in .16s ease-out;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 520px) {
+  #app-notice {
+    right: 16px;
+    left: 16px;
+    width: auto;
+  }
+}
 
 /* Archived banner. Amber rather than red - an archived record is a normal end
    state, not an error, and painting it in the delete colour reads as

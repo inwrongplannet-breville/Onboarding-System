@@ -75,7 +75,7 @@ window.App = window.App || {};
   function notify(text) {
     noticeSlot.innerHTML = ui.successBanner(text);
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(clearNotice, 4000);
+    noticeTimer = setTimeout(clearNotice, 3000);
   }
 
   function clearNotice() {
@@ -745,9 +745,16 @@ window.App = window.App || {};
         checkbox.getAttribute('data-employee-id'),
         checkbox.getAttribute('data-date'),
         { status: checkbox.checked ? 'present' : 'leave' }
-      ).then(function () {
+      ).then(function (result) {
+        // The PUT response is already the server's answer for this cell. A full
+        // monthly refetch here used to clear and rebuild roughly 900 controls,
+        // reset both scroll axes, and multiply the API latency after every tick.
+        // Keep the table in place and reconcile only this checkbox instead.
+        if (result && result.attendance) {
+          checkbox.checked = result.attendance.status === 'present';
+        }
+        checkbox.disabled = false;
         notify('Attendance updated by HR.');
-        renderAttendanceSheet();
       }, function (error) {
         checkbox.checked = previousValue;
         checkbox.disabled = false;
@@ -1031,9 +1038,13 @@ window.App = window.App || {};
 
       store.markOwnAttendance({
         status: checkbox.checked ? 'present' : 'leave'
-      }).then(function () {
+      }).then(function (result) {
+        if (result && result.attendance) {
+          checkbox.checked = result.attendance.status === 'present';
+        }
+        submitting = false;
+        checkbox.disabled = false;
         notify('Today\'s attendance was saved.');
-        renderProfile();
       }, function (error) {
         submitting = false;
         checkbox.checked = previousValue;

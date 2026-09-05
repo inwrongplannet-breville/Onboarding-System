@@ -83,11 +83,9 @@
   <div class="container">
     <div id="app-error" role="alert" aria-live="assertive"></div>
 
-    <!-- The visible half of a write confirmation - "Changes saved", "Document
-         uploaded" - for the handful of actions that have no other on-screen
-         sign that they worked. Outside #app for the same reason as the error
-         banner: it must survive a full view repaint. role=status rather than
-         alert, because a success is not urgent. -->
+    <!-- A floating, auto-dismissing write confirmation. It stays outside #app
+         so a view repaint cannot remove it, and fixed positioning keeps it out
+         of the dashboard layout. role=status because a success is not urgent. -->
     <div id="app-notice" role="status" aria-live="polite"></div>
 
     <!-- Confirmations, not failures: "Changes saved", "3 of 8 complete". Outside
