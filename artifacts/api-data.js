@@ -344,13 +344,13 @@
     },
     {
       category: "Attendance", title: "Mark today's attendance", actor: "Employee",
-      description: "Load the month beside the profile, then save today's declaration during the Asia/Kolkata window.",
-      steps: [{ calls: [{ method: "GET", path: "/attendance/me", note: "Monthly history" }] }, { calls: [{ method: "PUT", path: "/attendance/me/today", note: "08:30-18:00 only" }] }]
+      description: "Load today's checkbox state beside the profile, then save and reconcile that checkbox in place without reloading the employee dashboard.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/me", note: "Checkbox state + marking window" }] }, { calls: [{ method: "PUT", path: "/attendance/me/today", note: "08:30-18:00 only" }] }, { local: "No endpoint · reconcile checkbox + floating success toast" }]
     },
     {
       category: "Attendance", title: "Open and edit the HR sheet", actor: "Official",
-      description: "Load one month, edit any employee/date cell, then refresh totals from the server.",
-      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet?month={month}", note: "Monthly matrix" }] }, { optional: true, calls: [{ method: "PUT", path: "/attendance/{employeeId}/{date}", note: "HR correction" }] }, { optional: true, calls: [{ method: "GET", path: "/attendance/sheet?month={month}", note: "Refresh" }] }]
+      description: "Load one month, then save each employee/date checkbox in place without refetching, repainting, or resetting the sheet's scroll position.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet?month={month}", note: "Monthly matrix" }] }, { optional: true, calls: [{ method: "PUT", path: "/attendance/{employeeId}/{date}", note: "HR correction" }] }, { optional: true, local: "No endpoint · reconcile one checkbox + floating success toast" }]
     },
     {
       category: "Attendance", title: "Download attendance CSV", actor: "Official",

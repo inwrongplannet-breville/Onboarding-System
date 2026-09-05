@@ -48,6 +48,11 @@ succeeded, all 26 endpoint consoles opened, all five attendance routes rendered,
 dashboard rendered, and no console or network errors occurred. The deployed API and document
 bucket both contain `http://localhost:8001` in their explicit CORS allowlists.
 
+On 5 September 2026, the route inventory was compared again with `template.yaml`: all 26 method/path
+pairs match exactly, all 33 functions exported by `App.store` are mapped, and both reference scripts
+pass `node --check`. The attendance examples and flows now document the Present/Leave contract and
+the employee and HR checkbox updates that reconcile in place without reloading their dashboards.
+
 ## Maintenance and validation
 
 Keep changes to this reference component inside this directory. When the API contract changes:
