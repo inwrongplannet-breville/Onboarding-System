@@ -8,6 +8,10 @@ desktop.ini
 .idea/
 *.swp
 
+# Local AI assistant workspace state
+.claude/
+.codex/
+
 # Nothing is built or installed in Phase 1 - these are here for later phases
 node_modules/
 dist/
