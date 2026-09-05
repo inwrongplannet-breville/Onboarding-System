@@ -32,7 +32,7 @@
     },
     {
       "key": "password",
-      "value": "onboard-2026",
+      "value": "",
       "type": "string"
     },
     {
@@ -42,6 +42,11 @@
     },
     {
       "key": "employeeToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "employeePassword",
       "value": "",
       "type": "string"
     },
@@ -135,7 +140,7 @@
             "login"
           ]
         },
-        "description": "Exchanges the demo officials credentials for a signed JWT and stores it as {{token}}. Every request below inherits it as bearer auth, so this one has to run first - on its own, or as the first request of a collection run.\n\nA 403 here means the deployed stack predates the login route. A 401 means the stack is not using the demo accounts; change {{username}} and {{password}}."
+        "description": "Exchanges the privately configured official credentials for a signed JWT and stores it as {{token}}. Set the collection variables {{username}} and {{password}} locally before running it. Every request below inherits the bearer token, so this request has to run first.\n\nA 403 here means the deployed stack predates the login route. A 401 means the configured username or password is not accepted."
       }
     },
     {
@@ -2307,7 +2312,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"username\": \"E1001\",\n  \"password\": \"welcome-2026\"\n}"
+              "raw": "{\n  \"username\": \"E1001\",\n  \"password\": \"{{employeePassword}}\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/login",

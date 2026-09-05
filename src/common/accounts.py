@@ -22,11 +22,10 @@ record, one number at a time. Before this holds real data it needs per-employee
 credentials, which is the Cognito note below and not a small edit.
 
 Passwords are stored as PBKDF2-SHA256 hashes rather than plaintext. The reasoning
-is not that the hash is secret - the demo passwords are in README.md, because
-nobody can use this app without them - it is that the *code* should never be the
-place a password is written down. The day these accounts become real ones, the
-hashes get replaced and nothing else here changes. A plaintext comparison would
-have to be found and rewritten first, which is exactly the edit that gets missed.
+is not that the hash is secret - it is that the *code* should never be the place
+a password is written down. Operators choose passwords locally and seed only the
+derived values into Secrets Manager. A plaintext comparison would have to be
+found and rewritten first, which is exactly the edit that gets missed.
 
 The salt+hash values themselves live in Secrets Manager, not in this file - see
 _load() below. That is the same move common/tokens.py already made for the JWT

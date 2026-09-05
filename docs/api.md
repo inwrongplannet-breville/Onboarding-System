@@ -28,9 +28,10 @@ All requests and responses are JSON.
 Every route except `POST /login` sits behind a Lambda authorizer and needs a bearer token:
 
 ```bash
-export OFFICIAL_TOKEN=$(curl -s -X POST "$BASE_URL/login" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"hr.admin","password":"onboard-2026"}' | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+set -a; source .env; set +a
+export OFFICIAL_TOKEN=$(py -c 'import json,os; print(json.dumps({"username": os.environ["ONBOARDING_USERNAME"], "password": os.environ["ONBOARDING_PASSWORD"]}))' \
+  | curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' --data-binary @- \
+  | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
 export OFFICIAL_AUTH="Authorization: Bearer $OFFICIAL_TOKEN"
 
 curl -s "$BASE_URL/employees" -H "$OFFICIAL_AUTH"
@@ -48,8 +49,8 @@ Wrong credentials are `401` with one generic message, whether the username exist
 verifies against one shared password, and the number becomes the token's `sub`:
 
 ```bash
-curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' \
-  -d '{"username":"E1001","password":"welcome-2026"}'
+py -c 'import json,os; print(json.dumps({"username": "E1001", "password": os.environ["ACCOUNTS_EMPLOYEE_PASSWORD"]}))' \
+  | curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' --data-binary @-
 ```
 
 ```json
@@ -59,9 +60,9 @@ curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' \
 For the employee-authenticated examples below:
 
 ```bash
-export EMPLOYEE_TOKEN=$(curl -s -X POST "$BASE_URL/login" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"E1001","password":"welcome-2026"}' | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
+export EMPLOYEE_TOKEN=$(py -c 'import json,os; print(json.dumps({"username": "E1001", "password": os.environ["ACCOUNTS_EMPLOYEE_PASSWORD"]}))' \
+  | curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' --data-binary @- \
+  | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
 export EMPLOYEE_AUTH="Authorization: Bearer $EMPLOYEE_TOKEN"
 ```
 
@@ -124,7 +125,8 @@ responses reflect the matching origin and omit the header for every other origin
 The distinction is load-bearing for the frontend: `js/store.js` signs the user out on a 401 and
 passes a 403 through to the caller. Don't collapse them.
 
-Don't put real employee data in this stack — the credentials above are in a public repo.
+Don't put real employee data in this development stack. Login passwords belong only in the
+gitignored local `.env` file and the deployed Secrets Manager value.
 
 ### Route summary
 
@@ -899,8 +901,8 @@ Officials-only above. This is the other role, end to end — a fresh token, beca
 checks that prove the API and not the browser is doing the scoping.
 
 ```bash
-E_TOKEN=$(curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' \
-  -d '{"username":"E1001","password":"welcome-2026"}' \
+E_TOKEN=$(py -c 'import json,os; print(json.dumps({"username": "E1001", "password": os.environ["ACCOUNTS_EMPLOYEE_PASSWORD"]}))' \
+  | curl -s -X POST "$BASE_URL/login" -H 'Content-Type: application/json' --data-binary @- \
   | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
 AUTH="Authorization: Bearer $E_TOKEN"
 
@@ -953,7 +955,7 @@ about the current deployment; use the acceptance run and automated tests for a f
 
 | Route | As | Result |
 |---|---|---|
-| `POST /login` | `hr.admin` / `onboard-2026` | `200`, official token |
+| `POST /login` | `hr.admin` / configured HR credential | `200`, official token |
 | `POST /login` | `hr.admin` / wrong password | `401`, generic message |
 | `GET /employees` | official | `200`, live onboarding table — 7 records, one with `employmentType: "Intern"` |
 | `GET /employees` | no token | `401 Unauthorized` |
@@ -967,7 +969,7 @@ about the current deployment; use the acceptance run and automated tests for a f
 | `PATCH /employees/{id}/checklist/{itemId}` | official, unknown item id | `404 NotFound` |
 | `PATCH /employees/{id}/checklist/{itemId}` | employee | `403 Forbidden` — read-only access |
 | `GET /employees/{id}/documents` | official | `200`, all three slots `uploaded: false` |
-| `POST /login` | `ZTEST01` / `welcome-2026` | `200`, employee token — a freshly created employee is a valid login on the shared password with no separate provisioning step |
+| `POST /login` | `ZTEST01` / configured employee credential | `200`, employee token — a freshly created employee is a valid login on the shared password with no separate provisioning step |
 | `GET /employees/{id}` | self | `200` |
 | `GET /employees/{id}` | self, someone else's id | `403 Forbidden` |
 | `GET /employees` | self | `403 Forbidden` — the list itself, not just other records |

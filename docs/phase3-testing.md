@@ -6,6 +6,7 @@ and check". Takes about ten minutes.
 ## Setup
 
 ```bash
+cp .env.example .env                            # fill in private dev credentials
 py scripts/seed_employees.py --wipe --seed        # 30 people: 10 onboarding, 10 employees, 10 interns
 py -m http.server 8000
 ```
@@ -13,7 +14,7 @@ py -m http.server 8000
 Open the main application at `http://localhost:8000/` with devtools on the **Network** tab, **Disable cache** and
 **Preserve log** both ticked.
 
-You land on the login page. Sign in as `hr.admin` / `onboard-2026` for everything from
+You land on the login page. Sign in as `hr.admin` with the HR password from `.env` for everything from
 "Happy path" onwards — those sections are the officials console, unchanged. The role
 section below covers the other account.
 
@@ -79,7 +80,7 @@ browser is not the thing enforcing it.
 | 1 | Load `/` signed out | The login card. Not a flash of the employee list on the way past |
 | 2 | Type `#/onboarding`, `#/onboarding/new`, `#/onboarding/E1001/edit`, `#/onboarding/E1001/checklist` into the address bar, signed out | Every one lands on `#/login` |
 | 3 | Sign in with a wrong password | Inline message above the fields, password cleared, focus in the password box, and the message is announced |
-| 4 | Sign in as `E1001` / `welcome-2026` | `#/me` — one person's record. Their name in the header chip (not `E1001`, which is all the login could return), their own checklist with no checkboxes, and one form of three fields |
+| 4 | Sign in as `E1001` with the employee password from `.env` | `#/me` — one person's record. Their name in the header chip (not `E1001`, which is all the login could return), their own checklist with no checkboxes, and one form of three fields |
 | 4b | Sign in as `e1001`, lower case | The same record. The number is upper-cased into the token so it matches the partition key |
 | 5 | As the employee, read the Network response for `GET /employees/E1001` | The **whole** record — `email`, `manager`, `employmentType`, `checklist` all present. Then check every checklist item: **no `comment` key at all.** Absent, not empty. This is the check that matters, because the UI not drawing a field proves nothing |
 | 5b | As the employee, type `#/onboarding/E1002` in the address bar | Bounced to `#/me`. Then in the console, `fetch(App.API_BASE_URL + '/employees/E1002', {headers:{Authorization:'Bearer ' + App.auth.token()}}).then(r => r.status)` → **403**. The guard sent you back; the API is what refused you |
@@ -93,7 +94,7 @@ browser is not the thing enforcing it.
 | 7f | Drop a `.exe`, then a file just outside a zone | Refused on type; and the page does **not** navigate away to render the file — that is the document-level `dragover`/`drop` guard in `app.js` |
 | 7g | Upload a file called `../../etc/passwd.pdf` | Succeeds, stored as `passwd.pdf`. In the S3 console the key is still exactly `employees/E1001/resume` — the key is built from the slot and the token, so a filename can never move it |
 | 7h | Now save your contact details | **The documents section is still populated.** Every repaint in this app is driven by a write's response, and no write response carries documents — this is the regression that check exists for |
-| 7b | Sign in as `E9999` / `welcome-2026` | Signs in fine, then "We cannot find your record". `POST /login` has no table access, so a mistyped number cannot be caught any earlier — and this screen has no link back to `#/onboarding`, which the guard would bounce |
+| 7b | Sign in as `E9999` with the employee password from `.env` | Signs in fine, then "We cannot find your record". `POST /login` has no table access, so a mistyped number cannot be caught any earlier — and this screen has no link back to `#/onboarding`, which the guard would bounce |
 | 8 | Sign in as `hr.admin` and check any request header | `Authorization: Bearer …`, and the preflight `OPTIONS` returns 200. A failed preflight shows up here as a CORS error rather than as a 401 |
 | 9 | Reload mid-session | Still signed in |
 | 10 | Sign out, then press Back | The login page, not the app |
@@ -231,9 +232,9 @@ export BASE_URL=https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev
 # No token: 401, before any handler runs.
 curl -s -o /dev/null -w '%{http_code}\n' $BASE_URL/employees
 
-export TOKEN=$(curl -s -X POST $BASE_URL/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"hr.admin","password":"onboard-2026"}' \
+set -a; source .env; set +a
+export TOKEN=$(py -c 'import json,os; print(json.dumps({"username": os.environ["ONBOARDING_USERNAME"], "password": os.environ["ONBOARDING_PASSWORD"]}))' \
+  | curl -s -X POST $BASE_URL/login -H 'Content-Type: application/json' --data-binary @- \
   | py -c "import json,sys; print(json.load(sys.stdin)['token'])")
 
 curl -s $BASE_URL/employees -H "Authorization: Bearer $TOKEN"

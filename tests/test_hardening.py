@@ -240,7 +240,8 @@ def test_a_fresh_cached_secret_is_not_refetched(monkeypatch):
 
 def test_a_login_never_returns_the_signing_key(handlers):
     response = handlers['login']({'body': json.dumps(
-        {'username': 'hr.admin', 'password': 'onboard-2026'})}, None)
+        {'username': 'hr.admin',
+         'password': os.environ['TEST_OFFICIAL_PASSWORD']})}, None)
     assert os.environ['JWT_SECRET'] not in response['body']
 
 

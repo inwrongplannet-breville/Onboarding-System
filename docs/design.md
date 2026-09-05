@@ -781,7 +781,7 @@ therefore never cached.
   API Gateway WebSockets or DynamoDB Streams, which is real infrastructure and well past this stack.
 - **Real credential storage** — the signing key and the two accounts' PBKDF2 hashes both now live in
   Secrets Manager, but it's still one shared password per role rather than per-employee credentials,
-  and the demo passwords are in a public README. A Cognito user pool is where per-employee
+  and credentials are configured outside source control. A Cognito user pool is where per-employee
   credentials go. Don't put real employee data in the dev stack.
 - **Per-IP login rate limiting** — `POST /login` is throttled stage-wide at the gateway, which caps
   the bill and the guessing rate but cannot tell one caller from another. Per-IP is a WAF rate-based

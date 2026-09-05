@@ -116,9 +116,9 @@
       id: "post-login", tag: "Authentication", method: "POST", path: "/login", summary: "Create an 8-hour session", access: "Public", success: 200,
       description: "Checks a named official account or an employee-number login against PBKDF2 hashes in Secrets Manager, then signs a role-bearing JWT. Employee login validates the ID shape but deliberately does not check DynamoDB.",
       flow: ["API Gateway throttle (5/s)", "Login Lambda", "Secrets Manager", "Sign JWT"],
-      body: { username: "hr.admin", password: "onboard-2026" },
+      body: { username: "hr.admin", password: "<configured locally>" },
       responses: { 200: "Token, role, displayName, expiresIn", 400: "Missing fields", 401: "Incorrect credentials", 429: "Gateway throttle", 500: "InternalError" },
-      example: { token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...", role: "official", displayName: "HR Admin", expiresIn: 28800 }
+      example: { token: "<JWT returned by login>", role: "official", displayName: "HR Admin", expiresIn: 28800 }
     },
     {
       id: "get-employees", tag: "Employees", method: "GET", path: "/employees", summary: "List active onboarding records", access: official, success: 200,
@@ -503,8 +503,8 @@
   window.API_DOCS = {
     baseUrl: "https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev",
     credentials: {
-      official: { username: "hr.admin", password: "onboard-2026" },
-      employee: { username: "E1001", password: "welcome-2026" }
+      official: { username: "hr.admin", password: "" },
+      employee: { username: "E1001", password: "" }
     },
     checklistIds: ["offer-letter", "id-proof", "bank-details", "laptop", "email-account", "access-card", "induction", "policy-ack"],
     endpoints,

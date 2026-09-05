@@ -4,7 +4,7 @@ API with 30 deterministic people - 10 still onboarding, 10 promoted employees an
 10 promoted interns. Every intern points at one of the promoted employees.
 
 The fixtures live here because the frontend has no local employee data. E1001 is
-kept as a promoted employee so the documented employee demo login remains useful;
+kept as a promoted employee so the documented employee login flow remains useful;
 the remaining details are synthetic and stable across reseeds.
 
 Seeding deliberately drives the REST API rather than boto3 against DynamoDB, so it
@@ -47,14 +47,13 @@ follows from seeding through the API rather than around it, and it is worth
 keeping: if the login route or the authorizer breaks, the seed fails loudly
 instead of the browser being the first thing to find out.
 
-Credentials resolution, in order: --username/--password, then $ONBOARDING_USERNAME
-and $ONBOARDING_PASSWORD, then the demo officials account. --wipe needs no
-credentials at all - it goes at the table, not the API.
+Credentials come from $ONBOARDING_USERNAME and $ONBOARDING_PASSWORD. The
+repository's ignored .env file is loaded automatically for local use. --wipe
+needs no credentials at all - it goes at the table, not the API.
 
 Usage:
     py scripts/seed_employees.py --wipe --seed --yes
     py scripts/seed_employees.py --seed --base-url https://... /dev
-    py scripts/seed_employees.py --seed --username hr.admin --password ...
 
 Base URL resolution, in order: --base-url, $API_BASE_URL, then the ApiBaseUrl output
 of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolves
@@ -73,14 +72,13 @@ import time
 import urllib.error
 import urllib.request
 
+from dotenv import load_dotenv
+
 STACK_NAME = 'onboarding-system-dev'
 REGION = 'eu-north-1'
 
-# The demo officials account, matching src/common/accounts.py. Only a default -
-# --username/--password or the environment override it, which is what a stack
-# with real accounts would use.
 DEFAULT_USERNAME = 'hr.admin'
-DEFAULT_PASSWORD = 'onboard-2026'
+ENV_PATH = os.path.join(os.path.dirname(__file__), '..', '.env')
 
 # One dict per hire. `promote` says which sequence to run once the checklist is
 # ticked: None leaves them in OnboardingTable with varied progress; 'employee'
@@ -261,7 +259,7 @@ def log_in(base_url, username, password):
 
     The 401 case is called out separately because it is the one a person is most
     likely to hit and the least likely to diagnose from a status code: the stack
-    was deployed with different accounts, or the demo passwords were changed.
+    was deployed with different accounts, or the local credentials are stale.
     """
     print('Signing in as {}...'.format(username))
     try:
@@ -270,8 +268,8 @@ def log_in(base_url, username, password):
     except ApiError as error:
         if ' 401 ' in str(error):
             raise ApiError(
-                'Login was refused for {}. Pass --username/--password, or set '
-                '$ONBOARDING_USERNAME and $ONBOARDING_PASSWORD.'.format(username)
+                'Login was refused for {}. Check $ONBOARDING_USERNAME and '
+                '$ONBOARDING_PASSWORD in the local .env file.'.format(username)
             ) from None
         if ' 403 ' in str(error):
             raise ApiError(
@@ -289,11 +287,14 @@ def log_in(base_url, username, password):
     return result['token']
 
 
-def resolve_credentials(username, password):
-    return (
-        username or os.environ.get('ONBOARDING_USERNAME') or DEFAULT_USERNAME,
-        password or os.environ.get('ONBOARDING_PASSWORD') or DEFAULT_PASSWORD,
-    )
+def resolve_credentials():
+    username = os.environ.get('ONBOARDING_USERNAME') or DEFAULT_USERNAME
+    password = os.environ.get('ONBOARDING_PASSWORD')
+    if not password:
+        raise ApiError(
+            'Missing $ONBOARDING_PASSWORD. Copy .env.example to .env and set it '
+            'to the official account password.')
+    return username, password
 
 
 def resolve_base_url(explicit):
@@ -578,6 +579,7 @@ def seed(base_url, token):
 
 
 def main():
+    load_dotenv(ENV_PATH)
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--wipe', action='store_true',
@@ -588,8 +590,6 @@ def main():
     parser.add_argument('--table-onboarding', help='OnboardingTable name, for --wipe')
     parser.add_argument('--table-employee', help='EmployeeTable name (employees and interns both), for --wipe')
     parser.add_argument('--table-attendance', help='AttendanceTable name, for --wipe')
-    parser.add_argument('--username', help='officials username for --seed')
-    parser.add_argument('--password', help='password for --username')
     args = parser.parse_args()
 
     if not args.wipe and not args.seed:
@@ -612,7 +612,7 @@ def main():
             base_url = resolve_base_url(args.base_url)
             print('API: {}'.format(base_url))
 
-            username, password = resolve_credentials(args.username, args.password)
+            username, password = resolve_credentials()
             seed(base_url, log_in(base_url, username, password))
     except ApiError as error:
         raise SystemExit('\nFAILED: {}'.format(error))

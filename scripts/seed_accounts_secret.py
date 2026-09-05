@@ -6,7 +6,7 @@ JWT signing key - GenerateSecretString produces a random string, and a login
 credential has to correspond to an actual chosen password. So AccountsSecret
 deploys with an all-zero placeholder that matches nothing (see the resource
 comment in template.yaml), and this script is the second, deliberately separate
-step: it derives the salt+hash for the demo passwords the same way
+step: it derives the salt+hash for locally configured passwords the same way
 common/accounts.py verifies them, and pushes the result into the secret with
 `aws secretsmanager put-secret-value`.
 
@@ -16,17 +16,15 @@ failure mode for a forgotten seeding step, not a bug to route around.
 Usage:
     py scripts/seed_accounts_secret.py
     py scripts/seed_accounts_secret.py --secret-arn arn:aws:secretsmanager:...
-    py scripts/seed_accounts_secret.py --hr-password ... --employee-password ...
 
 ARN resolution, in order: --secret-arn, $ACCOUNTS_SECRET_ARN, then the
 AccountsSecretArn output of the onboarding-system-dev CloudFormation stack via
 the AWS CLI - the same lookup seed_employees.py uses for ApiBaseUrl/TableName.
 
-Password resolution, in order: --hr-password/--employee-password, then
-$ACCOUNTS_HR_PASSWORD/$ACCOUNTS_EMPLOYEE_PASSWORD, then the demo passwords in
-README.md. Passing a real password on the command line leaves it in shell
-history - fine for the demo passwords, not for anything real; use the
-environment variables instead once these accounts stop being a demo.
+Passwords come from $ACCOUNTS_HR_PASSWORD and $ACCOUNTS_EMPLOYEE_PASSWORD.
+The repository's ignored .env file is loaded automatically for local use. There
+are deliberately no command-line password options or committed defaults, so a
+credential cannot land in shell history or source control by accident.
 
 Uses the AWS CLI rather than boto3, for the same reason seed_employees.py does:
 `aws login`'s cached credentials are not boto3-readable without botocore[crt],
@@ -42,14 +40,13 @@ import subprocess
 import sys
 import tempfile
 
+from dotenv import load_dotenv
+
 STACK_NAME = 'onboarding-system-dev'
 REGION = 'eu-north-1'
 
-# The demo accounts, matching src/common/accounts.py and README.md. Only a
-# default - --hr-password/--employee-password or the environment override it.
 HR_USERNAME = 'hr.admin'
-DEFAULT_HR_PASSWORD = 'onboard-2026'
-DEFAULT_EMPLOYEE_PASSWORD = 'welcome-2026'
+ENV_PATH = os.path.join(os.path.dirname(__file__), '..', '.env')
 
 # src/ is not normally on sys.path outside a Lambda - added here so this script
 # can import the one thing it must never reimplement: _derive. The PBKDF2
@@ -93,12 +90,17 @@ def resolve_secret_arn(explicit):
     return stack_output('AccountsSecretArn')
 
 
-def resolve_passwords(hr_password, employee_password):
-    return (
-        hr_password or os.environ.get('ACCOUNTS_HR_PASSWORD') or DEFAULT_HR_PASSWORD,
-        employee_password or os.environ.get('ACCOUNTS_EMPLOYEE_PASSWORD')
-        or DEFAULT_EMPLOYEE_PASSWORD,
-    )
+def resolve_passwords():
+    values = {
+        'ACCOUNTS_HR_PASSWORD': os.environ.get('ACCOUNTS_HR_PASSWORD'),
+        'ACCOUNTS_EMPLOYEE_PASSWORD': os.environ.get('ACCOUNTS_EMPLOYEE_PASSWORD'),
+    }
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise SystemExit(
+            'Missing {}. Copy .env.example to .env and set the required values.'.format(
+                ' and '.join('$' + name for name in missing)))
+    return values['ACCOUNTS_HR_PASSWORD'], values['ACCOUNTS_EMPLOYEE_PASSWORD']
 
 
 def credential(password):
@@ -134,16 +136,14 @@ def put_secret(secret_arn, payload):
 
 
 def main():
+    load_dotenv(ENV_PATH)
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--secret-arn', help='ARN of the deployed AccountsSecret')
-    parser.add_argument('--hr-password', help='password for the hr.admin account')
-    parser.add_argument('--employee-password',
-                        help='shared password for every employee number')
     args = parser.parse_args()
 
+    hr_password, employee_password = resolve_passwords()
     secret_arn = resolve_secret_arn(args.secret_arn)
-    hr_password, employee_password = resolve_passwords(args.hr_password, args.employee_password)
 
     payload = {
         'accounts': {

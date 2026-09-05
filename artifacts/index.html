@@ -68,8 +68,8 @@
 
         <div class="auth-card">
           <div class="auth-copy">
-            <h3>Demo credentials</h3>
-            <p>These are the deployed development credentials documented by this repository. A successful login is held only in this tab's <code>sessionStorage</code>.</p>
+            <h3>Development sign-in</h3>
+            <p>Enter credentials configured privately for the development stack. A successful login is held only in this tab's <code>sessionStorage</code>.</p>
             <div class="role-switch" role="tablist" aria-label="Credential role">
               <button class="role-button active" data-role="official" type="button">Official</button>
               <button class="role-button" data-role="employee" type="button">Employee</button>
@@ -77,9 +77,9 @@
           </div>
           <form id="login-form" class="auth-form">
             <label><span>Username</span><input id="login-username" name="username" value="hr.admin" autocomplete="username"></label>
-            <label><span>Password</span><input id="login-password" name="password" type="password" value="onboard-2026" autocomplete="current-password"></label>
+            <label><span>Password</span><input id="login-password" name="password" type="password" autocomplete="current-password"></label>
             <button class="primary-button" id="login-button" type="submit"><span>Connect to AWS</span><b aria-hidden="true">→</b></button>
-            <p class="microcopy">Only sends credentials to the base URL shown above. This is a public demo stack—do not enter production credentials.</p>
+            <p class="microcopy">Only sends credentials to the base URL shown above. Do not use production credentials with this development stack.</p>
           </form>
         </div>
       </section>

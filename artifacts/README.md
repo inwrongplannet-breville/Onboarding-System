@@ -17,7 +17,7 @@ points use different ports and different document roots. Do not open the HTML di
 All usage, maintenance, and validation instructions for this reference component belong in this
 directory. Do not add its startup instructions or implementation details to the main README.
 
-The login form is prefilled with the real demo credentials already documented in this repository. Tokens are stored in `sessionStorage` and never written into these files. Requests that mutate live AWS data require an extra confirmation in the endpoint console.
+The login form accepts credentials configured privately for the development stack; no password is stored in these files. Tokens are stored in `sessionStorage` and never written into these files. Requests that mutate live AWS data require an extra confirmation in the endpoint console.
 
 ## Contract sources
 

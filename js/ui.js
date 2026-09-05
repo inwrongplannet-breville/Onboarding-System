@@ -879,14 +879,6 @@ window.App = window.App || {};
             '</div>' +
           '</form>' +
 
-          // There is no sign-up and no password reset, so the accounts have to
-          // be discoverable from the page itself. See src/common/accounts.py.
-          '<div class="login-hint">' +
-            '<p><strong>Demo accounts</strong></p>' +
-            '<p>Officials &mdash; <code>hr.admin</code> / <code>onboard-2026</code><br>' +
-            'Employee &mdash; your employee number, e.g. <code>E1001</code> / ' +
-              '<code>welcome-2026</code></p>' +
-          '</div>' +
         '</div>';
     },
 

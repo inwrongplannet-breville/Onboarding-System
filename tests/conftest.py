@@ -11,9 +11,12 @@ whether the condition expressions actually fire.
 import importlib
 import json
 import os
+import secrets
 import sys
 
 import pytest
+
+from common.accounts import _derive
 
 ONBOARDING_TABLE_NAME = 'onboarding-test'
 # Holds employees AND interns, told apart by entityType - see the merge note
@@ -43,26 +46,29 @@ os.environ.setdefault('AWS_SESSION_TOKEN', 'testing')
 # obviously not a real key so nobody is tempted to reuse it.
 os.environ.setdefault('JWT_SECRET', 'test-signing-key-not-for-any-deployment')
 
-# common/accounts.py reads this the same way, in the same ACCOUNTS_JSON-or-
-# ACCOUNTS_SECRET_ARN shape as JWT_SECRET/JWT_SECRET_ARN above - the plain env
-# var is the test/local path, so no Secrets Manager call happens here. These are
-# the same salt/hash values that used to live in accounts.py directly; moving
-# them to Secrets Manager for a deployed stack does not change what a test needs
-# to sign in as.
-os.environ.setdefault('ACCOUNTS_JSON', json.dumps({
+# Random per-process credentials keep login tests realistic without committing
+# a reusable plaintext password or a matching hash. The tests read the two
+# TEST_* values below; neither value is used by deployed code.
+TEST_OFFICIAL_PASSWORD = secrets.token_urlsafe(32)
+TEST_EMPLOYEE_PASSWORD = secrets.token_urlsafe(32)
+os.environ['TEST_OFFICIAL_PASSWORD'] = TEST_OFFICIAL_PASSWORD
+os.environ['TEST_EMPLOYEE_PASSWORD'] = TEST_EMPLOYEE_PASSWORD
+
+
+def generated_credential(password):
+    salt = secrets.token_hex(16)
+    return {'salt': salt, 'hash': _derive(password, salt)}
+
+
+# common/accounts.py reads this through the local/test ACCOUNTS_JSON path, so no
+# Secrets Manager call happens during the suite.
+os.environ['ACCOUNTS_JSON'] = json.dumps({
     'accounts': {
-        'hr.admin': {
-            'salt': '89cfb6356f147f197d5131fbc77a9e3f',
-            'hash': 'd5de7d5e4a770324e5d7a48f2a257581e832072e3ff0cfe7a049baa18d57555b',
-            'role': 'official',
-            'displayName': 'HR Admin',
-        },
+        'hr.admin': dict(generated_credential(TEST_OFFICIAL_PASSWORD),
+                         role='official', displayName='HR Admin'),
     },
-    'employeeCredential': {
-        'salt': '821ffd37011d86d96e9551dbe76a3776',
-        'hash': '33f8556d1f6946cd31f21f031ca333f0cfd5ed2c3b48b913760f148d2ec68374',
-    },
-}))
+    'employeeCredential': generated_credential(TEST_EMPLOYEE_PASSWORD),
+})
 
 # The `aud` claim tokens are minted for and checked against. Set here because
 # common/tokens.py refuses to guess it - a default is what lets two deployments

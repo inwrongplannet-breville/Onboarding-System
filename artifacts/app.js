@@ -216,7 +216,7 @@
     const session = currentSession();
 
     if (endpoint.access !== "Public" && !session.token) {
-      output.textContent = "No bearer token is available. Connect with the demo credentials above, then retry.";
+      output.textContent = "No bearer token is available. Connect with your configured development credentials, then retry.";
       toast("Connect first to call an authenticated route.");
       return;
     }
