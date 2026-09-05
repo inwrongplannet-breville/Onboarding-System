@@ -37,7 +37,7 @@ def lambda_handler(event, context):
     writer.writerow(
         ['Employee ID', 'Employee name', 'Employee role', 'Department'] +
         sheet['days'] +
-        ['Present total', 'Work from home total', 'Leave total', 'Absent total']
+        ['Present total', 'Leave total']
     )
     for employee in sheet['employees']:
         writer.writerow([
@@ -49,9 +49,7 @@ def lambda_handler(event, context):
             attendance.STATUS_LABELS.get(day['status'], '') for day in employee['days']
         ] + [
             employee['totals']['present'],
-            employee['totals']['work_from_home'],
             employee['totals']['leave'],
-            employee['totals']['absent'],
         ])
 
     return responses.csv_download(output.getvalue(), 'attendance-' + month + '.csv')

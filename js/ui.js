@@ -622,7 +622,7 @@ window.App = window.App || {};
       '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
         '<div class="attendance-heading-row">' +
           '<div><h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
-            '<p>Check for present or leave unchecked for absent.</p></div>' +
+            '<p>Check if present. Leave it unchecked for leave.</p></div>' +
         '</div>' +
         form +
       '</section>';
@@ -744,7 +744,7 @@ window.App = window.App || {};
           '<div class="field"><label for="attendance-role-filter">Role</label>' +
             '<select id="attendance-role-filter">' + filterOptions(roles) + '</select></div>' +
         '</div>' +
-        '<p class="attendance-help">Checked = present. Unchecked = absent.</p>' +
+        '<p class="attendance-help">Checked = present. Unchecked = leave.</p>' +
         '<div class="attendance-table-wrap" tabindex="0" aria-label="Scrollable attendance sheet">' +
           '<table class="attendance-table">' +
             '<caption>Attendance sheet for ' + escapeHtml(sheet.month) +

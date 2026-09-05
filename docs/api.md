@@ -796,13 +796,13 @@ a sweep, automatic retry) is deliberately deferred; see
 ## Attendance
 
 Attendance is a daily declaration rather than a time clock. The only stored statuses are
-`present`, `work_from_home`, `leave` and `absent`; there are no punches, work durations, device
+`present` and `leave`; there are no punches, work durations, device
 details or locations. Business time is Asia/Kolkata. Employee writes open at 08:30 inclusive and
 close at 18:00 exclusive every day. Official corrections are not constrained by that window.
 
 One `AttendanceTable` item is keyed by `employeeKey` plus `attendanceDate`. It carries snapshots of
 the employee name, job title as `employeeRole`, and department. The `AttendanceByMonth` index uses
-`attendanceMonth` plus `dateEmployeeKey`. A missing applicable item is calculated as absent; today
+`attendanceMonth` plus `dateEmployeeKey`. A missing applicable item is calculated as leave; today
 is upcoming before 08:30 and future dates remain blank.
 
 ### `PUT /attendance/me/today`

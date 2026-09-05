@@ -44,20 +44,29 @@ def test_employee_marking_window_boundaries(handlers, monkeypatch, instant, expe
     assert mark(handlers)['statusCode'] == expected
 
 
+def test_attendance_accepts_only_present_or_leave(handlers, monkeypatch):
+    create(handlers, employeeId='E1001')
+    set_clock(monkeypatch, at_ist(9, 0))
+
+    assert mark(handlers, 'present')['statusCode'] == 200
+    assert mark(handlers, 'leave')['statusCode'] == 200
+    assert mark(handlers, 'remote')['statusCode'] == 400
+
+
 def test_daily_record_carries_name_role_and_updates_in_place(handlers, monkeypatch):
     create(handlers, employeeId='E1001')
     set_clock(monkeypatch, at_ist(9, 0))
 
     first = mark(handlers, 'present')
-    second = mark(handlers, 'work_from_home', 'Working remotely')
+    second = mark(handlers, 'leave', 'Approved leave')
 
     assert first['statusCode'] == 200
     saved = body(second)['attendance']
     assert saved['employeeName'] == 'Priya Sharma'
     assert saved['employeeRole'] == 'Software Engineer'
     assert saved['department'] == 'Engineering'
-    assert saved['status'] == 'work_from_home'
-    assert saved['note'] == 'Working remotely'
+    assert saved['status'] == 'leave'
+    assert saved['note'] == 'Approved leave'
 
     table = boto3.resource('dynamodb').Table(ATTENDANCE_TABLE_NAME)
     items = table.scan()['Items']
@@ -65,15 +74,16 @@ def test_daily_record_carries_name_role_and_updates_in_place(handlers, monkeypat
     assert items[0]['attendanceDate'] == '2026-09-04'
 
 
-def test_missing_attendance_is_absent_from_start_time(handlers, monkeypatch):
+def test_missing_attendance_is_leave_from_start_time(handlers, monkeypatch):
     create(handlers, employeeId='E1001')
     set_clock(monkeypatch, at_ist(9, 0))
 
     row = body(sheet(handlers))['employees'][0]
     statuses = {day['date']: day['status'] for day in row['days']}
-    assert statuses['2026-09-03'] == 'absent'
-    assert statuses['2026-09-04'] == 'absent'
+    assert statuses['2026-09-03'] == 'leave'
+    assert statuses['2026-09-04'] == 'leave'
     assert statuses['2026-09-05'] is None
+    assert set(row['totals']) == {'present', 'leave'}
 
 
 def test_today_is_upcoming_before_the_window_opens(handlers, monkeypatch):
@@ -141,6 +151,9 @@ def test_csv_matches_calculated_sheet(handlers, monkeypatch):
     assert 'Employee name' in response['body']
     assert 'Priya Sharma' in response['body']
     assert 'Present' in response['body']
+    assert response['body'].splitlines()[0].split(',')[-2:] == [
+        'Present total', 'Leave total'
+    ]
 
 
 def test_employee_can_read_only_their_own_month(handlers, monkeypatch):

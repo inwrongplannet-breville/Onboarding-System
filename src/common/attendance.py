@@ -3,7 +3,7 @@
 Attendance is a daily declaration, not a time clock. Employees may create or
 replace today's declaration from 08:30 until 18:00 Asia/Kolkata. Officials are
 not constrained by that window. A missing applicable declaration is reported
-as absent without manufacturing a DynamoDB item for it.
+as leave without manufacturing a DynamoDB item for it.
 """
 import calendar
 import re
@@ -18,12 +18,10 @@ BUSINESS_TIMEZONE = timezone(timedelta(hours=5, minutes=30), BUSINESS_TIMEZONE_N
 MARKING_OPENS = time(8, 30)
 MARKING_CLOSES = time(18, 0)
 
-STATUSES = ('present', 'work_from_home', 'leave', 'absent')
+STATUSES = ('present', 'leave')
 STATUS_LABELS = {
     'present': 'Present',
-    'work_from_home': 'Work from home',
     'leave': 'Leave',
-    'absent': 'Absent',
 }
 NOTE_MAX_LENGTH = 300
 MONTH_PATTERN = re.compile(r'^\d{4}-\d{2}$')
@@ -86,7 +84,7 @@ def validate_submission(body):
     fields = {}
 
     if status not in STATUSES:
-        fields['status'] = 'Choose Present, Work from home, Leave or Absent.'
+        fields['status'] = 'Choose Present or Leave.'
     if not isinstance(note, str):
         fields['note'] = 'Note must be text.'
     else:
@@ -162,7 +160,7 @@ def _missing_status(day, employee_start, local_now):
         return None
     if day == local_now.date() and local_now.time().replace(tzinfo=None) < MARKING_OPENS:
         return None
-    return 'absent'
+    return 'leave'
 
 
 def build_sheet(month, roster, records, now=None):
@@ -187,7 +185,14 @@ def build_sheet(month, roster, records, now=None):
         for day in dates:
             day_value = day.isoformat()
             stored = by_employee_date.get((snapshot['employeeId'], day_value))
-            status = stored['status'] if stored else _missing_status(day, employee_start, local_now)
+            if stored:
+                status = stored.get('status')
+                # Older or otherwise unknown non-present values collapse to
+                # leave now that attendance has one non-present state.
+                if status not in STATUSES:
+                    status = 'leave'
+            else:
+                status = _missing_status(day, employee_start, local_now)
             if status:
                 totals[status] += 1
             days.append({

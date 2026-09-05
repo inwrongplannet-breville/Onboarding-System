@@ -90,7 +90,7 @@ with `scripts/seed_employees.py`; generic contract examples do not have to repre
 
 - Holds at most one daily declaration per employee, keyed by `employeeKey` and `attendanceDate`.
 - `AttendanceByMonth` supports HR's all-employee monthly sheet.
-- Missing applicable declarations are calculated as absent; do not bulk-write absence rows.
+- Missing applicable declarations are calculated as leave; do not bulk-write leave rows.
 - Employee writes are limited to 08:30 inclusive through 18:00 exclusive Asia/Kolkata.
 - Official attendance corrections are not constrained by the employee window.
 

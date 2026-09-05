@@ -744,7 +744,7 @@ window.App = window.App || {};
       store.updateEmployeeAttendance(
         checkbox.getAttribute('data-employee-id'),
         checkbox.getAttribute('data-date'),
-        { status: checkbox.checked ? 'present' : 'absent' }
+        { status: checkbox.checked ? 'present' : 'leave' }
       ).then(function () {
         notify('Attendance updated by HR.');
         renderAttendanceSheet();
@@ -1030,7 +1030,7 @@ window.App = window.App || {};
       clearError();
 
       store.markOwnAttendance({
-        status: checkbox.checked ? 'present' : 'absent'
+        status: checkbox.checked ? 'present' : 'leave'
       }).then(function () {
         notify('Today\'s attendance was saved.');
         renderProfile();

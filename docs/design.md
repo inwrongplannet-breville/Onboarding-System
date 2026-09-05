@@ -99,10 +99,10 @@ between them.
 
 Attendance adds a daily declaration card to `#/me` and a dedicated `#/attendance` HR screen. The
 employee card loads alongside the profile and documents and is editable only from 08:30 to 18:00
-Asia/Kolkata. Attendance is binary in the UI: checked means present and unchecked means absent,
+Asia/Kolkata. Attendance is binary in the UI: checked means present and unchecked means leave,
 with each change saved immediately. The HR screen renders the same checkbox per employee/date in a
 semantic monthly table with sticky identity columns, name/department/role filters, and an
-authenticated CSV download. The frontend displays the report returned by the API; absence is
+authenticated CSV download. The frontend displays the report returned by the API; leave is
 calculated once in the backend rather than independently in JavaScript.
 
 ---

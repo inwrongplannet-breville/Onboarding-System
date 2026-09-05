@@ -105,9 +105,9 @@ The base key supports one employee's monthly Query. `AttendanceByMonth` supports
 monthly sheet. The write is naturally idempotent because a second declaration for the same
 employee/date replaces the same key.
 
-Missing items are meaningful: for an applicable elapsed date they mean absent. They are filled into
+Missing items are meaningful: for an applicable elapsed date they mean leave. They are filled into
 the API report, never materialised by a nightly job. Today remains upcoming until 08:30
-Asia/Kolkata, becomes provisionally absent when the window opens, and employee writes close at
+Asia/Kolkata, is reported as leave when the window opens, and employee writes close at
 18:00. Future dates remain blank. Officials can write any employee/date at any time.
 
 The attendance roster combines non-archived `OnboardingTable` records with Employee and Intern rows

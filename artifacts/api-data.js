@@ -275,17 +275,17 @@
     },
     {
       id: "get-own-attendance", tag: "Attendance", method: "GET", path: "/attendance/me", summary: "View personal monthly attendance", access: self, success: 200,
-      description: "Returns the signed-in employee's month. Missing applicable dates are calculated as absent; future dates and today before 08:30 are upcoming.",
-      flow: ["Authorizer", "Employee role", "Load own profile", "AttendanceTable Query", "Calculate missing absences"],
+      description: "Returns the signed-in employee's month. Missing applicable dates are calculated as leave; future dates and today before 08:30 are upcoming.",
+      flow: ["Authorizer", "Employee role", "Load own profile", "AttendanceTable Query", "Calculate missing leave"],
       params: [attendanceMonth], responses: { 200: "Monthly employee row + window", 400: "Invalid month", 401: "Unauthorized", 403: "Wrong role", 404: "Employee missing", 500: "InternalError" },
-      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01", "2026-09-02"], employee: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, work_from_home: 0, leave: 0, absent: 0 } } }
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01", "2026-09-02"], employee: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } } }
     },
     {
       id: "get-attendance-sheet", tag: "Attendance", method: "GET", path: "/attendance/sheet", summary: "View all employees' monthly attendance", access: official, success: 200,
-      description: "Combines active onboarding and promoted staff with AttendanceTable records, collapses lifecycle duplicates, and calculates missing applicable declarations as absent.",
+      description: "Combines active onboarding and promoted staff with AttendanceTable records, collapses lifecycle duplicates, and calculates missing applicable declarations as leave.",
       flow: ["Authorizer", "Official role", "Scan active roster", "Query AttendanceByMonth", "Build monthly matrix"],
       params: [attendanceMonth], responses: { 200: "Monthly attendance sheet", 400: "Invalid month", 401: "Unauthorized", 403: "Employee role refused", 500: "InternalError" },
-      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01"], employees: [{ employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, work_from_home: 0, leave: 0, absent: 0 } }], count: 1 }
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01"], employees: [{ employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } }], count: 1 }
     },
     {
       id: "get-attendance-csv", tag: "Attendance", method: "GET", path: "/attendance/sheet.csv", summary: "Download the monthly attendance CSV", access: official, success: 200,
