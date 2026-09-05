@@ -4,6 +4,7 @@ Everything about how employees are stored in DynamoDB, and why. This is the auth
 description of the data model — [design.md](design.md) summarises it and links here.
 
 - [Two tables, not one](#two-tables-not-one)
+- [Attendance table](#attendance-table)
 - [Promotion](#promotion)
 - [The table](#the-table)
 - [The item](#the-item)
@@ -19,8 +20,9 @@ description of the data model — [design.md](design.md) summarises it and links
 
 ## Two tables, not one
 
-The system started as one table, `OnboardingTable`, holding every employee regardless of where
-they stood in onboarding. It is now two, split by lifecycle stage rather than by subtype:
+The employee lifecycle started as one table, `OnboardingTable`, holding every employee regardless
+of where they stood in onboarding. It now uses two profile tables, split by lifecycle stage rather
+than by subtype. Attendance is a third, independent time-series table described below.
 
 | Table | Backs | Holds |
 |---|---|---|
@@ -82,6 +84,35 @@ meaning "this id is an employee" — every handler that used to be able to assum
 
 This is the one real cost of merging the tables, and it is a cost paid in explicit checks rather
 than in structural safety: nothing here was silently lost, but nothing is free either.
+
+## Attendance table
+
+`AttendanceTable` stores at most one declaration per employee per business date:
+
+| | |
+|---|---|
+| Partition key | `employeeKey` (String), `EMP#<employeeId>` |
+| Sort key | `attendanceDate` (String), `YYYY-MM-DD` |
+| Secondary index | `AttendanceByMonth`: HASH `attendanceMonth`, RANGE `dateEmployeeKey`, projection `ALL` |
+| Billing | `PAY_PER_REQUEST` |
+
+Each item stores `employeeId`, snapshot fields `employeeName`, `employeeRole` and `department`, the
+date/month/index keys, `status`, optional `note`, `markedAt`, `updatedAt`, `updatedBy`, and
+`updatedByRole`. `employeeRole` is copied from the profile's `jobTitle`; it is not the authentication
+role. Identity fields are populated server-side.
+
+The base key supports one employee's monthly Query. `AttendanceByMonth` supports one Query for HR's
+monthly sheet. The write is naturally idempotent because a second declaration for the same
+employee/date replaces the same key.
+
+Missing items are meaningful: for an applicable elapsed date they mean leave. They are filled into
+the API report, never materialised by a nightly job. Today remains upcoming until 08:30
+Asia/Kolkata, is reported as leave when the window opens, and employee writes close at
+18:00. Future dates remain blank. Officials can write any employee/date at any time.
+
+The attendance roster combines non-archived `OnboardingTable` records with Employee and Intern rows
+from `EmployeeTable`, then collapses duplicates by immutable employee ID. This keeps attendance
+available during onboarding and during a safely interrupted promotion sequence.
 
 ## Promotion
 
@@ -226,10 +257,12 @@ What it costs:
   occupied and re-hiring requires a new number. That is the honest outcome; reusing a number would
   attach a second person's history to the first person's id.
 
-The seed fixtures use `E1001`–`E1006`, so a reseed lands the same people on the same ids and a
-hand-written link like `#/onboarding/E1003` survives a table reset.
+The seed fixtures use `E1001`–`E1030`, so a reseed lands the same people on the same ids and a
+hand-written link like `#/onboarding/E1023` survives a table reset.
 
 ## The item
+
+This is an illustrative item shape, not the identity of the current `E1024` seed fixture.
 
 ```
 employeeKey = EMP#<employeeId>
@@ -500,7 +533,7 @@ Measured against the deployed dev table, not estimated:
 | | Before (9 items/employee) | After (1 item/employee) |
 |---|---|---|
 | Per employee | ~1,758 bytes across 9 items | **~1,200 bytes in 1 item** |
-| 6 seeded employees | 54 items / 12,461 bytes | **6 items / ~7,214 bytes** |
+| Historical 6-employee measurement | 54 items / 12,461 bytes | **6 items / ~7,214 bytes** |
 | Fraction of the 400 KB item limit | — | ~0.3%, or ~1.3% with all 8 comments at their 500-char cap |
 
 The 32%-per-employee saving is entirely overhead, not data: eight copies of the partition key
@@ -549,9 +582,10 @@ Two other things that bite:
 py scripts/seed_employees.py --wipe --seed --yes
 ```
 
-`--wipe` clears both tables, resolving each name from the stack's `OnboardingTableName` /
-`EmployeeTableName` outputs (or `--table-onboarding`/`--table-employee`). One pass over
-`EmployeeTable` clears employees and interns together - they share it. Seeding drives the public
+`--wipe` clears all three tables, resolving each name from the stack's `OnboardingTableName`,
+`EmployeeTableName` and `AttendanceTableName` outputs (or their matching `--table-*` flags). One
+pass over `EmployeeTable` clears employees and interns together; the attendance pass includes both
+its partition and sort keys. Seeding drives the public
 REST API, promote sequence included, so a broken seed is a broken API rather than a mystery.
 Wiping cannot go through the API: `DELETE /employees/{id}` archives rather than erases, and none
 of the promote endpoints hard-delete without a copy existing first, so wiping over HTTP would
@@ -563,8 +597,8 @@ against the tables themselves.
 
 ## Verified behaviour
 
-`pytest` covers all six handlers against in-memory DynamoDB (moto) — 144 tests. moto emulates the
-API, not IAM, so the checks below were run against the deployed dev stack.
+`pytest` covers the handlers and shared modules against in-memory DynamoDB (moto) — 442 tests.
+moto emulates the API, not IAM, so the checks below were run against the deployed dev stack.
 
 **Schema.** `AttributeDefinitions` and `KeySchema` each contain `employeeKey` alone. No `SK` attribute exists
 on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry `checklist` in
@@ -587,8 +621,9 @@ on any item. All items are `EMP#` / `entityType: Employee`, each with an 8-entry
 | `PATCH .../contact` on an unknown id | `404`, and **no item created** — `UpdateItem` upserts, so the condition expression is what prevents a half-employee |
 | Second `DELETE` | `200`, keeps the first stamp |
 
-**IAM.** Seeding issues one `POST` and 21 `PATCH`es through the narrowed per-function roles with no
-`AccessDenied` — the thing moto cannot tell you.
+**IAM.** A full 30-person seed issues 30 create `POST`s, 192 checklist `PATCH`es, 30
+promotion/manager-link `POST`s, 20 lifecycle `DELETE`s, and three verification `GET`s through the
+narrowed per-function roles with no `AccessDenied` — the thing moto cannot tell you.
 
 One closing note for reviewers: `describe-table` now says almost nothing about this design. The
 embedded `checklist` is invisible to it, where previously the shape could at least be inferred from

@@ -1,19 +1,28 @@
 (() => {
   const employeeBody = {
-    employeeId: "E1024",
-    firstName: "Priya",
-    lastName: "Sharma",
-    email: "priya.sharma@breville.com",
-    phone: "+61 412 883 016",
-    department: "Engineering",
-    jobTitle: "Software Engineer",
-    manager: "Santosh Kumar",
-    startDate: "2026-07-06",
+    employeeId: "E1031",
+    firstName: "Nora",
+    lastName: "Wright",
+    email: "nora.wright@breville.com",
+    phone: "+61 400 031 147",
+    department: "Operations",
+    jobTitle: "Service Coordinator",
+    manager: "Jack Anderson",
+    startDate: "2026-10-05",
     employmentType: "Full-time"
   };
 
-  const updateBody = { ...employeeBody };
-  delete updateBody.employeeId;
+  const updateBody = {
+    firstName: "Sophie",
+    lastName: "King",
+    email: "sophie.king@breville.com",
+    phone: "+61 400 021 777",
+    department: "Engineering",
+    jobTitle: "Software Engineer",
+    manager: "Maya Chen",
+    startDate: "2026-09-21",
+    employmentType: "Full-time"
+  };
 
   const checklistResponse = [
     { id: "offer-letter", label: "Offer letter signed", owner: "HR", done: false, comment: "" },
@@ -27,15 +36,15 @@
   ];
 
   const employeeResponse = {
-    id: "E1024",
-    firstName: "Priya",
-    lastName: "Sharma",
-    email: "priya.sharma@breville.com",
-    phone: "+61 412 883 016",
+    id: "E1021",
+    firstName: "Sophie",
+    lastName: "King",
+    email: "sophie.king@breville.com",
+    phone: "+61 400 021 777",
     department: "Engineering",
     jobTitle: "Software Engineer",
-    manager: "Santosh Kumar",
-    startDate: "2026-07-06",
+    manager: "Maya Chen",
+    startDate: "2026-09-21",
     employmentType: "Full-time",
     personalEmail: "",
     address: "",
@@ -47,8 +56,57 @@
     archivedAt: ""
   };
 
-  const pathId = { name: "id", in: "path", required: true, example: "E1001", description: "Employee number; trimmed and upper-cased." };
+  const completedChecklistResponse = checklistResponse.map((item) => ({ ...item, done: true }));
+  const createdEmployeeResponse = { ...employeeResponse, ...employeeBody, id: employeeBody.employeeId };
+  delete createdEmployeeResponse.employeeId;
+  const staffEmployeeResponse = {
+    ...employeeResponse,
+    id: "E1001",
+    firstName: "Maya",
+    lastName: "Chen",
+    email: "maya.chen@breville.com",
+    phone: "+61 400 001 037",
+    jobTitle: "Engineering Manager",
+    manager: "Nina Foster",
+    startDate: "2026-05-04",
+    checklist: completedChecklistResponse,
+    status: "Onboarded",
+    progress: { done: 8, total: 8, percent: 100 },
+    onboardedAt: "2026-09-04T10:30:00Z",
+    joinedOn: "2026-05-04",
+    interns: ["E1011"]
+  };
+  const internResponse = {
+    ...employeeResponse,
+    id: "E1011",
+    firstName: "Chloe",
+    lastName: "Davis",
+    email: "chloe.davis@breville.com",
+    phone: "+61 400 011 407",
+    jobTitle: "Software Engineering Intern",
+    manager: "Maya Chen",
+    startDate: "2026-07-13",
+    employmentType: "Intern",
+    checklist: completedChecklistResponse,
+    status: "Onboarded",
+    progress: { done: 8, total: 8, percent: 100 },
+    onboardedAt: "2026-09-04T10:30:00Z",
+    joinedOn: "2026-07-13",
+    reportingManagerId: "E1001"
+  };
+  const restoredEmployeeResponse = { ...staffEmployeeResponse };
+  delete restoredEmployeeResponse.onboardedAt;
+  delete restoredEmployeeResponse.joinedOn;
+  delete restoredEmployeeResponse.interns;
+
+  const ownId = { name: "id", in: "path", required: true, example: "E1001", description: "Signed-in employee number; trimmed and upper-cased." };
+  const onboardingId = { name: "id", in: "path", required: true, example: "E1021", description: "Active onboarding employee number; trimmed and upper-cased." };
+  const staffEmployeeId = { name: "id", in: "path", required: true, example: "E1001", description: "Promoted employee number; trimmed and upper-cased." };
+  const internId = { name: "id", in: "path", required: true, example: "E1011", description: "Promoted intern number; trimmed and upper-cased." };
   const managerId = { name: "id", in: "path", required: true, example: "E1001", description: "Reporting manager's employee number." };
+  const attendanceMonth = { name: "month", in: "query", required: false, example: "2026-09", description: "Calendar month in YYYY-MM format; defaults to the current Asia/Kolkata month." };
+  const attendanceEmployeeId = { name: "employeeId", in: "path", required: true, example: "E1001", description: "Employee number HR is correcting." };
+  const attendanceDate = { name: "date", in: "path", required: true, example: "2026-09-04", description: "Attendance date in YYYY-MM-DD format." };
   const okEmployee = { 200: "Employee object", 400: "ValidationError", 403: "Forbidden", 404: "NotFound", 409: "Conflict", 500: "InternalError" };
   const official = "Official token";
   const self = "Employee (self)";
@@ -75,55 +133,55 @@
       flow: ["Authorizer", "Official role gate", "Validate + normalize", "Conditional PutItem"],
       body: employeeBody,
       responses: { 201: "Created employee + Location", 400: "Invalid employee fields", 401: "Unauthorized", 403: "Forbidden", 409: "Employee ID exists", 500: "InternalError" },
-      example: employeeResponse
+      example: createdEmployeeResponse
     },
     {
       id: "get-employee", tag: "Employees", method: "GET", path: "/employees/{id}", summary: "Get a record from either lifecycle table", access: "Official or self", success: 200,
       description: "Looks in OnboardingTable first and then EmployeeTable, so the URL survives promotion. Officials receive the full record. Employees may read only their own record and do not receive HR checklist comments.",
       flow: ["Authorizer", "Role/self scope", "Onboarding GetItem", "Employee GetItem fallback", "Role-specific view"],
-      params: [pathId], responses: okEmployee, example: employeeResponse
+      params: [ownId], responses: okEmployee, example: staffEmployeeResponse
     },
     {
       id: "put-employee", tag: "Employees", method: "PUT", path: "/employees/{id}", summary: "Replace HR-owned profile fields", access: official, success: 200, mutates: true,
       description: "Replaces the nine editable profile fields on an active onboarding record. The immutable employee ID, checklist, personal email, address, and archive state are excluded by the write whitelist.",
       flow: ["Authorizer", "Official role gate", "Validate full profile", "Guarded UpdateItem", "Consistent re-read"],
-      params: [pathId], body: updateBody, responses: okEmployee, example: employeeResponse
+      params: [onboardingId], body: updateBody, responses: okEmployee, example: employeeResponse
     },
     {
       id: "delete-employee", tag: "Employees", method: "DELETE", path: "/employees/{id}", summary: "Archive an onboarding record", access: official, success: 200, mutates: true, danger: true,
       description: "Soft-deletes by stamping Onboarded or Onboarding Cancelled based on checklist completion. The item and its documents remain; subsequent onboarding writes are frozen. Repeating the request is idempotent.",
       flow: ["Authorizer", "Official role gate", "Consistent GetItem", "Compute archive state", "Guarded UpdateItem", "Consistent re-read"],
-      params: [pathId], responses: { 200: "Archived employee", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 500: "InternalError" },
+      params: [onboardingId], responses: { 200: "Archived employee", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 500: "InternalError" },
       example: { ...employeeResponse, archived: true, archivedAs: "Onboarding Cancelled", archivedAt: "2026-09-04T10:30:00Z" }
     },
     {
       id: "patch-contact", tag: "Employees", method: "PATCH", path: "/employees/{id}/contact", summary: "Update the signed-in employee's contact details", access: self, success: 200, mutates: true,
       description: "The employee-only write path. Any subset of phone, personalEmail, and address may be supplied; null or an empty string clears a field. Officials do not bypass the self check.",
       flow: ["Authorizer", "Exact self check", "Find lifecycle table", "Guarded UpdateItem", "Trim comments from response"],
-      params: [pathId], body: { phone: "+61 400 000 000", personalEmail: "priya@example.com", address: "12 Smith Street, Sydney NSW 2000" },
-      responses: okEmployee, example: { ...employeeResponse, personalEmail: "priya@example.com", address: "12 Smith Street, Sydney NSW 2000" }
+      params: [ownId], body: { phone: "+61 400 001 037", personalEmail: "maya.chen@example.com", address: "12 Smith Street, Sydney NSW 2000" },
+      responses: okEmployee, example: { ...staffEmployeeResponse, personalEmail: "maya.chen@example.com", address: "12 Smith Street, Sydney NSW 2000" }
     },
     {
       id: "get-documents", tag: "Documents", method: "GET", path: "/employees/{id}/documents", summary: "Inspect all three document slots", access: "Official or self", success: 200,
       description: "Heads the three fixed S3 keys and returns every slot, including empty ones. Uploaded slots contain a five-minute presigned download URL. This Lambda has no DynamoDB access.",
       flow: ["Authorizer", "Role/self scope", "3× S3 HeadObject", "Presign downloads"],
-      params: [pathId], responses: { 200: "{ documents: [3 slots] }", 401: "Unauthorized", 403: "Forbidden", 500: "InternalError" },
+      params: [ownId], responses: { 200: "{ documents: [3 slots] }", 401: "Unauthorized", 403: "Forbidden", 500: "InternalError" },
       example: { documents: [{ slot: "resume", label: "Resume", uploaded: false }, { slot: "id-document", label: "ID document", uploaded: true, filename: "Passport.pdf", contentType: "application/pdf", size: 248031, uploadedAt: "2026-09-04T10:30:00Z", downloadUrl: "https://..." }, { slot: "signed-offer-letter", label: "Signed offer letter", uploaded: false }] }
     },
     {
       id: "post-document-upload", tag: "Documents", method: "POST", path: "/employees/{id}/documents/{slot}", summary: "Request a direct-to-S3 upload ticket", access: self, success: 200, mutates: true,
       description: "Validates the employee and file metadata, then returns a five-minute presigned S3 POST. This API call does not receive the file; the browser must submit the returned fields plus the file directly to the returned URL (maximum 10 MB).",
       flow: ["Authorizer", "Exact self check", "Record exists + active", "Presign S3 POST", "Browser uploads to S3"],
-      params: [pathId, { name: "slot", in: "path", required: true, example: "resume", description: "resume | id-document | signed-offer-letter" }],
-      body: { filename: "Priya-Sharma-Resume.pdf", contentType: "application/pdf" },
+      params: [ownId, { name: "slot", in: "path", required: true, example: "resume", description: "resume | id-document | signed-offer-letter" }],
+      body: { filename: "Maya-Chen-Resume.pdf", contentType: "application/pdf" },
       responses: { 200: "Presigned URL and form fields", 400: "Bad slot/type/name", 401: "Unauthorized", 403: "Not self", 404: "Employee missing", 409: "Archived", 500: "InternalError" },
-      example: { slot: "resume", filename: "Priya-Sharma-Resume.pdf", url: "https://bucket.s3.eu-north-1.amazonaws.com/", fields: { key: "employees/E1024/resume", "Content-Type": "application/pdf", policy: "...", "x-amz-signature": "..." } }
+      example: { slot: "resume", filename: "Maya-Chen-Resume.pdf", url: "https://bucket.s3.eu-north-1.amazonaws.com/", fields: { key: "employees/E1001/resume", "Content-Type": "application/pdf", policy: "...", "x-amz-signature": "..." } }
     },
     {
       id: "patch-checklist", tag: "Checklist", method: "PATCH", path: "/employees/{id}/checklist/{itemId}", summary: "Set a checklist tick or HR comment", access: official, success: 200, mutates: true,
       description: "Partially updates done, comment, or both on one of eight fixed checklist items. DynamoDB updates nested paths server-side, preventing concurrent ticks/comments from overwriting one another. Archived records are frozen.",
       flow: ["Authorizer", "Official role gate", "Validate item/body", "Nested UpdateItem + guards", "Consistent re-read"],
-      params: [pathId, { name: "itemId", in: "path", required: true, example: "offer-letter", description: "One of the eight checklist IDs." }],
+      params: [onboardingId, { name: "itemId", in: "path", required: true, example: "offer-letter", description: "One of the eight checklist IDs." }],
       body: { done: true, comment: "Signed copy received." }, responses: okEmployee, example: { ...employeeResponse, checklist: checklistResponse.map((item, index) => index === 0 ? { ...item, done: true, comment: "Signed copy received." } : item), status: "In Progress", progress: { done: 1, total: 8, percent: 13 } }
     },
     {
@@ -131,88 +189,126 @@
       description: "Scans EmployeeTable for entityType Employee and sorts by joinedOn and last name. The response preserves onboarding checklist history and adds onboardedAt, joinedOn, and intern IDs.",
       flow: ["Authorizer", "Official role gate", "EmployeeTable Scan", "Filter employees + sort"],
       responses: { 200: "{ employees, count }", 401: "Unauthorized", 403: "Forbidden", 500: "InternalError" },
-      example: { employees: [{ ...employeeResponse, onboardedAt: "2026-08-28T11:00:00Z", joinedOn: "2026-07-06", interns: ["E1042"] }], count: 1 }
+      example: { employees: [staffEmployeeResponse], count: 1 }
     },
     {
       id: "post-staff-employees", tag: "Staff", method: "POST", path: "/staff/employees", summary: "Copy a completed hire to the staff dashboard", access: official, success: 201, mutates: true,
       description: "Promotion step 1 for a non-intern. Requires an eight-of-eight checklist, copies the record into EmployeeTable, and preserves the checklist as frozen history. Call DELETE /onboarding/{id} only after this succeeds.",
       flow: ["Authorizer", "Official role gate", "Read completed onboarding", "Conditional PutItem in EmployeeTable"],
-      body: { employeeId: "E1024" },
+      body: { employeeId: "E1031" },
       responses: { 201: "Promoted employee", 400: "Wrong employment type", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 409: "Incomplete/already promoted", 500: "InternalError" },
-      example: { ...employeeResponse, status: "Onboarded", onboardedAt: "2026-09-04T10:30:00Z", joinedOn: "2026-07-06", interns: [] }
+      example: { ...createdEmployeeResponse, checklist: completedChecklistResponse, status: "Onboarded", progress: { done: 8, total: 8, percent: 100 }, onboardedAt: "2026-09-04T10:30:00Z", joinedOn: "2026-10-05", interns: [] }
     },
     {
       id: "delete-staff-employee", tag: "Staff", method: "DELETE", path: "/staff/employees/{id}", summary: "Remove a promoted employee after restore", access: official, success: 200, mutates: true, danger: true,
       description: "The destructive last step of undo promotion for a non-intern. It works only within seven days and only after POST /onboarding/restore has recreated the onboarding copy. Missing is idempotent success.",
       flow: ["Authorizer", "Official role gate", "Check staff kind + 7-day window", "Require onboarding copy", "DeleteItem"],
-      params: [pathId], responses: { 200: "{ id }", 401: "Unauthorized", 403: "Forbidden", 404: "Wrong staff kind", 409: "Not restored/window closed", 500: "InternalError" }, example: { id: "E1024" }
+      params: [staffEmployeeId], responses: { 200: "{ id }", 401: "Unauthorized", 403: "Forbidden", 404: "Wrong staff kind", 409: "Not restored/window closed", 500: "InternalError" }, example: { id: "E1001" }
     },
     {
       id: "post-manager-intern", tag: "Staff", method: "POST", path: "/staff/employees/{id}/interns", summary: "Link an intern to a manager", access: official, success: 200, mutates: true,
       description: "Adds one intern ID to a promoted manager's sparse interns list. A conditional list append prevents duplicates under concurrency. Repeating an existing link is a successful no-op.",
       flow: ["Authorizer", "Official role gate", "Verify intern kind", "Conditional list append"],
-      params: [managerId], body: { internId: "E1042" },
+      params: [managerId], body: { internId: "E1011" },
       responses: { 200: "Updated manager", 400: "Intern missing/wrong kind", 401: "Unauthorized", 403: "Forbidden", 404: "Manager missing", 500: "InternalError" },
-      example: { ...employeeResponse, onboardedAt: "2026-08-28T11:00:00Z", joinedOn: "2026-07-06", interns: ["E1042"] }
+      example: staffEmployeeResponse
     },
     {
       id: "delete-manager-intern", tag: "Staff", method: "DELETE", path: "/staff/employees/{id}/interns/{internId}", summary: "Unlink an intern from a manager", access: official, success: 200, mutates: true, danger: true,
       description: "Removes an intern ID from a manager's list; removes the whole sparse attribute when the list becomes empty. Missing links are idempotent success. It does not change the intern's reportingManagerId.",
       flow: ["Authorizer", "Official role gate", "Read manager list", "Remove list index/attribute"],
-      params: [managerId, { name: "internId", in: "path", required: true, example: "E1042", description: "Intern employee number." }],
+      params: [managerId, { name: "internId", in: "path", required: true, example: "E1011", description: "Intern employee number." }],
       responses: { 200: "Updated manager", 401: "Unauthorized", 403: "Forbidden", 404: "Manager missing", 500: "InternalError" },
-      example: { ...employeeResponse, onboardedAt: "2026-08-28T11:00:00Z", joinedOn: "2026-07-06", interns: [] }
+      example: { ...staffEmployeeResponse, interns: [] }
     },
     {
       id: "get-staff-interns", tag: "Staff", method: "GET", path: "/staff/interns", summary: "List interns, optionally by manager", access: official, success: 200,
       description: "Without managerId, scans EmployeeTable for interns. With managerId, queries the sparse ByReportingManager GSI and returns only that manager's interns. Results are sorted by joinedOn and last name.",
       flow: ["Authorizer", "Official role gate", "Scan or GSI Query", "Map interns + sort"],
-      params: [{ name: "managerId", in: "query", required: false, example: "", description: "Optional reporting manager employee number." }],
+      params: [{ name: "managerId", in: "query", required: false, example: "E1001", description: "Optional reporting manager employee number." }],
       responses: { 200: "{ interns, count }", 401: "Unauthorized", 403: "Forbidden", 500: "InternalError" },
-      example: { interns: [{ ...employeeResponse, employmentType: "Intern", onboardedAt: "2026-09-01T09:00:00Z", joinedOn: "2026-07-06", reportingManagerId: "E1001" }], count: 1 }
+      example: { interns: [internResponse], count: 1 }
     },
     {
       id: "post-staff-interns", tag: "Staff", method: "POST", path: "/staff/interns", summary: "Copy a completed intern to the staff dashboard", access: official, success: 201, mutates: true,
       description: "Promotion step 1 for an intern. Requires a completed checklist and an existing promoted employee as manager. Then link the intern to that manager and delete the onboarding copy, in that order.",
       flow: ["Authorizer", "Official role gate", "Read completed intern", "Verify manager employee", "Conditional PutItem"],
-      body: { employeeId: "E1042", reportingManagerId: "E1001" },
+      body: { employeeId: "E1011", reportingManagerId: "E1001" },
       responses: { 201: "Promoted intern", 400: "Wrong type/manager", 401: "Unauthorized", 403: "Forbidden", 404: "NotFound", 409: "Incomplete/already promoted", 500: "InternalError" },
-      example: { ...employeeResponse, id: "E1042", employmentType: "Intern", status: "Onboarded", onboardedAt: "2026-09-04T10:30:00Z", joinedOn: "2026-07-06", reportingManagerId: "E1001" }
+      example: internResponse
     },
     {
       id: "put-intern-manager", tag: "Staff", method: "PUT", path: "/staff/interns/{id}/manager", summary: "Set an intern's reporting manager", access: official, success: 200, mutates: true,
       description: "Reassignment step 1. Updates the intern row and returns previousReportingManagerId so the caller can add the new manager link before removing the old one. Assigning the current manager is an idempotent no-op.",
       flow: ["Authorizer", "Official role gate", "Verify intern + new manager", "UpdateItem", "Return previous manager"],
-      params: [pathId], body: { reportingManagerId: "E1002" },
+      params: [internId], body: { reportingManagerId: "E1002" },
       responses: { 200: "Updated intern + previous manager", 400: "Manager invalid", 401: "Unauthorized", 403: "Forbidden", 404: "Intern missing", 500: "InternalError" },
-      example: { ...employeeResponse, employmentType: "Intern", reportingManagerId: "E1002", previousReportingManagerId: "E1001" }
+      example: { ...internResponse, reportingManagerId: "E1002", previousReportingManagerId: "E1001" }
     },
     {
       id: "delete-staff-intern", tag: "Staff", method: "DELETE", path: "/staff/interns/{id}", summary: "Remove a promoted intern after restore", access: official, success: 200, mutates: true, danger: true,
       description: "The destructive last step of undo promotion for an intern. First restore onboarding, then unlink the manager, then call this within seven days. It refuses employee rows and does not alter manager links itself.",
       flow: ["Authorizer", "Official role gate", "Check intern kind + 7-day window", "Require onboarding copy", "DeleteItem"],
-      params: [pathId], responses: { 200: "{ id }", 401: "Unauthorized", 403: "Forbidden", 404: "Wrong staff kind", 409: "Not restored/window closed", 500: "InternalError" }, example: { id: "E1042" }
+      params: [internId], responses: { 200: "{ id }", 401: "Unauthorized", 403: "Forbidden", 404: "Wrong staff kind", 409: "Not restored/window closed", 500: "InternalError" }, example: { id: "E1011" }
     },
     {
       id: "delete-onboarding", tag: "Lifecycle", method: "DELETE", path: "/onboarding/{id}", summary: "Remove the onboarding copy after promotion", access: official, success: 200, mutates: true, danger: true,
       description: "The destructive last promotion step. It refuses to delete until the same ID exists in EmployeeTable, ensuring an interrupted workflow leaves two copies rather than none. Missing onboarding rows are idempotent success.",
       flow: ["Authorizer", "Official role gate", "Require staff copy", "Delete onboarding item"],
-      params: [pathId], responses: { 200: "{ id, movedTo }", 401: "Unauthorized", 403: "Forbidden", 409: "Not promoted first", 500: "InternalError" }, example: { id: "E1024", movedTo: "employee" }
+      params: [{ ...onboardingId, example: "E1031" }], responses: { 200: "{ id, movedTo }", 401: "Unauthorized", 403: "Forbidden", 409: "Not promoted first", 500: "InternalError" }, example: { id: "E1031", movedTo: "employee" }
     },
     {
       id: "post-onboarding-restore", tag: "Lifecycle", method: "POST", path: "/onboarding/restore", summary: "Restore a recently promoted record", access: official, success: 201, mutates: true,
       description: "Undo-promotion step 1. Within seven days of onboardedAt, copies a staff record and its full checklist history back into OnboardingTable. Delete the staff copy only after this succeeds.",
       flow: ["Authorizer", "Official role gate", "Read staff record", "Check 7-day window", "Conditional PutItem"],
-      body: { employeeId: "E1024" },
+      body: { employeeId: "E1001" },
       responses: { 201: "Restored onboarding employee", 400: "ID required", 401: "Unauthorized", 403: "Forbidden", 404: "Staff record missing", 409: "Window closed/already restored", 500: "InternalError" },
-      example: employeeResponse
+      example: restoredEmployeeResponse
+    },
+    {
+      id: "put-own-attendance", tag: "Attendance", method: "PUT", path: "/attendance/me/today", summary: "Mark or update today's attendance", access: self, success: 200, mutates: true,
+      description: "Uses the employee identity from the token and the current Asia/Kolkata date. Available from 08:30 inclusive until 18:00 exclusive; the employee cannot supply identity or profile snapshots.",
+      flow: ["Authorizer", "Employee role", "08:30-18:00 window", "Load profile", "AttendanceTable PutItem"],
+      body: { status: "present", note: "" },
+      responses: { 200: "Saved attendance + window", 400: "Invalid status/note", 401: "Unauthorized", 403: "Wrong role", 404: "Employee missing", 409: "Window closed/archived", 500: "InternalError" },
+      example: { attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "present", note: "", markedAt: "2026-09-04T04:00:00Z", updatedAt: "2026-09-04T04:00:00Z", updatedBy: "E1001", updatedByRole: "employee" }, window: { timezone: "Asia/Kolkata", opensAt: "08:30", closesAt: "18:00", today: "2026-09-04", isOpen: true } }
+    },
+    {
+      id: "get-own-attendance", tag: "Attendance", method: "GET", path: "/attendance/me", summary: "View personal monthly attendance", access: self, success: 200,
+      description: "Returns the signed-in employee's month. Missing applicable dates are calculated as leave; future dates and today before 08:30 are upcoming.",
+      flow: ["Authorizer", "Employee role", "Load own profile", "AttendanceTable Query", "Calculate missing leave"],
+      params: [attendanceMonth], responses: { 200: "Monthly employee row + window", 400: "Invalid month", 401: "Unauthorized", 403: "Wrong role", 404: "Employee missing", 500: "InternalError" },
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01", "2026-09-02"], employee: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } } }
+    },
+    {
+      id: "get-attendance-sheet", tag: "Attendance", method: "GET", path: "/attendance/sheet", summary: "View all employees' monthly attendance", access: official, success: 200,
+      description: "Combines active onboarding and promoted staff with AttendanceTable records, collapses lifecycle duplicates, and calculates missing applicable declarations as leave.",
+      flow: ["Authorizer", "Official role", "Scan active roster", "Query AttendanceByMonth", "Build monthly matrix"],
+      params: [attendanceMonth], responses: { 200: "Monthly attendance sheet", 400: "Invalid month", 401: "Unauthorized", 403: "Employee role refused", 500: "InternalError" },
+      example: { month: "2026-09", timezone: "Asia/Kolkata", days: ["2026-09-01"], employees: [{ employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", days: [{ date: "2026-09-01", status: "present", note: "", stored: true }], totals: { present: 1, leave: 0 } }], count: 1 }
+    },
+    {
+      id: "get-attendance-csv", tag: "Attendance", method: "GET", path: "/attendance/sheet.csv", summary: "Download the monthly attendance CSV", access: official, success: 200,
+      description: "Uses the same report builder as the JSON sheet and returns a UTF-8 text/csv attachment. Profile cells are protected from spreadsheet-formula injection.",
+      flow: ["Authorizer", "Official role", "Build identical sheet", "Serialize CSV attachment"],
+      params: [attendanceMonth], responses: { 200: "text/csv attachment", 400: "Invalid month", 401: "Unauthorized", 403: "Employee role refused", 500: "InternalError" },
+      example: "Employee ID,Employee name,Employee role,Department,2026-09-01,Present total,..."
+    },
+    {
+      id: "put-employee-attendance", tag: "Attendance", method: "PUT", path: "/attendance/{employeeId}/{date}", summary: "HR corrects any employee/date", access: official, success: 200, mutates: true,
+      description: "Parent HR access: creates or replaces any employee's attendance on any valid date without the employee marking-window restriction. Existing notes survive status-only table edits.",
+      flow: ["Authorizer", "Official role", "Validate employee/date", "Load profile", "AttendanceTable PutItem"],
+      params: [attendanceEmployeeId, attendanceDate], body: { status: "leave", note: "Approved leave" },
+      responses: { 200: "Saved attendance", 400: "Invalid date/status/note", 401: "Unauthorized", 403: "Employee role refused", 404: "Employee missing", 500: "InternalError" },
+      example: { attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "leave", note: "Approved leave", updatedBy: "hr.admin", updatedByRole: "official" } }
     }
   ];
 
   const models = {
     employee: employeeResponse,
     error: { error: { code: "ValidationError", message: "Employee details are not valid.", fields: { email: "Enter a valid email address." } } },
-    document: { slot: "id-document", label: "ID document", uploaded: true, filename: "Passport.pdf", contentType: "application/pdf", size: 248031, uploadedAt: "2026-09-04T10:30:00Z", downloadUrl: "https://...five-minute-presigned-url..." }
+    document: { slot: "id-document", label: "ID document", uploaded: true, filename: "Passport.pdf", contentType: "application/pdf", size: 248031, uploadedAt: "2026-09-04T10:30:00Z", downloadUrl: "https://...five-minute-presigned-url..." },
+    attendance: { employeeId: "E1001", employeeName: "Maya Chen", employeeRole: "Engineering Manager", department: "Engineering", date: "2026-09-04", status: "present", note: "", markedAt: "2026-09-04T04:00:00Z", updatedAt: "2026-09-04T04:00:00Z", updatedBy: "E1001", updatedByRole: "employee" }
   };
 
   const functionFlows = [
@@ -245,6 +341,21 @@
       category: "Access & dashboards", title: "Open interns dashboard", actor: "Official",
       description: "Intern cards and the manager choices are fetched together.",
       steps: [{ parallel: true, calls: [{ method: "GET", path: "/staff/interns", note: "Intern cards" }, { method: "GET", path: "/staff/employees", note: "Manager picker" }] }]
+    },
+    {
+      category: "Attendance", title: "Mark today's attendance", actor: "Employee",
+      description: "Load today's checkbox state beside the profile, then save and reconcile that checkbox in place without reloading the employee dashboard.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/me", note: "Checkbox state + marking window" }] }, { calls: [{ method: "PUT", path: "/attendance/me/today", note: "08:30-18:00 only" }] }, { local: "No endpoint · reconcile checkbox + floating success toast" }]
+    },
+    {
+      category: "Attendance", title: "Open and edit the HR sheet", actor: "Official",
+      description: "Load one month, then save each employee/date checkbox in place without refetching, repainting, or resetting the sheet's scroll position.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet?month={month}", note: "Monthly matrix" }] }, { optional: true, calls: [{ method: "PUT", path: "/attendance/{employeeId}/{date}", note: "HR correction" }] }, { optional: true, local: "No endpoint · reconcile one checkbox + floating success toast" }]
+    },
+    {
+      category: "Attendance", title: "Download attendance CSV", actor: "Official",
+      description: "Fetch the authenticated CSV response and download it in the browser.",
+      steps: [{ calls: [{ method: "GET", path: "/attendance/sheet.csv?month={month}", note: "CSV attachment" }] }]
     },
     {
       category: "Onboarding records", title: "Open Add Employee form", actor: "Official",
@@ -370,6 +481,11 @@
     ["promoteToIntern", "POST /staff/interns"],
     ["addManagerIntern", "POST /staff/employees/{managerId}/interns"],
     ["listStaffEmployees", "GET /staff/employees"],
+    ["markOwnAttendance", "PUT /attendance/me/today"],
+    ["getOwnAttendance", "GET /attendance/me[?month={month}]"],
+    ["getAttendanceSheet", "GET /attendance/sheet?month={month}"],
+    ["updateEmployeeAttendance", "PUT /attendance/{employeeId}/{date}"],
+    ["downloadAttendanceCsv", "GET /attendance/sheet.csv?month={month}"],
     ["listInterns", "GET /staff/interns[?managerId={id}]"],
     ["removeManagerIntern", "DELETE /staff/employees/{managerId}/interns/{internId}"],
     ["setInternManager", "PUT /staff/interns/{id}/manager"],

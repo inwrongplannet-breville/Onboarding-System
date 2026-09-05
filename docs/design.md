@@ -48,7 +48,7 @@ js/
   ui.js             pure render functions (state in, HTML string out)
   app.js            hash router, event wiring, validation, error handling
 
-template.yaml       SAM: DynamoDB table, nine Lambdas, API Gateway
+template.yaml       SAM: three DynamoDB tables, 27 Lambdas, API Gateway
 samconfig.toml       committed, so `sam deploy` needs no arguments
 src/
   common/           keys, db clients, validation, reads, response helpers, checklist template
@@ -79,6 +79,7 @@ Routes are linkable and the back button works:
 #/dashboard                      officials - HR dashboard, and their landing page
 #/interns                        officials - onboarded interns, each linked to a manager
 #/tracking                       officials - onboarded, non-intern employees
+#/attendance                     officials - editable monthly attendance sheet and CSV
 #/onboarding                     officials - people whose onboarding is not finished
 #/onboarding/new                 add form
 #/onboarding/:id/edit            edit form
@@ -95,6 +96,14 @@ explicit HR action on the checklist screen rather than by anything automatic. Se
 [database-design.md#two-tables-not-one](database-design.md#two-tables-not-one) for the full
 model and [database-design.md#promotion](database-design.md#promotion) for how a record moves
 between them.
+
+Attendance adds a daily declaration card to `#/me` and a dedicated `#/attendance` HR screen. The
+employee card loads alongside the profile and documents and is editable only from 08:30 to 18:00
+Asia/Kolkata. Attendance is binary in the UI: checked means present and unchecked means leave,
+with each change saved immediately. The HR screen renders the same checkbox per employee/date in a
+semantic monthly table with sticky identity columns, name/department/role filters, and an
+authenticated CSV download. The frontend displays the report returned by the API; leave is
+calculated once in the backend rather than independently in JavaScript.
 
 ---
 
@@ -268,11 +277,11 @@ The dropdowns are built from the values the loaded employees actually carry (`se
 an empty table the form falls back to text inputs so the first hire is still creatable. The server
 validates against the real enum in every case and names the bad field in its `400`.
 
-The Phase 1 fixtures still exist — as `scripts/seed_employees.py`, which POSTs the same six people
-*into DynamoDB* over the real API. Same test data, other side of the wire.
+The fixture dataset now lives in `scripts/seed_employees.py`, which POSTs 30 deterministic people
+*into DynamoDB* over the real API: 10 onboarding, 10 promoted employees and 10 promoted interns.
 
 The check that this actually holds: turn the network off and reload. The list must be empty with an
-error on it. If six people appear, something is still reading from local state.
+error on it. If any people appear, something is still reading from local state.
 
 ### Checklist comments
 
@@ -441,8 +450,8 @@ instance of it.
 | Misreported `409` | Every cancelled transaction claimed "that employee id already exists". Fixed by reading `CancellationReasons`; moot now that nothing transacts |
 
 **Frontend:** run in a real browser (headless Chrome against `py -m http.server 8000`) and verified
-against the live API. Re-run after the enums were removed: all six rows render, the department and
-employment-type dropdowns build themselves from the loaded records, and the status filter orders
+against the live API. With the current 30-person seed, all ten onboarding rows render, the department
+and employment-type dropdowns build themselves from the loaded records, and the status filter orders
 itself Pending → In Progress → Onboarded. Against a stub API returning zero employees, the form
 degrades to text inputs rather than to empty dropdowns nobody can submit.
 
@@ -457,9 +466,9 @@ including the ones easy to get wrong:
   `employeeId` is sent on create only, because that is the one moment it can be set
 - the client's `computeStatus` / `progress` agree with the server's on the same record
 
-Rendering was verified from the returned DOM: six rows with employee numbers `E1001`–`E1006`, all
-three status badges, progress bars at 100/63/75/25/0/0%, and a deep-link straight to
-`#/onboarding/E1003/checklist` resolving correctly. The ids are readable and typeable now, which
+The current seed's expected DOM has ten rows with employee numbers `E1021`–`E1030`, Pending and In
+Progress badges, varied progress from 0/8 through 7/8, and a deep-link straight to
+`#/onboarding/E1023/checklist` resolving correctly. The ids are readable and typeable now, which
 is a smaller router test than the UUID one it replaces and a much better one for a person
 holding a payroll export.
 
@@ -572,7 +581,7 @@ things around the edges, all now fixed:
 |---|---|
 | `caller_role` defaulted to a role that can read everything | Returns `None`; both readers call `require_role` |
 | Signing key was a plaintext Lambda env var, readable via `lambda:GetFunctionConfiguration` | Generated into Secrets Manager, fetched per cold start, `GetSecretValue` granted to two functions |
-| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; origin is now the `AllowedOrigin` parameter |
+| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; successful responses use the explicit `AllowedOrigins` allowlist |
 | No revocation path | Rotating the secret invalidates everything within the 60s authorizer cache |
 | `api_arn()` returned `Resource: '*'` on an unparseable ARN | Raises; the request is refused |
 | No `iss`/`aud`, so a dev token worked against prod on a shared key | Both claims minted and checked |

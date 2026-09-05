@@ -1,14 +1,11 @@
 """
-Reset the three dev tables: hard-wipe them, repopulate them through the public
-API - onboarding, then a manager or two promoted to EmployeeTable, then interns
-promoted to InternTable pointing at those managers.
+Reset the three dev tables: hard-wipe them, then repopulate profiles through the public
+API with 30 deterministic people - 10 still onboarding, 10 promoted employees and
+10 promoted interns. Every intern points at one of the promoted employees.
 
-The first six people were the Phase 1 mock data in js/data.js. They moved here when
-the UI was wired to the backend: the frontend now has no employee records in it at
-all, so the fixtures live on the side of the wire that actually stores them. Two
-more (E1007, E1008) were added with the three-table split, so the two managers each
-end up with more than one intern - enough to give the promote sequences and the
-reporting-manager mapping something worth looking at.
+The fixtures live here because the frontend has no local employee data. E1001 is
+kept as a promoted employee so the documented employee demo login remains useful;
+the remaining details are synthetic and stable across reseeds.
 
 Seeding deliberately drives the REST API rather than boto3 against DynamoDB, so it
 exercises the same validation, the same create, the same checklist handling and the
@@ -22,7 +19,7 @@ Wiping cannot go through the API. DELETE /employees/{id} archives: it stamps the
 record and leaves it in the table. Wiping through the API would appear to work -
 the employees do leave GET /employees - and then every reseed would pile a fresh
 set of records on top of the archived ones, growing the table on every cycle with
-no way to ever clear it. So --wipe goes straight at both tables and really
+no way to ever clear it. So --wipe goes straight at all three tables and really
 does delete.
 
 That asymmetry is the design working as intended, not a hole in it: the API has no
@@ -61,8 +58,8 @@ Usage:
 
 Base URL resolution, in order: --base-url, $API_BASE_URL, then the ApiBaseUrl output
 of the onboarding-system-dev CloudFormation stack via the AWS CLI. --wipe resolves
-both table names the same way, from the stack's OnboardingTableName /
-EmployeeTableName outputs.
+all table names the same way, from the stack's OnboardingTableName,
+EmployeeTableName and AttendanceTableName outputs.
 """
 import argparse
 import io
@@ -86,10 +83,9 @@ DEFAULT_USERNAME = 'hr.admin'
 DEFAULT_PASSWORD = 'onboard-2026'
 
 # One dict per hire. `promote` says which sequence to run once the checklist is
-# ticked: None leaves them in OnboardingTable (varied progress, which is what
-# makes the list view's status filter and progress bars worth looking at);
-# 'employee' promotes them into EmployeeTable; 'intern' promotes them into
-# InternTable reporting to `manager`.
+# ticked: None leaves them in OnboardingTable with varied progress; 'employee'
+# and 'intern' move completed records into the shared EmployeeTable. Interns are
+# distinguished there by entityType and carry a reporting manager id.
 #
 # Order is load-bearing. Every 'intern' entry's `manager` must name an
 # 'employee' entry that appears earlier in this list - promote_to_intern.py
@@ -101,113 +97,139 @@ DEFAULT_PASSWORD = 'onboard-2026'
 # `employeeId` is supplied rather than assigned: it is the partition key, so
 # these numbers are the fixtures' identity. Keeping them stable and contiguous
 # means a reseed lands the same people on the same ids every time, and a
-# hand-written URL like #/employees/E1003 keeps working across resets.
-FIXTURES = [
-    {
-        'profile': {
-            'employeeId': 'E1001',
-            'firstName': 'Priya', 'lastName': 'Sharma',
-            'email': 'priya.sharma@breville.com', 'phone': '+61 412 883 016',
-            'department': 'Engineering', 'jobTitle': 'Software Engineer',
-            'manager': 'Santosh Kumar', 'startDate': '2026-07-06',
-            'employmentType': 'Full-time',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-                 'email-account', 'access-card', 'induction', 'policy-ack'],
-        'promote': 'employee',  # a manager - two interns report to her below
-    },
-    {
-        'profile': {
-            'employeeId': 'E1002',
-            'firstName': 'Daniel', 'lastName': 'Okafor',
-            'email': 'daniel.okafor@breville.com', 'phone': '+61 431 507 224',
-            'department': 'Engineering', 'jobTitle': 'QA Engineer',
-            'manager': 'Priya Sharma', 'startDate': '2026-08-10',
-            'employmentType': 'Full-time',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop', 'email-account'],
-        'promote': None,  # left mid-onboarding, on purpose - 5/8
-    },
-    {
-        'profile': {
-            'employeeId': 'E1003',
-            'firstName': 'Mei Lin', 'lastName': 'Tan',
-            'email': 'meilin.tan@breville.com', 'phone': '+61 402 119 763',
-            'department': 'Finance', 'jobTitle': 'Financial Analyst',
-            'manager': 'Rachel Adams', 'startDate': '2026-08-24',
-            'employmentType': 'Full-time',
-        },
-        'done': ['offer-letter', 'id-proof'],
-        'promote': None,  # 2/8
-    },
-    {
-        'profile': {
-            'employeeId': 'E1004',
-            'firstName': 'Arjun', 'lastName': 'Nair',
-            'email': 'arjun.nair@breville.com', 'phone': '+61 448 620 195',
-            'department': 'Operations', 'jobTitle': 'Supply Chain Coordinator',
-            'manager': 'Grace Whitmore', 'startDate': '2026-09-01',
-            'employmentType': 'Contract',
-        },
-        'done': [],
-        'promote': None,  # Pending - 0/8
-    },
-    {
-        'profile': {
-            'employeeId': 'E1005',
-            'firstName': 'Sofia', 'lastName': 'Marchetti',
-            'email': 'sofia.marchetti@breville.com', 'phone': '+61 423 774 508',
-            'department': 'HR', 'jobTitle': 'HR Coordinator',
-            'manager': 'Grace Whitmore', 'startDate': '2026-08-17',
-            'employmentType': 'Full-time',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-                  'email-account', 'access-card', 'induction', 'policy-ack'],
-        'promote': 'employee',  # a second manager, with one intern below
-    },
-    {
-        'profile': {
-            'employeeId': 'E1006',
-            'firstName': 'Liam', 'lastName': 'Byrne',
-            'email': 'liam.byrne@breville.com', 'phone': '+61 437 285 941',
-            'department': 'Engineering', 'jobTitle': 'Data Engineering Intern',
-            'manager': 'Priya Sharma', 'startDate': '2026-09-14',
-            'employmentType': 'Intern',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-                  'email-account', 'access-card', 'induction', 'policy-ack'],
-        'promote': 'intern', 'manager': 'E1001',
-    },
-    {
-        'profile': {
-            'employeeId': 'E1007',
-            'firstName': 'Aiden', 'lastName': 'Clarke',
-            'email': 'aiden.clarke@breville.com', 'phone': '+61 455 902 317',
-            'department': 'Engineering', 'jobTitle': 'Frontend Engineering Intern',
-            'manager': 'Priya Sharma', 'startDate': '2026-09-14',
-            'employmentType': 'Intern',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-                  'email-account', 'access-card', 'induction', 'policy-ack'],
-        # A second intern reporting to E1001 - exercises the `interns` list
-        # actually holding more than one entry, and the ByReportingManager GSI
-        # returning more than one row for a manager.
-        'promote': 'intern', 'manager': 'E1001',
-    },
-    {
-        'profile': {
-            'employeeId': 'E1008',
-            'firstName': 'Zara', 'lastName': 'Ahmed',
-            'email': 'zara.ahmed@breville.com', 'phone': '+61 460 118 774',
-            'department': 'HR', 'jobTitle': 'HR Intern',
-            'manager': 'Sofia Marchetti', 'startDate': '2026-09-14',
-            'employmentType': 'Intern',
-        },
-        'done': ['offer-letter', 'id-proof', 'bank-details', 'laptop',
-                  'email-account', 'access-card', 'induction', 'policy-ack'],
-        'promote': 'intern', 'manager': 'E1005',
-    },
+# hand-written URL like #/onboarding/E1023 keeps working across resets.
+CHECKLIST_IDS = [
+    'offer-letter', 'id-proof', 'bank-details', 'laptop',
+    'email-account', 'access-card', 'induction', 'policy-ack',
 ]
+
+
+def fixture(employee_id, first_name, last_name, department, job_title,
+            manager_name, start_date, employment_type='Full-time',
+            promote=None, reporting_manager_id=None, done_count=8):
+    """Build one readable fixture while keeping generated contact data stable."""
+    sequence = int(employee_id[1:]) - 1000
+    result = {
+        'profile': {
+            'employeeId': employee_id,
+            'firstName': first_name,
+            'lastName': last_name,
+            'email': '{}.{}@breville.com'.format(first_name, last_name).lower(),
+            'phone': '+61 400 {:03d} {:03d}'.format(sequence, (sequence * 37) % 1000),
+            'department': department,
+            'jobTitle': job_title,
+            'manager': manager_name,
+            'startDate': start_date,
+            'employmentType': employment_type,
+        },
+        'done': CHECKLIST_IDS[:done_count],
+        'promote': promote,
+    }
+    if reporting_manager_id:
+        result['manager'] = reporting_manager_id
+    return result
+
+
+# Promoted employees come first because every intern promotion must name an
+# employee who already exists in EmployeeTable. Each employee manages one intern.
+FIXTURES = [
+    fixture('E1001', 'Maya', 'Chen', 'Engineering', 'Engineering Manager',
+            'Nina Foster', '2026-05-04', promote='employee'),
+    fixture('E1002', 'Noah', 'Williams', 'Operations', 'Operations Manager',
+            'Nina Foster', '2026-05-11', promote='employee'),
+    fixture('E1003', 'Olivia', 'Patel', 'Finance', 'Finance Manager',
+            'Marcus Reed', '2026-05-18', promote='employee'),
+    fixture('E1004', 'Ethan', 'Brooks', 'HR', 'People Operations Manager',
+            'Marcus Reed', '2026-05-25', promote='employee'),
+    fixture('E1005', 'Amelia', 'Nguyen', 'Engineering', 'Product Manager',
+            'Nina Foster', '2026-06-01', promote='employee'),
+    fixture('E1006', 'Lucas', 'Martin', 'Operations', 'Logistics Manager',
+            'Nina Foster', '2026-06-08', promote='employee'),
+    fixture('E1007', 'Isla', 'Thompson', 'Finance', 'Payroll Manager',
+            'Marcus Reed', '2026-06-15', promote='employee'),
+    fixture('E1008', 'Henry', 'Wilson', 'Engineering', 'Platform Manager',
+            'Nina Foster', '2026-06-22', promote='employee'),
+    fixture('E1009', 'Ava', 'Robinson', 'HR', 'Talent Manager',
+            'Marcus Reed', '2026-06-29', promote='employee'),
+    fixture('E1010', 'Jack', 'Anderson', 'Operations', 'Facilities Manager',
+            'Nina Foster', '2026-07-06', promote='employee'),
+
+    fixture('E1011', 'Chloe', 'Davis', 'Engineering', 'Software Engineering Intern',
+            'Maya Chen', '2026-07-13', 'Intern', 'intern', 'E1001'),
+    fixture('E1012', 'Leo', 'Garcia', 'Operations', 'Supply Chain Intern',
+            'Noah Williams', '2026-07-20', 'Intern', 'intern', 'E1002'),
+    fixture('E1013', 'Mia', 'Brown', 'Finance', 'Finance Intern',
+            'Olivia Patel', '2026-07-27', 'Intern', 'intern', 'E1003'),
+    fixture('E1014', 'Oscar', 'Lee', 'HR', 'People and Culture Intern',
+            'Ethan Brooks', '2026-08-03', 'Intern', 'intern', 'E1004'),
+    fixture('E1015', 'Grace', 'Taylor', 'Engineering', 'Product Intern',
+            'Amelia Nguyen', '2026-08-10', 'Intern', 'intern', 'E1005'),
+    fixture('E1016', 'Arlo', 'Harris', 'Operations', 'Logistics Intern',
+            'Lucas Martin', '2026-08-17', 'Intern', 'intern', 'E1006'),
+    fixture('E1017', 'Zoe', 'Clark', 'Finance', 'Payroll Intern',
+            'Isla Thompson', '2026-08-24', 'Intern', 'intern', 'E1007'),
+    fixture('E1018', 'Finn', 'Walker', 'Engineering', 'Platform Intern',
+            'Henry Wilson', '2026-08-31', 'Intern', 'intern', 'E1008'),
+    fixture('E1019', 'Ruby', 'Hall', 'HR', 'Talent Acquisition Intern',
+            'Ava Robinson', '2026-09-07', 'Intern', 'intern', 'E1009'),
+    fixture('E1020', 'Max', 'Young', 'Operations', 'Facilities Intern',
+            'Jack Anderson', '2026-09-14', 'Intern', 'intern', 'E1010'),
+
+    fixture('E1021', 'Sophie', 'King', 'Engineering', 'Software Engineer',
+            'Maya Chen', '2026-09-21', done_count=0),
+    fixture('E1022', 'Liam', 'Scott', 'Operations', 'Procurement Analyst',
+            'Noah Williams', '2026-09-22', 'Contract', done_count=1),
+    fixture('E1023', 'Emma', 'Green', 'Finance', 'Accounts Analyst',
+            'Olivia Patel', '2026-09-23', done_count=2),
+    fixture('E1024', 'James', 'Baker', 'HR', 'HR Advisor',
+            'Ethan Brooks', '2026-09-24', done_count=3),
+    fixture('E1025', 'Charlotte', 'Adams', 'Engineering', 'Product Designer',
+            'Amelia Nguyen', '2026-09-25', 'Contract', done_count=4),
+    fixture('E1026', 'Benjamin', 'Nelson', 'Operations', 'Inventory Planner',
+            'Lucas Martin', '2026-09-28', done_count=5),
+    fixture('E1027', 'Harper', 'Carter', 'Finance', 'Commercial Analyst',
+            'Isla Thompson', '2026-09-29', done_count=6),
+    fixture('E1028', 'William', 'Mitchell', 'Engineering', 'DevOps Engineer',
+            'Henry Wilson', '2026-09-30', done_count=7),
+    fixture('E1029', 'Evelyn', 'Perez', 'HR', 'Recruiter',
+            'Ava Robinson', '2026-10-01', 'Contract', done_count=0),
+    fixture('E1030', 'Alexander', 'Roberts', 'Operations', 'Facilities Coordinator',
+            'Jack Anderson', '2026-10-02', done_count=4),
+]
+
+
+def validate_fixtures():
+    """Fail before touching AWS if the dataset stops matching its 10/10/10 contract."""
+    ids = [entry['profile']['employeeId'] for entry in FIXTURES]
+    expected_ids = ['E{:04d}'.format(number) for number in range(1001, 1031)]
+    if ids != expected_ids or len(set(ids)) != 30:
+        raise ValueError('Fixtures must use each employee id from E1001 through E1030 once.')
+
+    by_kind = {
+        kind: [entry for entry in FIXTURES if entry['promote'] == kind]
+        for kind in (None, 'employee', 'intern')
+    }
+    if {kind: len(entries) for kind, entries in by_kind.items()} != {
+            None: 10, 'employee': 10, 'intern': 10}:
+        raise ValueError('Fixtures must contain exactly 10 onboarding, 10 employee and 10 intern records.')
+
+    promoted_employee_ids = set()
+    for entry in FIXTURES:
+        kind = entry['promote']
+        if kind is not None and entry['done'] != CHECKLIST_IDS:
+            raise ValueError('Every promoted fixture must complete all checklist items.')
+        if kind is None and len(entry['done']) == len(CHECKLIST_IDS):
+            raise ValueError('An onboarding fixture must remain short of completion.')
+        if kind == 'employee':
+            promoted_employee_ids.add(entry['profile']['employeeId'])
+        if kind == 'intern':
+            if entry['profile']['employmentType'] != 'Intern':
+                raise ValueError('Every promoted intern must use the Intern employment type.')
+            if entry.get('manager') not in promoted_employee_ids:
+                raise ValueError('Every intern manager must be a previously promoted employee.')
+
+
+validate_fixtures()
 
 
 class ApiError(Exception):
@@ -307,12 +329,13 @@ def stack_output(key):
 
 
 # Which table each source resolves through: (--flag value, env var, stack
-# output key, key attribute, id prefix). Two sources, not three - employees
-# and interns share EmployeeTable now, told apart by entityType, so a single
-# --wipe pass over 'employee' already clears both.
+# output key, key attribute, id prefix). Employees and interns share
+# EmployeeTable; attendance is independent and must be cleared when the same
+# deterministic employee IDs are reseeded.
 _TABLE_SOURCES = {
     'onboarding': ('table_onboarding', 'ONBOARDING_TABLE_NAME', 'OnboardingTableName', 'employeeKey', 'EMP#'),
     'employee': ('table_employee', 'EMPLOYEE_TABLE_NAME', 'EmployeeTableName', 'employeeKey', 'EMP#'),
+    'attendance': ('table_attendance', 'ATTENDANCE_TABLE_NAME', 'AttendanceTableName', 'employeeKey', 'EMP#'),
 }
 
 
@@ -362,38 +385,40 @@ def aws_json(args, payloads=None):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def scan_keys(table_name, key_attribute):
+def scan_keys(table_name, key_attributes):
     """
     Every key in the table, following pagination.
 
-    The partition key only - neither table has a sort key, and a
-    DeleteRequest carrying an SK the table does not have would fail the whole
-    batch.
+    Profile tables name only their partition key. Attendance also names its
+    date sort key; DynamoDB requires the complete key in every DeleteRequest.
 
     `key_attribute` is spelled out by the caller rather than imported from
     common.keys: this script drives the AWS CLI rather than the handler
     package, and is run from a checkout that need not have src/ importable.
     """
+    if isinstance(key_attributes, str):
+        key_attributes = (key_attributes,)
     keys = []
     start_key = None
 
     while True:
         args = ['dynamodb', 'scan', '--table-name', table_name,
-                '--region', REGION, '--projection-expression', key_attribute,
+                '--region', REGION, '--projection-expression', ', '.join(key_attributes),
                 '--output', 'json']
         payloads = {}
         if start_key:
             payloads['--exclusive-start-key'] = start_key
 
         result = aws_json(args, payloads)
-        keys.extend({key_attribute: i[key_attribute]} for i in result.get('Items', []))
+        keys.extend({name: item[name] for name in key_attributes}
+                    for item in result.get('Items', []))
 
         start_key = result.get('LastEvaluatedKey')
         if not start_key:
             return keys
 
 
-def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
+def wipe_table(table_name, key_attributes, id_attribute, id_prefix, noun, assume_yes):
     """
     Delete every item in one table. One item per record, so one delete each.
 
@@ -402,14 +427,13 @@ def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
     both of those are exactly what a reseed would otherwise silently duplicate.
     Scan reaches everything.
     """
-    keys = scan_keys(table_name, key_attribute)
+    keys = scan_keys(table_name, key_attributes)
 
     if not keys:
         print('Table {} is already empty. Nothing to wipe.'.format(table_name))
         return
 
-    matching = {k[key_attribute]['S'] for k in keys
-                if k[key_attribute]['S'].startswith(id_prefix)}
+    matching = [k for k in keys if k[id_attribute]['S'].startswith(id_prefix)]
     others = len(keys) - len(matching)
 
     print('\nAbout to hard-delete {} item(s) from {}:'.format(len(keys), table_name))
@@ -451,14 +475,18 @@ def wipe_table(table_name, key_attribute, id_prefix, noun, assume_yes):
 
 def wipe(table_names, assume_yes):
     """
-    Wipe both tables. Order does not matter - each is independent.
+    Wipe all three tables. Order does not matter - each is independent.
 
     One pass over 'employee' clears employees and interns together now - they
     share EmployeeTable, told apart only by entityType, which the AWS-CLI Scan
     this drives does not read at all.
     """
-    wipe_table(table_names['onboarding'], 'employeeKey', 'EMP#', 'onboarding record', assume_yes)
-    wipe_table(table_names['employee'], 'employeeKey', 'EMP#', 'employee/intern', assume_yes)
+    wipe_table(table_names['onboarding'], ('employeeKey',), 'employeeKey', 'EMP#',
+               'onboarding record', assume_yes)
+    wipe_table(table_names['employee'], ('employeeKey',), 'employeeKey', 'EMP#',
+               'employee/intern', assume_yes)
+    wipe_table(table_names['attendance'], ('employeeKey', 'attendanceDate'), 'employeeKey',
+               'EMP#', 'attendance record', assume_yes)
 
 
 def _promote(base_url, token, fixture, employee_id):
@@ -527,6 +555,21 @@ def seed(base_url, token):
     onboarding_total = call(base_url, 'GET', '/employees', token=token)['count']
     employee_total = call(base_url, 'GET', '/staff/employees', token=token)['count']
     intern_total = call(base_url, 'GET', '/staff/interns', token=token)['count']
+
+    expected_totals = {
+        'onboarding': sum(entry['promote'] is None for entry in FIXTURES),
+        'employee': sum(entry['promote'] == 'employee' for entry in FIXTURES),
+        'intern': sum(entry['promote'] == 'intern' for entry in FIXTURES),
+    }
+    actual_totals = {
+        'onboarding': onboarding_total,
+        'employee': employee_total,
+        'intern': intern_total,
+    }
+    if actual_totals != expected_totals:
+        raise ApiError('Seed totals do not match: expected {}, received {}.'.format(
+            expected_totals, actual_totals))
+
     print('\nDone.')
     print('  Onboarding table: {} record(s)'.format(onboarding_total))
     # Employee and intern here are two views of one table, not two tables -
@@ -538,12 +581,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--wipe', action='store_true',
-                        help='hard-delete every row in both tables first')
+                        help='hard-delete every row in all three tables first')
     parser.add_argument('--seed', action='store_true', help='create the fixture people')
     parser.add_argument('--yes', action='store_true', help='skip the wipe confirmation prompts')
     parser.add_argument('--base-url', help='API base URL, e.g. https://xxxx.execute-api.../dev')
     parser.add_argument('--table-onboarding', help='OnboardingTable name, for --wipe')
     parser.add_argument('--table-employee', help='EmployeeTable name (employees and interns both), for --wipe')
+    parser.add_argument('--table-attendance', help='AttendanceTable name, for --wipe')
     parser.add_argument('--username', help='officials username for --seed')
     parser.add_argument('--password', help='password for --username')
     args = parser.parse_args()
@@ -556,11 +600,12 @@ def main():
             explicit = {
                 'table_onboarding': args.table_onboarding,
                 'table_employee': args.table_employee,
+                'table_attendance': args.table_attendance,
             }
             table_names = {source: resolve_table_name(source, explicit)
                            for source in _TABLE_SOURCES}
-            print('Tables: onboarding={} employee={}'.format(
-                table_names['onboarding'], table_names['employee']))
+            print('Tables: onboarding={} employee={} attendance={}'.format(
+                table_names['onboarding'], table_names['employee'], table_names['attendance']))
             wipe(table_names, args.yes)
 
         if args.seed:

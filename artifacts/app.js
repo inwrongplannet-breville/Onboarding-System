@@ -5,8 +5,8 @@
   const tokenKey = "onboard-api-docs-token";
   const roleKey = "onboard-api-docs-role";
   const displayKey = "onboard-api-docs-display";
-  const tagOrder = ["Authentication", "Employees", "Documents", "Checklist", "Staff", "Lifecycle"];
-  const tagIcons = { Authentication: "A", Employees: "E", Documents: "D", Checklist: "C", Staff: "S", Lifecycle: "L" };
+  const tagOrder = ["Authentication", "Employees", "Documents", "Checklist", "Staff", "Lifecycle", "Attendance"];
+  const tagIcons = { Authentication: "A", Employees: "E", Documents: "D", Checklist: "C", Staff: "S", Lifecycle: "L", Attendance: "T" };
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -277,7 +277,7 @@
         request: visibleRequest,
         response: {
           error: error.message,
-          hint: "Serve this folder at http://localhost:8001. The deployed CORS policy must allow that exact origin."
+          hint: "Serve this directory at http://localhost:8001. The deployed CORS allowlist must contain that exact origin."
         }
       });
       timing.textContent = `Network error · ${elapsed} ms`;
@@ -308,7 +308,7 @@
       const state = $("#auth-state");
       state.className = "status-pill error";
       state.textContent = "Connection failed";
-      toast(error.message + (location.origin !== "http://localhost:8001" ? " · Use http://localhost:8001" : ""));
+      toast(error.message + (location.origin !== "http://localhost:8001" ? " · Use http://localhost:8001/" : ""));
     } finally {
       button.disabled = false;
       button.querySelector("span").textContent = "Connect to AWS";

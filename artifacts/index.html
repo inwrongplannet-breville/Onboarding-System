@@ -41,11 +41,11 @@
             <code id="base-url">https://4w9q4450be.execute-api.eu-north-1.amazonaws.com/dev</code>
           </div>
           <button class="copy-button" id="copy-base" type="button">Copy</button>
-          <span class="verified"><i></i> 21 / 21 routes live-checked</span>
+          <span class="verified"><i></i> 26 deployed routes</span>
         </div>
 
         <div class="stats" aria-label="API summary">
-          <div><strong>21</strong><span>Endpoints</span></div>
+          <div><strong>26</strong><span>Endpoints</span></div>
           <div><strong>6</strong><span>Resources</span></div>
           <div><strong>2</strong><span>Roles</span></div>
           <div><strong>8h</strong><span>Token life</span></div>
@@ -53,7 +53,7 @@
 
         <div class="dashboard-switch" role="group" aria-label="Documentation dashboard">
           <button class="dashboard-button active" data-dashboard="api" type="button"><span>API endpoints</span><small>Main dashboard</small></button>
-          <button class="dashboard-button" data-dashboard="functions" type="button"><span>Functions dashboard</span><small>27 flows →</small></button>
+          <button class="dashboard-button" data-dashboard="functions" type="button"><span>Functions dashboard</span><small>30 flows →</small></button>
         </div>
       </header>
 
@@ -104,7 +104,7 @@
         </div>
         <div class="callouts">
           <p><strong>Public exception.</strong> <code>POST /login</code> skips the authorizer and reads Secrets Manager only. It has no DynamoDB permission.</p>
-          <p><strong>Browser origin.</strong> AWS must allow <code>http://localhost:8001</code>. Serve this folder there; opening the HTML as a file will not pass CORS.</p>
+          <p><strong>Browser origin.</strong> AWS must allow <code>http://localhost:8001</code>. Serve this directory there; opening the HTML as a file will not pass CORS.</p>
         </div>
       </section>
 
@@ -168,7 +168,7 @@
             <span class="kicker">03 · REFERENCE</span>
             <h2>Endpoints</h2>
           </div>
-          <span id="result-count" class="result-count">21 routes</span>
+          <span id="result-count" class="result-count">26 routes</span>
         </div>
         <div id="endpoint-list"></div>
         <div id="empty-state" class="empty-state" hidden>No endpoints match that search.</div>
