@@ -735,20 +735,22 @@ window.App = window.App || {};
     roleInput.addEventListener('change', applyAttendanceFilters);
 
     table.addEventListener('change', function (event) {
-      var select = event.target.closest('[data-action="edit-attendance"]');
-      if (!select || !select.value) return;
+      var checkbox = event.target.closest('[data-action="edit-attendance"]');
+      if (!checkbox) return;
+      var previousValue = !checkbox.checked;
       clearError();
-      select.disabled = true;
+      checkbox.disabled = true;
 
       store.updateEmployeeAttendance(
-        select.getAttribute('data-employee-id'),
-        select.getAttribute('data-date'),
-        { status: select.value }
+        checkbox.getAttribute('data-employee-id'),
+        checkbox.getAttribute('data-date'),
+        { status: checkbox.checked ? 'present' : 'absent' }
       ).then(function () {
         notify('Attendance updated by HR.');
         renderAttendanceSheet();
       }, function (error) {
-        select.disabled = false;
+        checkbox.checked = previousValue;
+        checkbox.disabled = false;
         showError(error);
       });
     });
@@ -1017,28 +1019,25 @@ window.App = window.App || {};
   function wireOwnAttendance() {
     var form = document.getElementById('attendance-form');
     if (!form) return;
+    var checkbox = form.elements.present;
     var submitting = false;
 
-    form.addEventListener('submit', function (event) {
-      event.preventDefault();
+    checkbox.addEventListener('change', function () {
       if (submitting) return;
-      var button = form.querySelector('[type="submit"]');
-      var label = button.textContent;
+      var previousValue = !checkbox.checked;
       submitting = true;
-      button.disabled = true;
-      button.textContent = 'Saving…';
+      checkbox.disabled = true;
       clearError();
 
       store.markOwnAttendance({
-        status: form.elements.status.value,
-        note: form.elements.note.value.trim()
+        status: checkbox.checked ? 'present' : 'absent'
       }).then(function () {
         notify('Today\'s attendance was saved.');
         renderProfile();
       }, function (error) {
         submitting = false;
-        button.disabled = false;
-        button.textContent = label;
+        checkbox.checked = previousValue;
+        checkbox.disabled = false;
         showError(error);
       });
     });

@@ -15,15 +15,13 @@ Parameters:
     Default: dev
     AllowedValues: [dev, prod]
     Description: Deployment stage. Names the API Gateway stage.
-  AllowedOrigin:
-    Type: String
-    Default: http://localhost:8001
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:8000,http://localhost:8001
     Description: >
-      The one browser origin allowed to call this API. Was '*', which let any
-      page on the internet POST to /login and read the token back - a free
-      password-guessing proxy through other people's browsers. Set this to
-      wherever the UI is actually served from; '*' still works if you need it and
-      accept that.
+      Browser origins allowed to call this API. Keep this list explicit: '*'
+      would let any page POST to /login and read the token response, turning
+      other people's browsers into a password-guessing proxy.
 
 Globals:
   Function:
@@ -43,7 +41,7 @@ Globals:
         EMPLOYEE_TABLE_NAME: !Ref EmployeeTable
         ATTENDANCE_TABLE_NAME: !Ref AttendanceTable
         # Read by common/responses.py for the CORS header on every response.
-        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        ALLOWED_ORIGINS: !Join [',', !Ref AllowedOrigins]
         # The `aud` claim tokens are minted for and checked against, so a dev
         # token is refused by a prod stack even if the two ever share a key.
         STAGE: !Ref Stage
@@ -269,12 +267,10 @@ Resources:
           # presigned link, which is a navigation rather than a cross-origin
           # fetch, so CORS never enters into it.
           #
-          # Note `!Ref` and not the `!Sub "'${...}'"` form used on OnboardingApi
-          # below. The quoted form is an API Gateway requirement; here it would
-          # put literal apostrophes into the allowed origin and fail every
-          # upload for a reason nothing in the browser console spells out.
-          - AllowedOrigins:
-              - !Ref AllowedOrigin
+          # S3 accepts the parameter's native list directly. API Gateway's
+          # generated preflight below uses a wildcard, while actual Lambda
+          # responses reflect only a matching member of this list.
+          - AllowedOrigins: !Ref AllowedOrigins
             AllowedMethods:
               - POST
               - GET
@@ -328,7 +324,10 @@ Resources:
       # Phase 2 is curl-only, but the browser needs these the moment Phase 3
       # points the UI here. Cheaper to set now than to debug later.
       Cors:
-        AllowOrigin: !Sub "'${AllowedOrigin}'"
+        # API Gateway's generated OPTIONS response cannot dynamically reflect
+        # one member of an allowlist. A wildcard is safe on the preflight only:
+        # successful Lambda responses still return an exact approved origin.
+        AllowOrigin: "'*'"
         # Authorization joins Content-Type: every route except POST /login is
         # reached with a bearer token, and a preflight that does not list the
         # header fails the request before the real one is sent.
@@ -387,18 +386,18 @@ Resources:
           StatusCode: 401
           ResponseParameters:
             Headers:
-              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Origin: "'*'"
               Access-Control-Allow-Headers: "'Content-Type,Authorization'"
         ACCESS_DENIED:
           StatusCode: 403
           ResponseParameters:
             Headers:
-              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Origin: "'*'"
               Access-Control-Allow-Headers: "'Content-Type,Authorization'"
         DEFAULT_4XX:
           ResponseParameters:
             Headers:
-              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Origin: "'*'"
               Access-Control-Allow-Headers: "'Content-Type,Authorization'"
         # 5XX for the same reason, and it is not hypothetical. When Lambda
         # throttles - this account's concurrency ceiling is 10 - API Gateway
@@ -409,7 +408,7 @@ Resources:
         DEFAULT_5XX:
           ResponseParameters:
             Headers:
-              Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+              Access-Control-Allow-Origin: "'*'"
               Access-Control-Allow-Headers: "'Content-Type,Authorization'"
 
   # ----------------------------------------------------------------- functions

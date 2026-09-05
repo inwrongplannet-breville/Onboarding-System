@@ -12,23 +12,33 @@ import decimal
 import json
 import os
 
-# Which site may call this API from a browser.
+# Which sites may call this API from a browser.
 #
 # It was '*'. The audit's point was not CSRF - tokens live in sessionStorage and
 # are attached by hand, so nothing is sent automatically - it was that '*' lets
 # any page on the internet POST to /login and read the response, which turns
 # every visitor to a malicious site into a source of password guesses against an
-# endpoint with no rate limit. Naming the one origin that serves this UI closes
-# that; the throttle in template.yaml covers what is left.
+# endpoint with no rate limit. Naming the small set of local origins that serve
+# approved clients closes that; the throttle in template.yaml covers what is
+# left.
 #
 # Falls back to '*' only if the variable is missing, which in a deployed stack it
-# is not - template.yaml sets it on all nine functions. The fallback exists so
+# is not - template.yaml sets it on every function. The fallback exists so
 # that `sam local` and the tests do not have to care.
-ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN') or '*'
+ALLOWED_ORIGINS = tuple(
+    origin.strip()
+    for origin in (os.environ.get('ALLOWED_ORIGINS') or '*').split(',')
+    if origin.strip()
+)
 
-_HEADERS = {
+# A direct Lambda/unit-test invocation has no browser Origin header. Keep those
+# responses deterministic by using the first configured origin. api_handler()
+# calls configure_request_origin() for every real request, so a browser receives
+# its own origin only when that exact value is on the allowlist.
+_response_origin = '*' if '*' in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
+
+_BASE_HEADERS = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
     # Authorization, because every call except POST /login now carries a bearer
     # token. A preflight that does not list it fails the request before the
     # browser ever sends the real one, and the error it reports is a CORS error
@@ -36,6 +46,29 @@ _HEADERS = {
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
 }
+
+
+def configure_request_origin(event):
+    """Select the CORS response origin for one API Gateway invocation."""
+    global _response_origin
+
+    if '*' in ALLOWED_ORIGINS:
+        _response_origin = '*'
+        return
+
+    headers = event.get('headers') or {} if isinstance(event, dict) else {}
+    requested = next(
+        (value for name, value in headers.items() if name.lower() == 'origin'),
+        None,
+    )
+    _response_origin = requested if requested in ALLOWED_ORIGINS else None
+
+
+def _headers():
+    headers = dict(_BASE_HEADERS)
+    if _response_origin:
+        headers['Access-Control-Allow-Origin'] = _response_origin
+    return headers
 
 
 class _DecimalEncoder(json.JSONEncoder):
@@ -48,7 +81,7 @@ class _DecimalEncoder(json.JSONEncoder):
 
 
 def _response(status, body=None, extra_headers=None):
-    headers = dict(_HEADERS)
+    headers = _headers()
     if extra_headers:
         headers.update(extra_headers)
 
@@ -64,7 +97,7 @@ def ok(body):
 
 def csv_download(text, filename):
     """A UTF-8 CSV attachment for an authenticated browser download."""
-    headers = dict(_HEADERS)
+    headers = _headers()
     headers.update({
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': 'attachment; filename="' + filename + '"',

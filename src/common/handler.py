@@ -47,6 +47,10 @@ def api_handler(func):
     """
     @functools.wraps(func)
     def wrapper(event, context):
+        # Lambda proxy integrations own their successful-response CORS headers.
+        # Select the caller's origin once per invocation before any success or
+        # error response is built; unlisted origins deliberately receive none.
+        responses.configure_request_origin(event)
         try:
             return func(event, context)
         except BadRequest as error:

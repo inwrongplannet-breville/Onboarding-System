@@ -246,7 +246,7 @@ def test_a_login_never_returns_the_signing_key(handlers):
 
 # ------------------------------------------ finding: CORS was pinned to '*'
 
-def test_the_allowed_origin_is_configurable(monkeypatch):
+def test_the_allowed_origins_are_configurable(monkeypatch):
     """
     '*' let any page on the internet POST to /login and read the token back,
     which is a password-guessing proxy through other people's browsers. The
@@ -254,14 +254,25 @@ def test_the_allowed_origin_is_configurable(monkeypatch):
     """
     import importlib
 
-    monkeypatch.setenv('ALLOWED_ORIGIN', 'https://onboarding.example.com')
+    monkeypatch.setenv(
+        'ALLOWED_ORIGINS',
+        'http://localhost:8000,http://localhost:8001',
+    )
     responses = importlib.reload(importlib.import_module('common.responses'))
     try:
+        responses.configure_request_origin({
+            'headers': {'Origin': 'http://localhost:8001'},
+        })
         assert responses.ok({})['headers']['Access-Control-Allow-Origin'] == \
-            'https://onboarding.example.com'
+            'http://localhost:8001'
+
+        responses.configure_request_origin({
+            'headers': {'origin': 'https://untrusted.example.com'},
+        })
+        assert 'Access-Control-Allow-Origin' not in responses.ok({})['headers']
     finally:
         # Restore the module for every test that runs after this one.
-        monkeypatch.setenv('ALLOWED_ORIGIN', '*')
+        monkeypatch.setenv('ALLOWED_ORIGINS', '*')
         importlib.reload(responses)
 
 

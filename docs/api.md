@@ -117,8 +117,9 @@ minted against `dev` is refused by `prod` even if the two stacks were deployed w
 stage-wide ceiling rather than per-IP: it caps the bill and the guessing rate, it does not identify
 a caller.
 
-Only the origin in the stack's `AllowedOrigin` parameter may call this API from a browser
-(`http://localhost:8001` by default).
+Only origins in the stack's `AllowedOrigins` parameter may call this API from a browser. The
+default local allowlist is `http://localhost:8000,http://localhost:8001`; successful Lambda
+responses reflect the matching origin and omit the header for every other origin.
 
 The distinction is load-bearing for the frontend: `js/store.js` signs the user out on a 401 and
 passes a 403 through to the caller. Don't collapse them.

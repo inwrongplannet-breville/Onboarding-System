@@ -9,13 +9,16 @@ Made by Abhishek.
 
 ---
 
-## Run the UI
+## Run the main application
+
+From the repository root, start one static server:
 
 ```bash
-py -m http.server 8001
+py -m http.server 8000
 ```
 
-Then open **http://localhost:8001**.
+Open **http://localhost:8000/** for the actual employee/HR application. This is the application
+with the sign-in screen, HR dashboard, employee profiles, and attendance sheet.
 
 No install and no build step — but **don't double-click `index.html`**. A `file://` page has an
 opaque origin and sends `Origin: null` on every request, which browsers treat inconsistently; a
@@ -71,7 +74,7 @@ value in `js/config.js` — update that one line if you deploy your own.
 
 **Tearing down needs one step first.** CloudFormation cannot delete an S3 bucket that still holds
 objects — the stack lands in `DELETE_FAILED` and `sam delete` reports failure — and `sam delete`
-empties only its own artifacts bucket, never yours:
+empties only its own packaging bucket, never yours:
 
 ```bash
 BUCKET=$(aws cloudformation describe-stacks --stack-name onboarding-system-dev \
@@ -142,11 +145,11 @@ and its first read is a 404, which the UI renders as "we cannot find your record
 > password reads any record, one number at a time. Real per-employee credentials are a Cognito user
 > pool, which is [design.md](docs/design.md)'s note and not a small edit.
 
-**Which origin may call the API.** `AllowedOrigin` defaults to `http://localhost:8001`, matching
-`py -m http.server 8001`. Serving the UI from anywhere else means passing it:
+**Which origins may call the API.** `AllowedOrigins` is an explicit allowlist. Its main-application
+entry is `http://localhost:8000`, matching `py -m http.server 8000`. To deploy a different origin:
 
 ```bash
-sam deploy --parameter-overrides AllowedOrigin=https://onboarding.internal.example.com
+sam deploy --parameter-overrides AllowedOrigins=https://onboarding.internal.example.com
 ```
 
 It used to be `*`. That let any page on the internet POST to `/login` and read the token back,

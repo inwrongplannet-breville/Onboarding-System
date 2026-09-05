@@ -99,10 +99,11 @@ between them.
 
 Attendance adds a daily declaration card to `#/me` and a dedicated `#/attendance` HR screen. The
 employee card loads alongside the profile and documents and is editable only from 08:30 to 18:00
-Asia/Kolkata. The HR screen renders a semantic monthly table with sticky identity columns,
-status/date cells that officials can correct directly, name/department/role filters, totals, and an
-authenticated CSV download. The frontend displays the report returned by the API; absence and
-totals are calculated once in the backend rather than independently in JavaScript.
+Asia/Kolkata. Attendance is binary in the UI: checked means present and unchecked means absent,
+with each change saved immediately. The HR screen renders the same checkbox per employee/date in a
+semantic monthly table with sticky identity columns, name/department/role filters, and an
+authenticated CSV download. The frontend displays the report returned by the API; absence is
+calculated once in the backend rather than independently in JavaScript.
 
 ---
 
@@ -580,7 +581,7 @@ things around the edges, all now fixed:
 |---|---|
 | `caller_role` defaulted to a role that can read everything | Returns `None`; both readers call `require_role` |
 | Signing key was a plaintext Lambda env var, readable via `lambda:GetFunctionConfiguration` | Generated into Secrets Manager, fetched per cold start, `GetSecretValue` granted to two functions |
-| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; origin is now the `AllowedOrigin` parameter |
+| No rate limit on `/login`, amplified by `Allow-Origin: *` | Gateway throttle on `POST /login`; successful responses use the explicit `AllowedOrigins` allowlist |
 | No revocation path | Rotating the secret invalidates everything within the 60s authorizer cache |
 | `api_arn()` returned `Resource: '*'` on an unparseable ARN | Raises; the request is refused |
 | No `iss`/`aud`, so a dev token worked against prod on a shared key | Both claims minted and checked |

@@ -581,13 +581,6 @@ window.App = window.App || {};
       '</div>';
   }
 
-  var ATTENDANCE_STATUSES = [
-    { value: 'present', label: 'Present', short: 'P' },
-    { value: 'work_from_home', label: 'Work from home', short: 'WFH' },
-    { value: 'leave', label: 'Leave', short: 'L' },
-    { value: 'absent', label: 'Absent', short: 'A' }
-  ];
-
   function uniqueAttendanceValues(values) {
     var seen = {};
     return values.filter(function (value) {
@@ -595,22 +588,6 @@ window.App = window.App || {};
       seen[value] = true;
       return true;
     });
-  }
-
-  function attendanceLabel(status) {
-    var match = ATTENDANCE_STATUSES.filter(function (entry) {
-      return entry.value === status;
-    })[0];
-    return match ? match.label : 'Upcoming';
-  }
-
-  function attendanceOptions(selected, includeBlank) {
-    var html = includeBlank ? '<option value="">Upcoming</option>' : '';
-    return html + ATTENDANCE_STATUSES.map(function (entry) {
-      return '<option value="' + entry.value + '"' +
-        (entry.value === selected ? ' selected' : '') + '>' +
-        entry.label + '</option>';
-    }).join('');
   }
 
   function ownAttendanceSection(payload, frozen) {
@@ -626,67 +603,28 @@ window.App = window.App || {};
     var today = payload.window.today;
     var todayEntry = employee.days.filter(function (day) { return day.date === today; })[0] || {};
     var canEdit = payload.window.isOpen && !frozen;
-    var selected = todayEntry.status || 'present';
-    var history = employee.days.filter(function (day) {
-      return day.status !== null && day.date <= today;
-    }).reverse();
+    var isPresent = todayEntry.status === 'present';
 
     var form = canEdit
       ? '<form id="attendance-form" class="attendance-form">' +
-          '<div class="field">' +
-            '<label for="attendance-status">Today&rsquo;s status</label>' +
-            '<select id="attendance-status" name="status">' +
-              attendanceOptions(selected, false) +
-            '</select>' +
-          '</div>' +
-          '<div class="field attendance-note-field">' +
-            '<label for="attendance-note">Note <span class="optional">optional</span></label>' +
-            '<input id="attendance-note" name="note" maxlength="300" value="' +
-              escapeHtml(todayEntry.note || '') + '">' +
-          '</div>' +
-          '<button class="btn btn-primary" type="submit">' +
-            (todayEntry.stored ? 'Update attendance' : 'Mark attendance') +
-          '</button>' +
+          '<label class="attendance-checkbox-label" for="attendance-present">' +
+            '<input class="attendance-checkbox" id="attendance-present" name="present" ' +
+              'type="checkbox"' + (isPresent ? ' checked' : '') + '>' +
+            '<span>Present today</span>' +
+          '</label>' +
         '</form>'
       : '<p class="attendance-locked">' + (frozen
           ? 'This archived record cannot mark attendance.'
           : 'Attendance changes are available daily from 8:30 AM to 6:00 PM Asia/Kolkata.') +
         '</p>';
 
-    var historyRows = history.length
-      ? history.map(function (day) {
-          return '<tr>' +
-            '<th scope="row">' + escapeHtml(formatDate(day.date)) + '</th>' +
-            '<td><span class="attendance-status status-' + escapeHtml(day.status) + '">' +
-              escapeHtml(attendanceLabel(day.status)) + '</span></td>' +
-            '<td>' + escapeHtml(day.note || '-') + '</td>' +
-          '</tr>';
-        }).join('')
-      : '<tr><td colspan="3" class="table-empty">No attendance dates yet.</td></tr>';
-
     return '' +
       '<section class="attendance-panel" aria-labelledby="attendance-heading">' +
         '<div class="attendance-heading-row">' +
           '<div><h2 id="attendance-heading">Today&rsquo;s attendance</h2>' +
-            '<p>Mark once and update any time between 8:30 AM and 6:00 PM.</p></div>' +
-          '<span class="attendance-status status-' + escapeHtml(todayEntry.status || 'upcoming') + '">' +
-            escapeHtml(attendanceLabel(todayEntry.status)) + '</span>' +
+            '<p>Check for present or leave unchecked for absent.</p></div>' +
         '</div>' +
         form +
-        '<div class="attendance-totals" aria-label="Monthly attendance totals">' +
-          '<span><strong>' + employee.totals.present + '</strong> Present</span>' +
-          '<span><strong>' + employee.totals.work_from_home + '</strong> WFH</span>' +
-          '<span><strong>' + employee.totals.leave + '</strong> Leave</span>' +
-          '<span><strong>' + employee.totals.absent + '</strong> Absent</span>' +
-        '</div>' +
-        '<details class="attendance-history">' +
-          '<summary>View ' + escapeHtml(payload.month) + ' history</summary>' +
-          '<div class="attendance-history-scroll"><table>' +
-            '<thead><tr><th scope="col">Date</th><th scope="col">Status</th>' +
-              '<th scope="col">Note</th></tr></thead>' +
-            '<tbody>' + historyRows + '</tbody>' +
-          '</table></div>' +
-        '</details>' +
       '</section>';
   }
 
@@ -762,17 +700,17 @@ window.App = window.App || {};
 
       var rows = sheet.employees.map(function (employee) {
         var dayCells = employee.days.map(function (day) {
-          var status = day.status || '';
-          return '<td class="attendance-cell status-' + escapeHtml(status || 'upcoming') + '">' +
+          var isPresent = day.status === 'present';
+          return '<td class="attendance-cell">' +
             '<label class="sr-only" for="attendance-' + escapeHtml(employee.employeeId) + '-' +
               escapeHtml(day.date) + '">' + escapeHtml(employee.employeeName + ', ' + day.date) +
             '</label>' +
-            '<select id="attendance-' + escapeHtml(employee.employeeId) + '-' +
+            '<input class="attendance-checkbox" type="checkbox" id="attendance-' +
+              escapeHtml(employee.employeeId) + '-' +
               escapeHtml(day.date) + '" data-action="edit-attendance" data-employee-id="' +
               escapeHtml(employee.employeeId) + '" data-date="' + escapeHtml(day.date) +
-              '" aria-label="' + escapeHtml(employee.employeeName + ', ' + day.date) + '">' +
-              attendanceOptions(status, !status) +
-            '</select>' +
+              '" aria-label="' + escapeHtml(employee.employeeName + ', ' + day.date) + '"' +
+              (isPresent ? ' checked' : '') + '>' +
           '</td>';
         }).join('');
 
@@ -785,10 +723,6 @@ window.App = window.App || {};
           '<td class="attendance-role">' + escapeHtml(employee.employeeRole || '-') + '</td>' +
           '<td class="attendance-department">' + escapeHtml(employee.department || '-') + '</td>' +
           dayCells +
-          '<td class="attendance-total">' + employee.totals.present + '</td>' +
-          '<td class="attendance-total">' + employee.totals.work_from_home + '</td>' +
-          '<td class="attendance-total">' + employee.totals.leave + '</td>' +
-          '<td class="attendance-total">' + employee.totals.absent + '</td>' +
         '</tr>';
       }).join('');
 
@@ -810,21 +744,17 @@ window.App = window.App || {};
           '<div class="field"><label for="attendance-role-filter">Role</label>' +
             '<select id="attendance-role-filter">' + filterOptions(roles) + '</select></div>' +
         '</div>' +
-        '<p class="attendance-legend"><span class="status-present">P Present</span>' +
-          '<span class="status-work_from_home">WFH Work from home</span>' +
-          '<span class="status-leave">L Leave</span><span class="status-absent">A Absent</span></p>' +
+        '<p class="attendance-help">Checked = present. Unchecked = absent.</p>' +
         '<div class="attendance-table-wrap" tabindex="0" aria-label="Scrollable attendance sheet">' +
           '<table class="attendance-table">' +
             '<caption>Attendance sheet for ' + escapeHtml(sheet.month) +
-              '. Select any status cell to make an HR correction.</caption>' +
+              '. Check or uncheck any day to make an HR correction.</caption>' +
             '<thead><tr>' +
               '<th scope="col" class="attendance-id">ID</th>' +
               '<th scope="col" class="attendance-name">Employee</th>' +
               '<th scope="col" class="attendance-role">Role</th>' +
               '<th scope="col" class="attendance-department">Department</th>' +
               dayHeaders +
-              '<th scope="col">P</th><th scope="col">WFH</th>' +
-              '<th scope="col">L</th><th scope="col">A</th>' +
             '</tr></thead>' +
             '<tbody>' + (rows || '<tr><td colspan="40" class="table-empty">No employees found.</td></tr>') +
             '</tbody>' +

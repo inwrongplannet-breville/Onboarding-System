@@ -71,8 +71,8 @@ os.environ.setdefault('STAGE', 'dev')
 
 # Read by common/responses.py for the CORS header. '*' keeps the existing
 # assertions honest about what the tests are checking, which is presence rather
-# than policy - the deployed value comes from the AllowedOrigin parameter.
-os.environ.setdefault('ALLOWED_ORIGIN', '*')
+# than policy - the deployed value comes from the AllowedOrigins parameter.
+os.environ.setdefault('ALLOWED_ORIGINS', '*')
 
 HANDLER_MODULES = (
     'handlers.create_employee',
